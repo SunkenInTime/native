@@ -91,6 +91,10 @@ pub const RunOptions = struct {
             info.main_window.titlebar = manifestShellStartupTitlebar();
             info.main_window.resizable = manifestShellStartupResizable();
             info.main_window.show = manifestShellStartupShowMode();
+            info.main_window.transparent = manifestShellStartupBool("transparent", false);
+            info.main_window.layer = manifestShellStartupLayer();
+            info.main_window.click_through = manifestShellStartupBool("click_through", false);
+            info.main_window.no_activate = manifestShellStartupBool("no_activate", false);
             // Min-size floors ride the create call like the titlebar:
             // the scene re-applies size/title later, but the window's
             // enforced floor is host state from the first frame on.
@@ -200,6 +204,28 @@ fn manifestShellStartupResizable() bool {
     if (comptime !@hasField(@TypeOf(shell), "windows")) return true;
     if (comptime shell.windows.len == 0) return true;
     return windowBool(shell.windows[0], "resizable", true);
+}
+
+fn manifestShellStartupBool(comptime field: []const u8, comptime fallback: bool) bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    return windowBool(shell.windows[0], field, fallback);
+}
+
+fn manifestShellStartupLayer() native_sdk.WindowLayer {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .normal;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return .normal;
+    if (comptime shell.windows.len == 0) return .normal;
+    const window = shell.windows[0];
+    if (comptime !@hasField(@TypeOf(window), "layer")) return .normal;
+    const value = window.layer;
+    if (comptime std.mem.eql(u8, value, "normal")) return .normal;
+    if (comptime std.mem.eql(u8, value, "bottom")) return .bottom;
+    if (comptime std.mem.eql(u8, value, "topmost")) return .topmost;
+    @compileError("unknown app.zon window layer");
 }
 
 /// The startup window's content min-size floor for scene-first apps:

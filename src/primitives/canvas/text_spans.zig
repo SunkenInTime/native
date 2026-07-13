@@ -41,7 +41,7 @@ const TextAlign = @import("text_layout_types.zig").TextAlign;
 /// `max_text_span_lines_per_paragraph` lines. Overflow truncates
 /// deterministically instead of failing.
 pub const max_text_spans_per_paragraph: usize = 32;
-pub const max_text_span_runs_per_paragraph: usize = 128;
+pub const max_text_span_runs_per_paragraph: usize = 32;
 pub const max_text_span_lines_per_paragraph: usize = 64;
 
 pub const TextSpanWeight = enum {
@@ -462,7 +462,7 @@ fn layoutTextSpansUncached(spans: []const TextSpan, options: TextSpanLayoutOptio
 /// degrades to a 100% miss rate when the steadily revisited set
 /// outgrows the slots, so capacity errs generously (256 x ~4 KiB of
 /// threadlocal storage).
-pub const span_wrap_cache_capacity: usize = 256;
+pub const span_wrap_cache_capacity: usize = 64;
 
 const SpanWrapKey = struct {
     fingerprint: u64 = 0,

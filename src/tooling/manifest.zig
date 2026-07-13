@@ -102,6 +102,7 @@ pub const Metadata = struct {
             if (window.title) |title| allocator.free(title);
             allocator.free(window.restore_policy);
             allocator.free(window.titlebar);
+            allocator.free(window.layer);
             for (window.views) |view| {
                 allocator.free(view.label);
                 allocator.free(view.kind);
@@ -228,6 +229,10 @@ pub const ShellWindowMetadata = struct {
     restore_state: bool = true,
     restore_policy: []const u8 = "clamp_to_visible_screen",
     titlebar: []const u8 = "standard",
+    transparent: bool = false,
+    layer: []const u8 = "normal",
+    click_through: bool = false,
+    no_activate: bool = false,
     min_width: f32 = 0,
     min_height: f32 = 0,
     views: []const ShellViewMetadata = &.{},
@@ -628,6 +633,10 @@ fn convertRawShellWindows(allocator: std.mem.Allocator, windows: []const RawShel
             .restore_state = window.restore_state,
             .restore_policy = try allocator.dupe(u8, window.restore_policy),
             .titlebar = try allocator.dupe(u8, window.titlebar),
+            .transparent = window.transparent,
+            .layer = try allocator.dupe(u8, window.layer),
+            .click_through = window.click_through,
+            .no_activate = window.no_activate,
             .min_width = window.min_width,
             .min_height = window.min_height,
             .views = try convertRawShellViews(allocator, window.views),
@@ -848,9 +857,10 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
     }
     for (shell.windows, 0..) |window, index| {
         // Parse the fallible scalar fields BEFORE allocating the views
-        // slice, so a bad policy/titlebar string cannot leak it.
+        // slice, so a bad policy/titlebar/layer string cannot leak it.
         const restore_policy = try parseRestorePolicy(window.restore_policy);
         const titlebar = try parseTitlebarStyle(window.titlebar);
+        const layer = try parseWindowLayer(window.layer);
         const min_width = try parseWindowMinSize(window.min_width);
         const min_height = try parseWindowMinSize(window.min_height);
         const views = try parseShellViews(allocator, window.views);
@@ -865,6 +875,10 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
             .restore_state = window.restore_state,
             .restore_policy = restore_policy,
             .titlebar = titlebar,
+            .transparent = window.transparent,
+            .layer = layer,
+            .click_through = window.click_through,
+            .no_activate = window.no_activate,
             .min_width = min_width,
             .min_height = min_height,
             .views = views,
@@ -1246,6 +1260,13 @@ fn parseTitlebarStyle(value: []const u8) !app_manifest.WindowTitlebarStyle {
     if (std.mem.eql(u8, value, "hidden_inset_tall")) return .hidden_inset_tall;
     if (std.mem.eql(u8, value, "chromeless")) return .chromeless;
     return error.InvalidWindowTitlebarStyle;
+}
+
+fn parseWindowLayer(value: []const u8) !app_manifest.WindowLayer {
+    if (std.mem.eql(u8, value, "normal")) return .normal;
+    if (std.mem.eql(u8, value, "bottom")) return .bottom;
+    if (std.mem.eql(u8, value, "topmost")) return .topmost;
+    return error.InvalidWindowLayer;
 }
 
 /// Same validation posture as the titlebar style: a min-size floor the
@@ -1742,7 +1763,7 @@ test "manifest metadata parser reads shell windows and views" {
     });
 }
 
-test "manifest parser reads window titlebar styles" {
+test "manifest parser reads window chrome policies" {
     const metadata = try parseText(std.testing.allocator,
         \\.{
         \\  .id = "com.example.app",
@@ -1755,7 +1776,7 @@ test "manifest parser reads window titlebar styles" {
         \\  },
         \\  .shell = .{
         \\    .windows = .{
-        \\      .{ .label = "scene", .titlebar = "hidden_inset_tall", .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
+        \\      .{ .label = "scene", .titlebar = "chromeless", .transparent = true, .layer = "bottom", .click_through = true, .no_activate = true, .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
         \\    },
         \\  },
         \\}
@@ -1766,7 +1787,11 @@ test "manifest parser reads window titlebar styles" {
     try std.testing.expect(!metadata.windows[0].resizable);
     try std.testing.expectEqualStrings("hidden_inset_tall", metadata.windows[1].titlebar);
     try std.testing.expectEqualStrings("chromeless", metadata.windows[2].titlebar);
-    try std.testing.expectEqualStrings("hidden_inset_tall", metadata.shell.windows[0].titlebar);
+    try std.testing.expectEqualStrings("chromeless", metadata.shell.windows[0].titlebar);
+    try std.testing.expect(metadata.shell.windows[0].transparent);
+    try std.testing.expectEqualStrings("bottom", metadata.shell.windows[0].layer);
+    try std.testing.expect(metadata.shell.windows[0].click_through);
+    try std.testing.expect(metadata.shell.windows[0].no_activate);
 
     const windows = try convertWindows(std.testing.allocator, metadata.windows);
     defer std.testing.allocator.free(windows);
@@ -1777,7 +1802,11 @@ test "manifest parser reads window titlebar styles" {
 
     const shell = try parseShell(std.testing.allocator, metadata.shell);
     defer deinitParsedShell(std.testing.allocator, shell);
-    try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset_tall, shell.windows[0].titlebar);
+    try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.chromeless, shell.windows[0].titlebar);
+    try std.testing.expect(shell.windows[0].transparent);
+    try std.testing.expectEqual(app_manifest.WindowLayer.bottom, shell.windows[0].layer);
+    try std.testing.expect(shell.windows[0].click_through);
+    try std.testing.expect(shell.windows[0].no_activate);
 }
 
 test "manifest parser reads window min sizes" {

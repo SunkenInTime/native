@@ -187,7 +187,7 @@ pub const WebViewSource = struct {
 
 pub const WindowId = u64;
 pub const ViewId = u64;
-pub const max_windows: usize = 16;
+pub const max_windows: usize = 1;
 pub const max_window_label_bytes: usize = 64;
 pub const max_window_title_bytes: usize = 128;
 /// Budget for a window's webview source payload — for `.html` sources this
@@ -197,7 +197,7 @@ pub const max_window_source_bytes: usize = 65536;
 /// Budget for the path-shaped source fields (asset root, entry, origin),
 /// which never need the full document budget.
 pub const max_window_source_path_bytes: usize = 4096;
-pub const max_webviews: usize = 16;
+pub const max_webviews: usize = 1;
 pub const max_webview_label_bytes: usize = 64;
 pub const max_webview_url_bytes: usize = 4096;
 pub const max_external_url_bytes: usize = 4096;
@@ -221,7 +221,7 @@ pub const max_drop_paths_bytes: usize = 8192;
 pub const max_drop_paths: usize = max_drop_paths_bytes / 2 + 1;
 pub const max_window_event_name_bytes: usize = 64;
 pub const max_window_event_detail_bytes: usize = 8192;
-pub const max_views: usize = 32;
+pub const max_views: usize = 1;
 pub const max_view_label_bytes: usize = 64;
 pub const max_view_role_bytes: usize = 64;
 pub const max_view_accessibility_label_bytes: usize = 256;
@@ -249,7 +249,7 @@ pub const max_gpu_surface_packet_json_bytes: usize = 128 * 1024;
 /// 512 KiB leaves headroom for gradients, paths, and format growth. The
 /// buffer is a single static per UiApp instance, so the cost is fixed
 /// address space, not per-frame allocation.
-pub const max_gpu_surface_packet_binary_bytes: usize = 512 * 1024;
+pub const max_gpu_surface_packet_binary_bytes: usize = 64 * 1024;
 /// Bound for the fallback-detail command-kind name recorded when a
 /// packet present falls back because a command is not representable
 /// (fits every `CanvasCommand` tag name).
@@ -257,11 +257,11 @@ pub const max_gpu_present_fallback_detail_bytes: usize = 32;
 /// Per-image bound for the binary gpu-surface image upload side-channel;
 /// matches the runtime registry's per-slot bound
 /// (`canvas_limits.max_registered_canvas_image_pixel_bytes`).
-pub const max_gpu_surface_image_pixel_bytes: usize = 1024 * 1024;
+pub const max_gpu_surface_image_pixel_bytes: usize = 256 * 1024;
 /// Per-font bound for the gpu-surface font registration side-channel;
 /// matches the runtime registry's per-slot bound
 /// (`canvas_limits.max_registered_canvas_font_bytes`).
-pub const max_gpu_surface_font_bytes: usize = 2 * 1024 * 1024;
+pub const max_gpu_surface_font_bytes: usize = 512 * 1024;
 
 pub const ShortcutModifiers = struct {
     primary: bool = false,
@@ -415,6 +415,12 @@ pub const WindowTitlebarStyle = enum {
     chromeless,
 };
 
+pub const WindowLayer = enum {
+    normal,
+    bottom,
+    topmost,
+};
+
 /// The host-reported form factor (size class) of the surface an app
 /// runs on, riding the window-chrome channel beside the inset geometry.
 /// `.unknown` is the honest default everywhere the host has not said —
@@ -515,6 +521,10 @@ pub const WindowOptions = struct {
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     titlebar: WindowTitlebarStyle = .standard,
+    transparent: bool = false,
+    layer: WindowLayer = .normal,
+    click_through: bool = false,
+    no_activate: bool = false,
     show: WindowShowMode = .immediate,
     /// Content min-size floor the WINDOW enforces (macOS
     /// `contentMinSize`): the user cannot resize below it, so declared
@@ -572,6 +582,10 @@ pub const WindowCreateOptions = struct {
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     titlebar: WindowTitlebarStyle = .standard,
+    transparent: bool = false,
+    layer: WindowLayer = .normal,
+    click_through: bool = false,
+    no_activate: bool = false,
     show: WindowShowMode = .immediate,
     /// Window-enforced content min-size floor (see
     /// `WindowOptions.min_width`/`min_height`); 0 = no floor.
@@ -589,6 +603,10 @@ pub const WindowCreateOptions = struct {
             .restore_state = self.restore_state,
             .restore_policy = self.restore_policy,
             .titlebar = self.titlebar,
+            .transparent = self.transparent,
+            .layer = self.layer,
+            .click_through = self.click_through,
+            .no_activate = self.no_activate,
             .show = self.show,
             .min_width = self.min_width,
             .min_height = self.min_height,
@@ -756,7 +774,7 @@ pub const GpuSurfaceOptions = struct {
         return (self.backend == .metal or self.backend == .software) and
             self.pixel_format == .bgra8_unorm and
             self.present_mode == .timer and
-            self.alpha_mode == .@"opaque" and
+            (self.alpha_mode == .@"opaque" or self.alpha_mode == .premultiplied) and
             self.color_space == .srgb and
             self.vsync;
     }

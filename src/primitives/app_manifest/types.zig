@@ -310,6 +310,15 @@ pub const WindowTitlebarStyle = enum {
     chromeless,
 };
 
+/// Desktop stacking policy for a shell window. `.bottom` is the
+/// desktop-widget shape: the Windows host keeps the window below normal
+/// app windows. Other hosts accept the declaration and currently ignore it.
+pub const WindowLayer = enum {
+    normal,
+    bottom,
+    topmost,
+};
+
 pub const Window = struct {
     label: []const u8 = "main",
     title: ?[]const u8 = null,
@@ -451,6 +460,14 @@ pub const ShellWindow = struct {
     /// create, and the scene's first window here should declare the
     /// SAME style so the two never disagree.
     titlebar: WindowTitlebarStyle = .standard,
+    /// Per-pixel window alpha. On Windows this selects a layered popup
+    /// presented from a premultiplied gpu_surface.
+    transparent: bool = false,
+    layer: WindowLayer = .normal,
+    /// Let pointer input fall through the layered window to the desktop.
+    click_through: bool = false,
+    /// Keep showing without taking foreground activation.
+    no_activate: bool = false,
     /// Content min-size floor the window itself enforces (macOS
     /// `contentMinSize`): the resize stops at the floor instead of the
     /// layout clamping/clipping panes below it. 0 = no floor. Like

@@ -70,6 +70,7 @@ const WindowsEvent = extern struct {
     /// window was minimized (heartbeat pacing; nothing painted) — its
     /// timestamp is pacing policy, never a latency endpoint.
     occluded: c_int,
+    alpha_mode: c_int,
     input_kind: c_int,
     button: c_int,
     delta_x: f64,
@@ -108,7 +109,7 @@ const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
 
-extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64) ?*WindowsHost;
+extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, min_width: f64, min_height: f64) ?*WindowsHost;
 extern fn native_sdk_windows_destroy(host: *WindowsHost) void;
 extern fn native_sdk_windows_run(host: *WindowsHost, callback: WindowsCallback, context: ?*anyopaque) void;
 extern fn native_sdk_windows_stop(host: *WindowsHost) void;
@@ -125,7 +126,7 @@ extern fn native_sdk_windows_emit_window_event(host: *WindowsHost, window_id: u6
 extern fn native_sdk_windows_set_security_policy(host: *WindowsHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
 extern fn native_sdk_windows_set_menus(host: *WindowsHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
 extern fn native_sdk_windows_set_shortcuts(host: *WindowsHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
-extern fn native_sdk_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64) c_int;
+extern fn native_sdk_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, min_width: f64, min_height: f64) c_int;
 extern fn native_sdk_windows_start_window_drag(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_set_window_drag_regions(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, rects: [*]const f64, exclusions: [*]const c_int, count: usize) c_int;
 extern fn native_sdk_windows_window_chrome(host: *WindowsHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
@@ -134,7 +135,7 @@ extern fn native_sdk_windows_cancel_timer(host: *WindowsHost, timer_id: u64) voi
 extern fn native_sdk_windows_focus_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_close_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_minimize_window(host: *WindowsHost, window_id: u64) c_int;
-extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
+extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize, alpha_mode: c_int) c_int;
 extern fn native_sdk_windows_update_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_accessibility_label: c_int, accessibility_label: [*]const u8, accessibility_label_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_windows_set_view_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_windows_set_view_visible(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, visible: c_int) c_int;
@@ -238,7 +239,7 @@ pub const WindowsPlatform = struct {
         const window_options = app_info.resolvedMainWindow();
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
-        const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height)) orelse return error.CreateFailed;
+        const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), if (window_options.transparent) 1 else 0, windowLayerInt(window_options.layer), if (window_options.click_through) 1 else 0, if (window_options.no_activate) 1 else 0, minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height)) orelse return error.CreateFailed;
         return .{
             .host = host,
             .web_engine = web_engine,
@@ -486,7 +487,10 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .backend = .software,
             .pixel_format = .bgra8_unorm,
             .present_mode = .timer,
-            .alpha_mode = .@"opaque",
+            .alpha_mode = switch (event.alpha_mode) {
+                2 => .premultiplied,
+                else => .@"opaque",
+            },
             .color_space = .srgb,
             .vsync = true,
             .status = .ready,
@@ -688,6 +692,14 @@ fn titlebarStyleInt(style: platform_mod.WindowTitlebarStyle) c_int {
     };
 }
 
+fn windowLayerInt(layer: platform_mod.WindowLayer) c_int {
+    return switch (layer) {
+        .normal => 0,
+        .bottom => 1,
+        .topmost => 2,
+    };
+}
+
 /// Zero/negative/non-finite floors are the "no floor" sentinel (the
 /// host leaves that axis at its natural minimum).
 fn minSizeFloor(value: f32) f64 {
@@ -698,7 +710,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (native_sdk_windows_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), minSizeFloor(options.min_width), minSizeFloor(options.min_height)) == 0) return error.CreateFailed;
+    if (native_sdk_windows_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), if (options.transparent) 1 else 0, windowLayerInt(options.layer), if (options.click_through) 1 else 0, if (options.no_activate) 1 else 0, minSizeFloor(options.min_width), minSizeFloor(options.min_height)) == 0) return error.CreateFailed;
     return .{
         .id = options.id,
         .label = options.label,
@@ -822,7 +834,16 @@ fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!
         options.text.len,
         options.command.ptr,
         options.command.len,
+        gpuAlphaModeInt(options.gpu_surface.alpha_mode),
     ) == 0) return error.CreateFailed;
+}
+
+fn gpuAlphaModeInt(mode: platform_mod.GpuSurfaceAlphaMode) c_int {
+    return switch (mode) {
+        .none => 0,
+        .@"opaque" => 1,
+        .premultiplied => 2,
+    };
 }
 
 fn updateView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, patch: platform_mod.ViewPatch) anyerror!void {

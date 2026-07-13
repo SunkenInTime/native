@@ -59,7 +59,7 @@ const TextMeasureProvider = text_metrics.TextMeasureProvider;
 /// Per-entry advance capacity in text bytes. Sized for real paragraph
 /// runs (chat messages, markdown blocks); longer runs use the oversize
 /// scratch slot below.
-pub const max_cached_advance_run_bytes: usize = 2048;
+pub const max_cached_advance_run_bytes: usize = 256;
 
 /// Retained entries. 256 slots of 2048 f32 advances is 2 MiB of
 /// threadlocal storage — the same order as the runtime's other
@@ -70,13 +70,13 @@ pub const max_cached_advance_run_bytes: usize = 2048;
 /// degrades to a 100% miss rate the moment the steadily revisited set
 /// outgrows the slots — measured live as a plan-stage regression before
 /// the peek/fetch split.
-pub const advance_cache_capacity: usize = 256;
+pub const advance_cache_capacity: usize = 64;
 
 /// Oversize scratch: one slot covering runs up to the per-view text
 /// budget (`canvas_limits.max_canvas_text_bytes_per_view`). A run this
 /// long still gets ONE batched call per fetch; it just is not retained
 /// across other fetches.
-pub const max_batched_advance_run_bytes: usize = 32768;
+pub const max_batched_advance_run_bytes: usize = 4096;
 
 /// Process-wide invalidation stamp for everything keyed on measured
 /// text: cached advances here and retained wrap results downstream.
