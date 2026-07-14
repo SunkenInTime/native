@@ -148,6 +148,18 @@ pub fn build(b: *std.Build) void {
     widget_profile_test_mod.addImport("native_sdk", desktop_mod);
     widget_profile_test_mod.addImport("native_sdk_options", native_sdk_options);
     const widget_profile_tests = testArtifact(b, widget_profile_test_mod);
+    const windows_dpi_geometry_tests: ?*std.Build.Step.Compile = if (target.result.os.tag == .windows) tests: {
+        const dpi_geometry_test_mod = module(b, target, optimize, "src/platform/windows/dpi_geometry_test_runner.zig");
+        const artifact = testArtifact(b, dpi_geometry_test_mod);
+        artifact.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/windows/dpi_geometry_tests.cpp"),
+            .flags = &.{ "-std=c++17" },
+        });
+        artifact.root_module.addIncludePath(b.path("src/platform/windows"));
+        artifact.root_module.linkSystemLibrary("c++", .{});
+        artifact.root_module.linkSystemLibrary("c", .{});
+        break :tests artifact;
+    } else null;
 
     // The embeddable static library's root module carries only the C ABI
     // exports (fixed WebView shell host); user-app canvas libraries are
@@ -405,6 +417,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     test_step.dependOn(&b.addRunArtifact(widget_profile_tests).step);
+    if (windows_dpi_geometry_tests) |tests| {
+        test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
     for (desktop_test_shards) |shard_tests| {
         test_step.dependOn(&b.addRunArtifact(shard_tests).step);
     }
@@ -601,7 +616,7 @@ pub fn build(b: *std.Build) void {
         // first-present exemptions ride one prompt-frame flag.
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "kGpuOccludedHeartbeatNs = 1000000000ull" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "gpuSurfaceOccludedPacingActive" },
-        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "IsIconic(root)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "IsIconic(owner)" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "gpu_prompt_frame_pending" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "native_sdk_windows_note_gpu_surface_input" },
         // The runtime side of the measurement honesty: occluded logical
@@ -752,8 +767,8 @@ pub fn build(b: *std.Build) void {
         // beside nativeViewCoord carry the numeric proof, compiled on
         // every Windows host build).
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "static void nativeViewLogicalOrigin(Host *host, const NativeView &view, double *logical_x, double *logical_y)" },
-        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "frame.right = nativeViewCoord((logical_x + view.width) * scale);" },
-        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "static_assert(nativeViewCoord(10.4 * 1.5) + nativeViewCoord(10.4 * 1.5) == 32 && nativeViewCoord((10.4 + 10.4) * 1.5) == 31," },
+        .{ .path = "src/platform/windows/dpi_geometry.h", .pattern = "weaverLogicalRectToPhysicalEdges" },
+        .{ .path = "src/platform/windows/dpi_geometry_tests.cpp", .pattern = "const double nested_x = 10.4 + 10.4;" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "MoveWindow(view.hwnd, frame.left, frame.top, frame.right - frame.left, frame.bottom - frame.top, TRUE);" },
         // The embedded manifest's DPI declarations: the ordered
         // dpiAwareness list degrades PerMonitorV2 to PerMonitor, and the
@@ -799,6 +814,9 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-json", "Run JSON primitive tests", json_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
     addTestStep(b, "test-widget-profile", "Verify stock and widget capacity profiles", widget_profile_tests);
+    if (windows_dpi_geometry_tests) |tests| {
+        addTestStep(b, "test-windows-dpi-geometry", "Run Windows DPI geometry and renderer protocol tests", tests);
+    }
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
     for (desktop_test_shard_specs, desktop_test_shards) |spec, shard_tests| {
         addTestStep(b, b.fmt("test-desktop-{s}", .{spec.name}), spec.description, shard_tests);

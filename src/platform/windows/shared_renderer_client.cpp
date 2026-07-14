@@ -2,12 +2,14 @@
 #include "renderer_protocol.h"
 
 #include <dcomp.h>
+#include <d2d1.h>
 #include <wrl/client.h>
 
 #include <string>
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
+#include <cstdio>
 
 using Microsoft::WRL::ComPtr;
 
@@ -25,7 +27,85 @@ struct NativeSdkSharedRendererClient {
     uint8_t *retained_pixels = nullptr;
     size_t retained_capacity = 0;
     std::wstring retained_name;
+    uint64_t visual_geometry_generation = 0;
+    uint32_t visual_width_px = 0;
+    uint32_t visual_height_px = 0;
+    std::string last_failure;
 };
+
+static void appendDpiLine(const char *line, size_t length) {
+    wchar_t path[32768] = {};
+    const DWORD path_length = GetEnvironmentVariableW(L"WEAVER_DPI_LOG", path,
+        ARRAYSIZE(path));
+    if (!line || length == 0 || path_length == 0 ||
+        path_length >= ARRAYSIZE(path)) return;
+    HANDLE file = CreateFileW(path, FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(file, line, static_cast<DWORD>(length), &written, nullptr);
+    CloseHandle(file);
+}
+
+static void logSharedFailure(NativeSdkSharedRendererClient *client,
+    const char *stage, double logical_width = 0, double logical_height = 0,
+    double scale = 0, const NativeSdkSharedRendererGeometry *geometry = nullptr) {
+    if (!client || !stage || client->last_failure == stage) return;
+    client->last_failure = stage;
+    char line[512] = {};
+    const int length = snprintf(line, sizeof(line),
+        "%llu shared-visual-failure pid=%lu child_hwnd=0x%llx stage=%s "
+        "logical_surface_dip=%.6fx%.6f scale=%.6f texture_px=%ux%u "
+        "destination_edges_px=(%ld,%ld,%ld,%ld) generation=%llu error=%lu\r\n",
+        (unsigned long long)GetTickCount64(),
+        (unsigned long)GetCurrentProcessId(),
+        (unsigned long long)(uintptr_t)client->window, stage, logical_width,
+        logical_height, scale,
+        geometry ? geometry->source_texture_width_px : 0,
+        geometry ? geometry->source_texture_height_px : 0,
+        geometry ? geometry->destination_left_px : 0,
+        geometry ? geometry->destination_top_px : 0,
+        geometry ? geometry->destination_right_px : 0,
+        geometry ? geometry->destination_bottom_px : 0,
+        (unsigned long long)(geometry ? geometry->generation : 0),
+        (unsigned long)GetLastError());
+    if (length > 0) appendDpiLine(line, static_cast<size_t>(length));
+}
+
+static void logDpiGeometry(const NativeSdkSharedRendererClient *client,
+    const NativeSdkSharedRendererGeometry &geometry, double logical_width,
+    double logical_height, double scale, const char *action) {
+    if (!client) return;
+    // gpu_surface HWNDs are direct children of the owning Weaver window.
+    // Desktop-layer windows themselves become WorkerW children, so GA_ROOT
+    // would report WorkerW rather than the actual geometry owner.
+    HWND root = GetParent(client->window);
+    if (!root) root = GetAncestor(client->window, GA_ROOT);
+    RECT root_client = {}, child_client = {};
+    if (root) GetClientRect(root, &root_client);
+    GetClientRect(client->window, &child_client);
+    char line[768] = {};
+    const int length = snprintf(line, sizeof(line),
+        "%llu shared-visual pid=%lu root_hwnd=0x%llx child_hwnd=0x%llx "
+        "root_client_px=%ldx%ld child_client_px=%ldx%ld dpi=%u scale=%.6f "
+        "logical_surface_dip=%.6fx%.6f destination_dip=(%.6f,%.6f %.6fx%.6f) "
+        "destination_edges_px=(%ld,%ld,%ld,%ld) texture_px=%ux%u generation=%llu action=%s\r\n",
+        (unsigned long long)GetTickCount64(), (unsigned long)GetCurrentProcessId(),
+        (unsigned long long)(uintptr_t)root,
+        (unsigned long long)(uintptr_t)client->window,
+        root_client.right - root_client.left, root_client.bottom - root_client.top,
+        child_client.right - child_client.left, child_client.bottom - child_client.top,
+        (unsigned int)std::round(scale * 96.0), scale, logical_width,
+        logical_height, geometry.destination_x_dip, geometry.destination_y_dip,
+        geometry.destination_width_dip, geometry.destination_height_dip,
+        geometry.destination_left_px, geometry.destination_top_px,
+        geometry.destination_right_px, geometry.destination_bottom_px,
+        geometry.source_texture_width_px, geometry.source_texture_height_px,
+        (unsigned long long)geometry.generation, action);
+    if (length <= 0) return;
+    appendDpiLine(line, static_cast<size_t>(length));
+}
 
 static void disconnectRenderer(NativeSdkSharedRendererClient *client) {
     if (!client) return;
@@ -46,6 +126,9 @@ static void disconnectRenderer(NativeSdkSharedRendererClient *client) {
     client->composition.Reset();
     if (client->surface_handle) CloseHandle(client->surface_handle);
     client->surface_handle = nullptr;
+    client->visual_geometry_generation = 0;
+    client->visual_width_px = 0;
+    client->visual_height_px = 0;
 }
 
 static bool writeExact(HANDLE file, const void *bytes, size_t length) {
@@ -72,15 +155,51 @@ static bool readExact(HANDLE file, void *bytes, size_t length) {
 
 static bool connectRenderer(NativeSdkSharedRendererClient *client) {
     if (client->pipe != INVALID_HANDLE_VALUE) return true;
-    if (!WaitNamedPipeW(client->pipe_name.c_str(), 100)) return false;
+    // weaverd launches the shared renderer immediately before the first GPU
+    // widget. Creating the process and publishing its first pipe instance is
+    // asynchronous, so the first surface establishment gets one bounded
+    // lifecycle wait. Connected frames never take this path, and later
+    // recovery attempts use the same bound without introducing frame churn.
+    const uint64_t deadline = GetTickCount64() + 2000;
+    bool pipe_ready = false;
+    do {
+        pipe_ready = WaitNamedPipeW(client->pipe_name.c_str(), 100) != FALSE;
+        if (pipe_ready) break;
+        if (GetTickCount64() < deadline) Sleep(10);
+    } while (GetTickCount64() < deadline);
+    if (!pipe_ready) {
+        logSharedFailure(client, "wait-pipe");
+        return false;
+    }
     client->pipe = CreateFileW(client->pipe_name.c_str(), GENERIC_READ | GENERIC_WRITE,
         0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (client->pipe == INVALID_HANDLE_VALUE) return false;
+    if (client->pipe == INVALID_HANDLE_VALUE) {
+        logSharedFailure(client, "open-pipe");
+        return false;
+    }
     DWORD mode = PIPE_READMODE_BYTE;
     if (!SetNamedPipeHandleState(client->pipe, &mode, nullptr, nullptr)) {
         disconnectRenderer(client);
+        logSharedFailure(client, "pipe-mode");
         return false;
     }
+    WeaverRendererHello hello = {};
+    hello.magic = kWeaverRendererMagic;
+    hello.version = kWeaverRendererVersion;
+    hello.struct_size = sizeof(hello);
+    hello.widget_pid = GetCurrentProcessId();
+    WeaverRendererHelloReply reply = {};
+    if (!writeExact(client->pipe, &hello, sizeof(hello)) ||
+        !readExact(client->pipe, &reply, sizeof(reply)) ||
+        reply.magic != kWeaverRendererMagic ||
+        reply.version != kWeaverRendererVersion ||
+        reply.struct_size != sizeof(reply) ||
+        reply.status != kWeaverRendererStatusOk) {
+        disconnectRenderer(client);
+        logSharedFailure(client, "protocol-hello");
+        return false;
+    }
+    client->last_failure.clear();
     return true;
 }
 
@@ -137,10 +256,13 @@ static void premultiplyRetained(NativeSdkSharedRendererClient *client, size_t wi
         int left = 0, top = 0, right = (int)width, bottom = (int)height;
         if (rect_count > 0) {
             const float *rect = rects + rect_index * 4;
-            left = std::max(0, std::min((int)width, (int)floor(rect[0] * scale)));
-            top = std::max(0, std::min((int)height, (int)floor(rect[1] * scale)));
-            right = std::max(left, std::min((int)width, (int)ceil((rect[0] + rect[2]) * scale)));
-            bottom = std::max(top, std::min((int)height, (int)ceil((rect[1] + rect[3]) * scale)));
+            const WeaverPhysicalBoxU box = weaverLogicalDirtyRectToPhysicalBox(
+                { rect[0], rect[1], rect[2], rect[3] }, scale,
+                static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+            left = static_cast<int>(box.left);
+            top = static_cast<int>(box.top);
+            right = static_cast<int>(box.right);
+            bottom = static_cast<int>(box.bottom);
         }
         for (int y = top; y < bottom; ++y) for (int x = left; x < right; ++x) {
             const size_t offset = ((size_t)y * width + (size_t)x) * 4;
@@ -155,26 +277,62 @@ static void premultiplyRetained(NativeSdkSharedRendererClient *client, size_t wi
 
 bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
     double logical_width, double logical_height, double scale,
+    const NativeSdkSharedRendererGeometry *geometry,
     uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a,
     const uint8_t *packet, size_t packet_len, uint64_t retained_generation,
     size_t retained_width, size_t retained_height, const float *retained_dirty_rects,
     size_t retained_dirty_rect_count, const uint8_t *retained_rgba8,
     size_t retained_rgba8_len) {
-    if (!client || !packet || packet_len == 0 || packet_len > kWeaverRendererMaxPacket ||
-        !connectRenderer(client)) return false;
+    if (!client) return false;
+    if (!geometry) {
+        logSharedFailure(client, "missing-geometry", logical_width,
+            logical_height, scale);
+        return false;
+    }
+    if (!packet || packet_len == 0 || packet_len > kWeaverRendererMaxPacket) {
+        logSharedFailure(client, "invalid-packet", logical_width,
+            logical_height, scale, geometry);
+        return false;
+    }
+    if (!weaverValidDeviceScale(scale) ||
+        !weaverValidLogicalRect({ 0, 0, logical_width, logical_height }) ||
+        geometry->generation == 0 ||
+        !weaverValidSurfaceExtent(geometry->source_texture_width_px,
+            geometry->source_texture_height_px)) {
+        logSharedFailure(client, "invalid-geometry", logical_width,
+            logical_height, scale, geometry);
+        return false;
+    }
+    if (!connectRenderer(client)) return false;
     WeaverRendererFrame frame = {};
     frame.magic = kWeaverRendererMagic;
     frame.version = kWeaverRendererVersion;
+    frame.struct_size = sizeof(frame);
     frame.widget_pid = GetCurrentProcessId();
     frame.packet_len = (uint32_t)packet_len;
-    frame.logical_width = logical_width;
-    frame.logical_height = logical_height;
-    frame.scale = scale;
+    frame.logical_surface_width_dip = logical_width;
+    frame.logical_surface_height_dip = logical_height;
+    frame.device_scale = scale;
+    frame.destination_x_dip = geometry->destination_x_dip;
+    frame.destination_y_dip = geometry->destination_y_dip;
+    frame.destination_width_dip = geometry->destination_width_dip;
+    frame.destination_height_dip = geometry->destination_height_dip;
+    frame.destination_left_px = geometry->destination_left_px;
+    frame.destination_top_px = geometry->destination_top_px;
+    frame.destination_right_px = geometry->destination_right_px;
+    frame.destination_bottom_px = geometry->destination_bottom_px;
+    frame.source_texture_width_px = geometry->source_texture_width_px;
+    frame.source_texture_height_px = geometry->source_texture_height_px;
+    frame.geometry_generation = geometry->generation;
     frame.clear_r = clear_r;
     frame.clear_g = clear_g;
     frame.clear_b = clear_b;
     frame.clear_a = clear_a;
     if (retained_generation != 0) {
+        if (retained_width != geometry->source_texture_width_px ||
+            retained_height != geometry->source_texture_height_px ||
+            retained_width > SIZE_MAX / retained_height ||
+            retained_width * retained_height > SIZE_MAX / 4) return false;
         const size_t expected = retained_width * retained_height * 4;
         if (!retained_rgba8 || retained_rgba8_len != expected ||
             retained_width > UINT32_MAX || retained_height > UINT32_MAX ||
@@ -198,7 +356,8 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
         !writeExact(client->pipe, packet, packet_len) ||
         !readExact(client->pipe, &reply, sizeof(reply)) ||
         reply.magic != kWeaverRendererMagic ||
-        reply.version != kWeaverRendererVersion || reply.status != 1) {
+        reply.version != kWeaverRendererVersion ||
+        reply.status != kWeaverRendererStatusOk) {
         disconnectRenderer(client);
         return false;
     }
@@ -216,8 +375,16 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
             return false;
         }
         ComPtr<IUnknown> surface;
+        const D2D_MATRIX_3X2_F identity = { 1, 0, 0, 1, 0, 0 };
+        const D2D_RECT_F clip = { 0, 0,
+            static_cast<float>(geometry->source_texture_width_px),
+            static_cast<float>(geometry->source_texture_height_px) };
         if (FAILED(client->composition->CreateSurfaceFromHandle(replacement, &surface)) ||
             FAILED(client->visual->SetContent(surface.Get())) ||
+            FAILED(client->visual->SetOffsetX(0.0f)) ||
+            FAILED(client->visual->SetOffsetY(0.0f)) ||
+            FAILED(client->visual->SetTransform(identity)) ||
+            FAILED(client->visual->SetClip(clip)) ||
             FAILED(client->target->SetRoot(client->visual.Get())) ||
             FAILED(client->composition->Commit())) {
             CloseHandle(replacement);
@@ -227,8 +394,40 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
         client->surface = surface;
         if (client->surface_handle) CloseHandle(client->surface_handle);
         client->surface_handle = replacement;
+        const char *action = client->visual_geometry_generation == 0 ? "created-rebound" : "resized-rebound";
+        client->visual_geometry_generation = geometry->generation;
+        client->visual_width_px = geometry->source_texture_width_px;
+        client->visual_height_px = geometry->source_texture_height_px;
+        logDpiGeometry(client, *geometry, logical_width, logical_height, scale, action);
+    } else if (geometry->generation != client->visual_geometry_generation) {
+        if (!client->composition || !client->visual) {
+            disconnectRenderer(client);
+            return false;
+        }
+        const D2D_MATRIX_3X2_F identity = { 1, 0, 0, 1, 0, 0 };
+        const D2D_RECT_F clip = { 0, 0,
+            static_cast<float>(geometry->source_texture_width_px),
+            static_cast<float>(geometry->source_texture_height_px) };
+        if (FAILED(client->visual->SetOffsetX(0.0f)) ||
+            FAILED(client->visual->SetOffsetY(0.0f)) ||
+            FAILED(client->visual->SetTransform(identity)) ||
+            FAILED(client->visual->SetClip(clip)) ||
+            FAILED(client->composition->Commit())) {
+            disconnectRenderer(client);
+            return false;
+        }
+        const bool extent_changed = weaverSurfaceExtentChanged(
+            client->visual_width_px, client->visual_height_px,
+            geometry->source_texture_width_px,
+            geometry->source_texture_height_px);
+        client->visual_geometry_generation = geometry->generation;
+        client->visual_width_px = geometry->source_texture_width_px;
+        client->visual_height_px = geometry->source_texture_height_px;
+        logDpiGeometry(client, *geometry, logical_width, logical_height, scale,
+            extent_changed ? "resized-reused" : "moved-reused");
     }
     client->connected = true;
+    client->last_failure.clear();
     return true;
 }
 

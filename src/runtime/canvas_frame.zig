@@ -322,6 +322,9 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (frame_options.surface_size.isEmpty()) {
                 frame_options.surface_size = if (view.gpu_size.isEmpty()) view.frame.size() else view.gpu_size;
             }
+            if (frame_options.physical_size.width == 0 or frame_options.physical_size.height == 0) {
+                frame_options.physical_size = view.gpu_physical_size;
+            }
             if (frame_options.image_resources.len == 0) frame_options.image_resources = self.registeredCanvasImages();
             if (frame_options.font_resources.len == 0) frame_options.font_resources = self.registeredCanvasFonts();
             if (canvasFrameBudgetIsUnset(frame_options.budget)) frame_options.budget = view.canvas_frame_budget;
@@ -991,6 +994,9 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (frame_options.surface_size.isEmpty()) {
                 frame_options.surface_size = if (self.views[index].gpu_size.isEmpty()) self.views[index].frame.size() else self.views[index].gpu_size;
             }
+            if (frame_options.physical_size.width == 0 or frame_options.physical_size.height == 0) {
+                frame_options.physical_size = self.views[index].gpu_physical_size;
+            }
             // Runtime-registered images feed every view unless the caller
             // supplied its own resource set: the CPU pixel paths
             // (presentation, screenshots) and the GPU packet plan both
@@ -1235,6 +1241,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 .timestamp_ns = frame_options.timestamp_ns,
                 .surface_size = frame_options.surface_size,
                 .scale = frame_options.scale,
+                .physical_size = frame_options.physical_size,
                 .full_repaint = full_repaint,
                 .display_list = display_list,
                 .render_plan = render_plan,

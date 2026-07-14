@@ -1,0 +1,2 @@
+fix: **Complete Windows DPI geometry**: Windows views, software surfaces, retained layers, shared-renderer textures, DirectComposition visuals, and pointer input now share one DIP-to-physical-edge contract across per-monitor DPI transitions.
+- **Explicit shared presentation geometry**: renderer protocol v3 carries exact physical source extents, destination frames, and geometry generations, preventing high-DPI transparent strips and stale retained surfaces.

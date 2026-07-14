@@ -10,6 +10,8 @@
 #include <uxtheme.h>
 #include <dwmapi.h>
 #include "shared_renderer_client.h"
+#include "dpi_geometry.h"
+#include "dpi_diagnostic.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -101,6 +103,46 @@ typedef struct {
 #endif
 
 namespace {
+
+static std::atomic<UINT> g_dpi_diagnostic_override{ 0 };
+static std::once_flag g_dpi_diagnostic_init;
+
+static bool dpiDiagnosticEnabled() {
+    wchar_t enabled[8] = {};
+    const DWORD length = GetEnvironmentVariableW(L"WEAVER_DPI_DIAGNOSTIC",
+        enabled, ARRAYSIZE(enabled));
+    return length == 1 && enabled[0] == L'1';
+}
+
+static UINT dpiDiagnosticOverride() {
+    std::call_once(g_dpi_diagnostic_init, [] {
+        if (!dpiDiagnosticEnabled()) return;
+        wchar_t value[16] = {};
+        const DWORD length = GetEnvironmentVariableW(L"WEAVER_DPI_TEST_DPI",
+            value, ARRAYSIZE(value));
+        if (length == 0 || length >= ARRAYSIZE(value)) return;
+        wchar_t *end = nullptr;
+        const unsigned long parsed = wcstoul(value, &end, 10);
+        if (end != value && *end == L'\0' && parsed >= 48 && parsed <= 768)
+            g_dpi_diagnostic_override.store(static_cast<UINT>(parsed));
+    });
+    return g_dpi_diagnostic_override.load();
+}
+
+static void appendDpiDiagnosticLine(const char *line, size_t length) {
+    wchar_t path[32768] = {};
+    const DWORD path_length = GetEnvironmentVariableW(L"WEAVER_DPI_LOG", path,
+        ARRAYSIZE(path));
+    if (!line || length == 0 || path_length == 0 ||
+        path_length >= ARRAYSIZE(path)) return;
+    HANDLE file = CreateFileW(path, FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(file, line, static_cast<DWORD>(length), &written, nullptr);
+    CloseHandle(file);
+}
 
 enum EventKind {
     kStart = 0,
@@ -196,6 +238,9 @@ struct WindowsEvent {
     double width;
     double height;
     double scale;
+    uint32_t physical_width;
+    uint32_t physical_height;
+    uint64_t geometry_generation;
     double x;
     double y;
     int open;
@@ -345,6 +390,9 @@ struct Window {
     void *layered_bits = nullptr;
     int layered_width = 0;
     int layered_height = 0;
+    WeaverPhysicalRectI layered_gpu_frame = {};
+    bool layered_gpu_frame_valid = false;
+    bool dpi_transition = false;
 };
 
 static BOOL CALLBACK findWallpaperWorkerWindow(HWND top, LPARAM output_param) {
@@ -475,6 +523,12 @@ struct NativeView {
     double gpu_emitted_width = 0;
     double gpu_emitted_height = 0;
     double gpu_emitted_scale = 0;
+    uint64_t gpu_emitted_geometry_generation = 0;
+    WeaverLogicalRectD gpu_geometry_logical = {};
+    WeaverPhysicalRectI gpu_geometry_physical = {};
+    double gpu_geometry_scale = 0;
+    uint64_t gpu_geometry_generation = 0;
+    bool gpu_geometry_valid = false;
     int gpu_nonblank = 0;
     uint32_t gpu_sample_color = 0;
     int gpu_pointer_down = 0;
@@ -1236,8 +1290,6 @@ static UINT dpiForWindow(HWND hwnd);
 
 static void emit(Host *host, const Window &window, EventKind kind) {
     if (!host || !host->callback) return;
-    RECT rect = {};
-    if (window.hwnd) GetClientRect(window.hwnd, &rect);
     WindowsEvent event = {};
     event.kind = kind;
     event.window_id = window.id;
@@ -1246,8 +1298,8 @@ static void emit(Host *host, const Window &window, EventKind kind) {
      * device scale. In a DPI-unaware process the reported DPI is 96 and
      * the two units coincide, so this stays the identity there. */
     const double scale = window.hwnd ? (double)dpiForWindow(window.hwnd) / 96.0 : 1.0;
-    event.width = rect.right > rect.left ? (double)(rect.right - rect.left) / scale : window.width;
-    event.height = rect.bottom > rect.top ? (double)(rect.bottom - rect.top) / scale : window.height;
+    event.width = window.width;
+    event.height = window.height;
     event.scale = scale;
     event.x = window.x;
     event.y = window.y;
@@ -1528,14 +1580,6 @@ static std::string nativeViewKey(uint64_t window_id, const std::string &label) {
     return std::to_string(window_id) + ":" + label;
 }
 
-static int webViewCoord(double value) {
-    return value > 0 ? (int)(value + 0.5) : 0;
-}
-
-static int webViewExtent(double value) {
-    return value > 1 ? (int)(value + 0.5) : 1;
-}
-
 /* Explicit webview frames arrive from the runtime in LOGICAL points and
  * scale to physical pixels at the window's DPI, exactly like native view
  * frames. The auto-filling main webview is the one exception: its frame
@@ -1547,11 +1591,15 @@ static double webViewFrameScale(const ChildWebView &webview) {
 }
 
 static bool validChildWebViewFrame(double x, double y, double width, double height) {
-    return x >= 0 && y >= 0 && width > 0 && height > 0;
+    return weaverValidLogicalRect({ x, y, width, height }, false);
 }
 
-static constexpr int nativeViewCoord(double value) {
-    return value > 0 ? (int)(value + 0.5) : 0;
+static Window *mutableWindowForHwnd(Host *host, HWND hwnd) {
+    if (!host) return nullptr;
+    for (auto &entry : host->windows) {
+        if (entry.second.hwnd == hwnd) return &entry.second;
+    }
+    return nullptr;
 }
 
 /* Compile-time proof of the accumulate-then-round frame policy (see
@@ -1563,10 +1611,6 @@ static constexpr int nativeViewCoord(double value) {
  * accumulated logical coordinates: origin 10.2 with width 10.2 at scale
  * 1.5 ends at round(15.3) + round(15.3) = 30, but the true right edge is
  * round(20.4 * 1.5) = 31. */
-static_assert(nativeViewCoord(10.4 * 1.5) + nativeViewCoord(10.4 * 1.5) == 32 && nativeViewCoord((10.4 + 10.4) * 1.5) == 31,
-    "per-level rounding must drift so the accumulate-then-round policy is load-bearing");
-static_assert(nativeViewCoord(10.2 * 1.5) + nativeViewCoord(10.2 * 1.5) == 30 && nativeViewCoord((10.2 + 10.2) * 1.5) == 31,
-    "independently rounded extents must open seams that edge-derived extents close");
 
 /* A scaled window CONTENT extent rounded to whole physical pixels — the
  * same round-once policy as native view frames (see
@@ -1575,15 +1619,13 @@ static_assert(nativeViewCoord(10.2 * 1.5) + nativeViewCoord(10.2 * 1.5) == 30 &&
  * is 907.5 physical, which must become 908, not 907. Every conversion of
  * a scaled content size to a physical extent goes through here so the
  * standard-chrome and hidden-titlebar paths cannot drift apart. */
-static constexpr LONG physicalContentExtent(double value) {
-    return (LONG)(value + 0.5);
+static LONG physicalContentExtent(double physical_extent) {
+    return static_cast<LONG>(weaverRoundPhysicalEdge(physical_extent, 1));
 }
 
-static_assert(physicalContentExtent(726 * 1.25) == 908 && (LONG)(726 * 1.25) == 907,
-    "truncation must land a pixel short of the round so the rounding is load-bearing");
-
 static bool validNativeViewFrame(double x, double y, double width, double height) {
-    return x >= 0 && y >= 0 && width >= 0 && height >= 0;
+    return weaverFinite(x) && weaverFinite(y) && weaverFinite(width) &&
+        weaverFinite(height) && x >= 0 && y >= 0 && width >= 0 && height >= 0;
 }
 
 static bool isNativeContainerKind(int kind) {
@@ -1686,8 +1728,8 @@ static void nativeViewLogicalOrigin(Host *host, const NativeView &view, double *
  * of an ACCUMULATED logical coordinate and the window scale. Accumulating
  * before rounding matters because the sum of per-level rounds drifts from
  * the round of the sum at fractional scales (and at fractional logical
- * coordinates even at scale 1.0) — see the static_asserts beside
- * nativeViewCoord for the numeric proof. Width and height fall out as
+ * coordinates even at scale 1.0); the pure geometry tests carry the
+ * numeric proof. Width and height fall out as
  * edge differences (right = round((logical_x + width) * scale)) rather
  * than independently rounded extents, so frames that abut logically —
  * a sibling starting where the previous one ends, a child flush against
@@ -1697,13 +1739,20 @@ static RECT nativeViewPhysicalFrame(Host *host, const NativeView &view, double s
     double logical_x = 0;
     double logical_y = 0;
     nativeViewLogicalOrigin(host, view, &logical_x, &logical_y);
-    RECT frame = {};
-    frame.left = nativeViewCoord(logical_x * scale);
-    frame.top = nativeViewCoord(logical_y * scale);
-    frame.right = nativeViewCoord((logical_x + view.width) * scale);
-    frame.bottom = nativeViewCoord((logical_y + view.height) * scale);
+    const WeaverPhysicalRectI physical = weaverLogicalRectToPhysicalEdges(
+        { logical_x, logical_y, view.width, view.height }, scale);
+    RECT frame = { physical.left, physical.top, physical.right, physical.bottom };
     return frame;
 }
+
+static RECT childWebViewPhysicalFrame(const ChildWebView &webview) {
+    const double scale = webViewFrameScale(webview);
+    const WeaverPhysicalRectI physical = weaverLogicalRectToPhysicalEdges(
+        { webview.x, webview.y, webview.width, webview.height }, scale);
+    return { physical.left, physical.top, physical.right, physical.bottom };
+}
+
+static bool syncGpuSurfaceGeometry(Host *host, NativeView &view);
 
 static void applyNativeViewText(NativeView &view, const std::string &text) {
     if (!view.hwnd) return;
@@ -1749,6 +1798,7 @@ static void applyNativeViewFrame(Host *host, NativeView &view) {
     const double scale = nativeViewFrameScale(host, view);
     RECT frame = nativeViewPhysicalFrame(host, view, scale);
     MoveWindow(view.hwnd, frame.left, frame.top, frame.right - frame.left, frame.bottom - frame.top, TRUE);
+    if (view.kind == kViewGpuSurface) (void)syncGpuSurfaceGeometry(host, view);
 }
 
 static void applyNativeViewState(NativeView &view, bool update_text, const std::string &text) {
@@ -2027,6 +2077,43 @@ static Window *chromelessWindowForHwnd(Host *host, HWND hwnd) {
 
 static UINT systemDpi();
 
+static UINT dpiForMonitor(HMONITOR monitor) {
+    using GetDpiForMonitorFn = HRESULT(WINAPI *)(HMONITOR, int, UINT *, UINT *);
+    static GetDpiForMonitorFn get_monitor_dpi = []() -> GetDpiForMonitorFn {
+        HMODULE shcore = LoadLibraryW(L"shcore.dll");
+        if (!shcore) return nullptr;
+        return reinterpret_cast<GetDpiForMonitorFn>(
+            reinterpret_cast<void *>(GetProcAddress(shcore, "GetDpiForMonitor")));
+    }();
+    if (get_monitor_dpi && monitor) {
+        UINT dpi_x = 0;
+        UINT dpi_y = 0;
+        if (get_monitor_dpi(monitor, 0, &dpi_x, &dpi_y) == S_OK && dpi_y > 0)
+            return dpi_y;
+    }
+    return systemDpi();
+}
+
+static void logGpuSurfaceInputDpi(const NativeView &view, int physical_x,
+    int physical_y, double logical_x, double logical_y, double scale,
+    const char *kind) {
+    if (!dpiDiagnosticEnabled()) return;
+    RECT client = {};
+    if (view.hwnd) GetClientRect(view.hwnd, &client);
+    char line[384] = {};
+    const int length = snprintf(line, sizeof(line),
+        "%llu gpu-input pid=%lu child_hwnd=0x%llx kind=%s "
+        "physical_px=(%d,%d) logical_dip=(%.6f,%.6f) scale=%.6f "
+        "client_px=%ldx%ld generation=%llu\r\n",
+        (unsigned long long)GetTickCount64(),
+        (unsigned long)GetCurrentProcessId(),
+        (unsigned long long)(uintptr_t)view.hwnd, kind ? kind : "unknown",
+        physical_x, physical_y, logical_x, logical_y, scale,
+        client.right - client.left, client.bottom - client.top,
+        (unsigned long long)view.gpu_geometry_generation);
+    if (length > 0) appendDpiDiagnosticLine(line, static_cast<size_t>(length));
+}
+
 /* Per-window DPI, resolved dynamically to mirror the awareness chain
  * the embedded manifest declares. GetDpiForWindow (Windows 10 1607+,
  * per-monitor v2 — modern Wine prefixes export it too) is preferred;
@@ -2037,6 +2124,8 @@ static UINT systemDpi();
  * systemDpi's GetDeviceCaps branch). A DPI-unaware process reports 96
  * on every branch, so logical points == client pixels there. */
 static UINT dpiForWindow(HWND hwnd) {
+    const UINT diagnostic = dpiDiagnosticOverride();
+    if (diagnostic != 0) return diagnostic;
     using GetDpiForWindowFn = UINT(WINAPI *)(HWND);
     static GetDpiForWindowFn get_dpi = reinterpret_cast<GetDpiForWindowFn>(
         reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow")));
@@ -2044,22 +2133,19 @@ static UINT dpiForWindow(HWND hwnd) {
         const UINT dpi = get_dpi(hwnd);
         if (dpi > 0) return dpi;
     }
-    using GetDpiForMonitorFn = HRESULT(WINAPI *)(HMONITOR, int, UINT *, UINT *);
-    static GetDpiForMonitorFn get_monitor_dpi = []() -> GetDpiForMonitorFn {
-        HMODULE shcore = LoadLibraryW(L"shcore.dll");
-        if (!shcore) return nullptr;
-        return reinterpret_cast<GetDpiForMonitorFn>(
-            reinterpret_cast<void *>(GetProcAddress(shcore, "GetDpiForMonitor")));
-    }();
-    if (get_monitor_dpi && hwnd) {
-        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        UINT dpi_x = 0;
-        UINT dpi_y = 0;
-        /* 0 = MDT_EFFECTIVE_DPI, spelled numerically so headers that
-         * predate shellscalingapi.h still compile. */
-        if (monitor && get_monitor_dpi(monitor, 0, &dpi_x, &dpi_y) == S_OK && dpi_y > 0) return dpi_y;
-    }
+    if (hwnd) return dpiForMonitor(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
     return systemDpi();
+}
+
+static UINT dpiForInitialWindowFrame(double logical_x, double logical_y) {
+    const UINT diagnostic = dpiDiagnosticOverride();
+    if (diagnostic != 0) return diagnostic;
+    const double system_scale = (double)systemDpi() / 96.0;
+    POINT provisional = {
+        weaverRoundPhysicalEdge(logical_x, system_scale),
+        weaverRoundPhysicalEdge(logical_y, system_scale),
+    };
+    return dpiForMonitor(MonitorFromPoint(provisional, MONITOR_DEFAULTTONEAREST));
 }
 
 /* Caption metrics MUST scale with the monitor the window sits on, or a
@@ -2429,35 +2515,71 @@ static void gpuSurfaceImeComposition(Host *host, NativeView &view, HWND hwnd, LP
     ImmReleaseContext(hwnd, imc);
 }
 
-/* Emit a gpu_surface_resize when the child's logical size or device scale
- * differ from the last emitted values. Returns true when an event was sent. */
-static bool syncGpuSurfaceGeometry(Host *host, NativeView &view, double width, double height, double scale) {
-    if (width == view.gpu_emitted_width && height == view.gpu_emitted_height && scale == view.gpu_emitted_scale) return false;
-    view.gpu_emitted_width = width;
-    view.gpu_emitted_height = height;
+static NativeSdkSharedRendererGeometry resolveGpuSurfaceGeometry(Host *host,
+    NativeView &view) {
+    const double scale = nativeViewFrameScale(host, view);
+    double logical_x = 0;
+    double logical_y = 0;
+    nativeViewLogicalOrigin(host, view, &logical_x, &logical_y);
+    const WeaverLogicalRectD logical = {
+        logical_x, logical_y, view.width, view.height,
+    };
+    const WeaverPhysicalRectI physical =
+        weaverLogicalRectToPhysicalEdges(logical, scale);
+    if (!view.gpu_geometry_valid || view.gpu_geometry_scale != scale ||
+        !weaverLogicalRectsEqual(view.gpu_geometry_logical, logical) ||
+        !weaverPhysicalRectsEqual(view.gpu_geometry_physical, physical)) {
+        view.gpu_geometry_logical = logical;
+        view.gpu_geometry_physical = physical;
+        view.gpu_geometry_scale = scale;
+        view.gpu_geometry_generation =
+            weaverNextGeometryGeneration(view.gpu_geometry_generation);
+        view.gpu_geometry_valid = true;
+    }
+    NativeSdkSharedRendererGeometry geometry = {};
+    geometry.destination_x_dip = logical.x;
+    geometry.destination_y_dip = logical.y;
+    geometry.destination_width_dip = logical.width;
+    geometry.destination_height_dip = logical.height;
+    geometry.destination_left_px = physical.left;
+    geometry.destination_top_px = physical.top;
+    geometry.destination_right_px = physical.right;
+    geometry.destination_bottom_px = physical.bottom;
+    geometry.source_texture_width_px = static_cast<uint32_t>(
+        std::max<int32_t>(0, weaverPhysicalWidth(physical)));
+    geometry.source_texture_height_px = static_cast<uint32_t>(
+        std::max<int32_t>(0, weaverPhysicalHeight(physical)));
+    geometry.generation = view.gpu_geometry_generation;
+    return geometry;
+}
+
+/* Emit one resize for every geometry generation. Logical dimensions remain
+ * the authored DIP frame; the separately carried physical extent is the
+ * exact once-rounded edge difference used by every raster/presentation path. */
+static bool syncGpuSurfaceGeometry(Host *host, NativeView &view) {
+    const NativeSdkSharedRendererGeometry geometry =
+        resolveGpuSurfaceGeometry(host, view);
+    const double scale = view.gpu_geometry_scale;
+    if (!weaverValidSurfaceExtent(geometry.source_texture_width_px,
+            geometry.source_texture_height_px) ||
+        geometry.generation == view.gpu_emitted_geometry_generation) return false;
+    view.gpu_emitted_width = view.width;
+    view.gpu_emitted_height = view.height;
     view.gpu_emitted_scale = scale;
+    view.gpu_emitted_geometry_generation = geometry.generation;
     WindowsEvent event = {};
     event.kind = kGpuSurfaceResize;
     event.x = view.x;
     event.y = view.y;
-    event.width = width;
-    event.height = height;
+    event.width = view.width;
+    event.height = view.height;
     event.scale = scale;
+    event.physical_width = geometry.source_texture_width_px;
+    event.physical_height = geometry.source_texture_height_px;
+    event.geometry_generation = geometry.generation;
     event.timestamp_ns = gpuTimestampNs();
     emitGpuSurfaceEvent(host, view, event);
     return true;
-}
-
-static bool gpuSurfaceLogicalSize(const NativeView &view, HWND hwnd, double scale, double *out_width, double *out_height) {
-    RECT rect = {};
-    GetClientRect(hwnd, &rect);
-    double width = scale > 0 ? (double)(rect.right - rect.left) / scale : 0;
-    double height = scale > 0 ? (double)(rect.bottom - rect.top) / scale : 0;
-    if (width <= 0 && view.width > 0) width = view.width;
-    if (height <= 0 && view.height > 0) height = view.height;
-    *out_width = width;
-    *out_height = height;
-    return width > 0 && height > 0;
 }
 
 /* Advance the pacing clock for an emission that was SCHEDULED at
@@ -2493,8 +2615,8 @@ static void gpuSurfaceAdvancePacingClock(NativeView &view) {
  * throttled. */
 static bool gpuSurfaceOccludedPacingActive(const NativeView &view) {
     if (!view.gpu_presented || !view.hwnd) return false;
-    HWND root = GetAncestor(view.hwnd, GA_ROOT);
-    return root != nullptr && IsIconic(root);
+    HWND owner = GetParent(view.hwnd);
+    return owner != nullptr && IsIconic(owner);
 }
 
 using TimeSetEventFn = UINT (WINAPI *)(UINT, UINT,
@@ -2533,19 +2655,24 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
      * (an armed animation re-requesting) returns to the minimized
      * heartbeat unless another input lands. */
     view.gpu_prompt_frame_pending = false;
-    const double scale = gpuSurfaceScale(hwnd);
-    double width = 0;
-    double height = 0;
-    if (!gpuSurfaceLogicalSize(view, hwnd, scale, &width, &height)) return;
-    (void)syncGpuSurfaceGeometry(host, view, width, height, scale);
+    (void)hwnd;
+    const NativeSdkSharedRendererGeometry geometry =
+        resolveGpuSurfaceGeometry(host, view);
+    const double scale = view.gpu_geometry_scale;
+    if (!weaverValidSurfaceExtent(geometry.source_texture_width_px,
+        geometry.source_texture_height_px)) return;
+    (void)syncGpuSurfaceGeometry(host, view);
     gpuSurfaceAdvancePacingClock(view);
 
     view.gpu_frame_index += 1;
     WindowsEvent event = {};
     event.kind = kGpuSurfaceFrame;
-    event.width = width;
-    event.height = height;
+    event.width = view.width;
+    event.height = view.height;
     event.scale = scale;
+    event.physical_width = geometry.source_texture_width_px;
+    event.physical_height = geometry.source_texture_height_px;
+    event.geometry_generation = geometry.generation;
     event.frame_index = view.gpu_frame_index;
     event.timestamp_ns = gpuTimestampNs();
     event.frame_interval_ns = kGpuFrameIntervalNs;
@@ -2646,6 +2773,8 @@ static void releaseLayeredPresentSurface(Window &window) {
     window.layered_bits = nullptr;
     window.layered_width = 0;
     window.layered_height = 0;
+    window.layered_gpu_frame = {};
+    window.layered_gpu_frame_valid = false;
 }
 
 static bool ensureLayeredPresentSurface(Window &window, HDC screen_dc, int width, int height) {
@@ -2669,6 +2798,7 @@ static bool ensureLayeredPresentSurface(Window &window, HDC screen_dc, int width
     window.layered_previous_bitmap = SelectObject(window.layered_memory_dc, window.layered_bitmap);
     window.layered_width = width;
     window.layered_height = height;
+    memset(window.layered_bits, 0, static_cast<size_t>(width) * height * 4);
     return true;
 }
 
@@ -2678,28 +2808,62 @@ static bool presentLayeredGpuSurface(Window &window, const NativeView &view, int
 
     HDC screen_dc = GetDC(nullptr);
     if (!screen_dc) return false;
-    const bool resized = window.layered_width != view.gpu_buf_width || window.layered_height != view.gpu_buf_height;
-    if (!ensureLayeredPresentSurface(window, screen_dc, view.gpu_buf_width, view.gpu_buf_height)) {
+    RECT client = {};
+    GetClientRect(window.hwnd, &client);
+    const int client_width = client.right - client.left;
+    const int client_height = client.bottom - client.top;
+    if (client_width <= 0 || client_height <= 0) {
         ReleaseDC(nullptr, screen_dc);
         return false;
     }
-    if (full_copy || resized) {
-        memcpy(window.layered_bits, view.gpu_bgra.data(), view.gpu_bgra.size());
-    } else {
-        const size_t row_bytes = (size_t)(dirty_right - dirty_left) * 4;
-        for (int y = dirty_top; y < dirty_bottom; ++y) {
-            const size_t offset = ((size_t)y * (size_t)view.gpu_buf_width + (size_t)dirty_left) * 4;
-            memcpy((uint8_t *)window.layered_bits + offset, view.gpu_bgra.data() + offset, row_bytes);
+    const bool resized = window.layered_width != client_width ||
+        window.layered_height != client_height;
+    const WeaverPhysicalRectI destination = view.gpu_geometry_physical;
+    const bool destination_changed = !window.layered_gpu_frame_valid ||
+        !weaverPhysicalRectsEqual(window.layered_gpu_frame, destination);
+    if (!ensureLayeredPresentSurface(window, screen_dc, client_width, client_height)) {
+        ReleaseDC(nullptr, screen_dc);
+        return false;
+    }
+    if (full_copy || resized || destination_changed) {
+        memset(window.layered_bits, 0,
+            static_cast<size_t>(client_width) * client_height * 4);
+        dirty_left = 0;
+        dirty_top = 0;
+        dirty_right = view.gpu_buf_width;
+        dirty_bottom = view.gpu_buf_height;
+    }
+    const int source_left = std::max(0, std::max(dirty_left, -destination.left));
+    const int source_top = std::max(0, std::max(dirty_top, -destination.top));
+    const int source_right = std::min(view.gpu_buf_width,
+        std::min(dirty_right, client_width - destination.left));
+    const int source_bottom = std::min(view.gpu_buf_height,
+        std::min(dirty_bottom, client_height - destination.top));
+    if (source_right > source_left && source_bottom > source_top) {
+        const size_t row_bytes = static_cast<size_t>(source_right - source_left) * 4;
+        for (int source_y = source_top; source_y < source_bottom; ++source_y) {
+            const int destination_y = destination.top + source_y;
+            const int destination_x = destination.left + source_left;
+            const size_t source_offset =
+                (static_cast<size_t>(source_y) * view.gpu_buf_width + source_left) * 4;
+            const size_t destination_offset =
+                (static_cast<size_t>(destination_y) * client_width + destination_x) * 4;
+            memcpy(static_cast<uint8_t *>(window.layered_bits) + destination_offset,
+                view.gpu_bgra.data() + source_offset, row_bytes);
         }
     }
+    window.layered_gpu_frame = destination;
+    window.layered_gpu_frame_valid = true;
 
     RECT frame = {};
     GetWindowRect(window.hwnd, &frame);
-    POINT destination = { frame.left, frame.top };
+    POINT window_destination = { frame.left, frame.top };
     POINT source = { 0, 0 };
-    SIZE size = { view.gpu_buf_width, view.gpu_buf_height };
+    SIZE size = { client_width, client_height };
     BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    const BOOL updated = UpdateLayeredWindow(window.hwnd, screen_dc, &destination, &size, window.layered_memory_dc, &source, 0, &blend, ULW_ALPHA);
+    const BOOL updated = UpdateLayeredWindow(window.hwnd, screen_dc,
+        &window_destination, &size, window.layered_memory_dc, &source, 0,
+        &blend, ULW_ALPHA);
     ReleaseDC(nullptr, screen_dc);
     return updated != FALSE;
 }
@@ -2815,11 +2979,7 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
             break;
         }
         case WM_SIZE: {
-            double width = 0;
-            double height = 0;
-            if (gpuSurfaceLogicalSize(*view, hwnd, scale, &width, &height)) {
-                (void)syncGpuSurfaceGeometry(host, *view, width, height, scale);
-            }
+            (void)syncGpuSurfaceGeometry(host, *view);
             return 0;
         }
         case WM_LBUTTONDOWN:
@@ -2827,8 +2987,10 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
         case WM_MBUTTONDOWN: {
             SetFocus(hwnd);
             SetCapture(hwnd);
-            const double x = (double)(short)LOWORD(lparam) / scale;
-            const double y = (double)(short)HIWORD(lparam) / scale;
+            const double x = weaverPhysicalToLogicalCoordinate((short)LOWORD(lparam), scale);
+            const double y = weaverPhysicalToLogicalCoordinate((short)HIWORD(lparam), scale);
+            logGpuSurfaceInputDpi(*view, (short)LOWORD(lparam),
+                (short)HIWORD(lparam), x, y, scale, "pointer-down");
             view->gpu_pointer_down = 1;
             view->gpu_pointer_x = x;
             view->gpu_pointer_y = y;
@@ -2839,8 +3001,8 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
         case WM_LBUTTONUP:
         case WM_RBUTTONUP:
         case WM_MBUTTONUP: {
-            const double x = (double)(short)LOWORD(lparam) / scale;
-            const double y = (double)(short)HIWORD(lparam) / scale;
+            const double x = weaverPhysicalToLogicalCoordinate((short)LOWORD(lparam), scale);
+            const double y = weaverPhysicalToLogicalCoordinate((short)HIWORD(lparam), scale);
             view->gpu_pointer_down = 0;
             view->gpu_pointer_x = x;
             view->gpu_pointer_y = y;
@@ -2850,8 +3012,8 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
             return 0;
         }
         case WM_MOUSEMOVE: {
-            const double x = (double)(short)LOWORD(lparam) / scale;
-            const double y = (double)(short)HIWORD(lparam) / scale;
+            const double x = weaverPhysicalToLogicalCoordinate((short)LOWORD(lparam), scale);
+            const double y = weaverPhysicalToLogicalCoordinate((short)HIWORD(lparam), scale);
             view->gpu_pointer_x = x;
             view->gpu_pointer_y = y;
             const int kind = view->gpu_pointer_down ? kGpuInputPointerDrag : kGpuInputPointerMove;
@@ -2868,8 +3030,8 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
         case WM_MOUSEHWHEEL: {
             POINT point = { (int)(short)LOWORD(lparam), (int)(short)HIWORD(lparam) };
             ScreenToClient(hwnd, &point);
-            const double x = (double)point.x / scale;
-            const double y = (double)point.y / scale;
+            const double x = weaverPhysicalToLogicalCoordinate(point.x, scale);
+            const double y = weaverPhysicalToLogicalCoordinate(point.y, scale);
             view->gpu_pointer_x = x;
             view->gpu_pointer_y = y;
             /* One wheel notch scrolls 40 logical units, the cadence the GTK
@@ -2884,7 +3046,7 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
         }
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN: {
-            if (emitShortcutForHwnd(host, GetAncestor(hwnd, GA_ROOT), wparam)) return 0;
+            if (emitShortcutForWindowId(host, view->window_id, wparam)) return 0;
             const std::string key = gpuSurfaceKeyName(wparam);
             if (!key.empty()) {
                 emitGpuSurfaceInput(host, *view, kGpuInputKeyDown, view->gpu_pointer_x, view->gpu_pointer_y, 0, 0, 0, key.c_str(), "", gpuModifierFlags());
@@ -4387,19 +4549,21 @@ static const wchar_t *nativeSdkBridgeScript() {
 }
 
 static RECT webViewRect(const ChildWebView &webview) {
-    const double scale = webViewFrameScale(webview);
     RECT rect = {};
-    rect.left = 0;
-    rect.top = 0;
-    rect.right = webViewExtent(webview.width * scale);
-    rect.bottom = webViewExtent(webview.height * scale);
+    if (webview.hwnd) GetClientRect(webview.hwnd, &rect);
+    if (rect.right <= rect.left || rect.bottom <= rect.top) {
+        const RECT physical = childWebViewPhysicalFrame(webview);
+        rect = { 0, 0, std::max<LONG>(1, physical.right - physical.left),
+            std::max<LONG>(1, physical.bottom - physical.top) };
+    }
     return rect;
 }
 
 static void applyWebViewFrame(ChildWebView &webview) {
     if (!webview.hwnd) return;
-    const double scale = webViewFrameScale(webview);
-    MoveWindow(webview.hwnd, webViewCoord(webview.x * scale), webViewCoord(webview.y * scale), webViewExtent(webview.width * scale), webViewExtent(webview.height * scale), TRUE);
+    const RECT frame = childWebViewPhysicalFrame(webview);
+    MoveWindow(webview.hwnd, frame.left, frame.top, frame.right - frame.left,
+        frame.bottom - frame.top, TRUE);
     if (webview.controller) {
         RECT bounds = webViewRect(webview);
         webview.controller->put_Bounds(bounds);
@@ -4746,6 +4910,121 @@ static bool handleAppTimerMessage(Host *host, WPARAM wparam) {
     return true;
 }
 
+static void logWindowDpiLifecycle(Host *host, const Window &window,
+    const char *action) {
+    if (!window.hwnd || !action) return;
+    using GetDpiForWindowFn = UINT(WINAPI *)(HWND);
+    using GetThreadDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI *)();
+    using AreDpiAwarenessContextsEqualFn = BOOL(WINAPI *)(
+        DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    const auto get_os_dpi = reinterpret_cast<GetDpiForWindowFn>(
+        reinterpret_cast<void *>(GetProcAddress(user32, "GetDpiForWindow")));
+    const auto get_context = reinterpret_cast<GetThreadDpiAwarenessContextFn>(
+        reinterpret_cast<void *>(GetProcAddress(user32,
+            "GetThreadDpiAwarenessContext")));
+    const auto contexts_equal = reinterpret_cast<AreDpiAwarenessContextsEqualFn>(
+        reinterpret_cast<void *>(GetProcAddress(user32,
+            "AreDpiAwarenessContextsEqual")));
+    const DPI_AWARENESS_CONTEXT context = get_context ? get_context() : nullptr;
+    const DPI_AWARENESS_CONTEXT per_monitor_v2 =
+        reinterpret_cast<DPI_AWARENESS_CONTEXT>(static_cast<intptr_t>(-4));
+    const bool is_per_monitor_v2 = context && contexts_equal &&
+        contexts_equal(context, per_monitor_v2) != FALSE;
+    RECT client = {};
+    GetClientRect(window.hwnd, &client);
+    HWND gpu_child = nullptr;
+    RECT gpu_client = {};
+    if (host) {
+        for (const auto &entry : host->native_views) {
+            const NativeView &view = entry.second;
+            if (view.window_id != window.id || view.kind != kViewGpuSurface ||
+                !view.hwnd) continue;
+            gpu_child = view.hwnd;
+            GetClientRect(gpu_child, &gpu_client);
+            break;
+        }
+    }
+    const UINT effective_dpi = dpiForWindow(window.hwnd);
+    const UINT os_dpi = get_os_dpi ? get_os_dpi(window.hwnd) : 0;
+    char line[640] = {};
+    const int length = snprintf(line, sizeof(line),
+        "%llu window-dpi pid=%lu hwnd=0x%llx child_hwnd=0x%llx "
+        "awareness=%s os_window_dpi=%u effective_dpi=%u scale=%.6f "
+        "logical_content_dip=%.6fx%.6f client_px=%ldx%ld "
+        "child_client_px=%ldx%ld action=%s\r\n",
+        (unsigned long long)GetTickCount64(),
+        (unsigned long)GetCurrentProcessId(),
+        (unsigned long long)(uintptr_t)window.hwnd,
+        (unsigned long long)(uintptr_t)gpu_child,
+        is_per_monitor_v2 ? "per-monitor-v2" : "other", os_dpi,
+        effective_dpi, (double)effective_dpi / 96.0, window.width,
+        window.height, client.right - client.left, client.bottom - client.top,
+        gpu_client.right - gpu_client.left, gpu_client.bottom - gpu_client.top,
+        action);
+    if (length > 0) appendDpiDiagnosticLine(line, static_cast<size_t>(length));
+}
+
+static void applyWindowDpiTransition(Host *host, Window &window,
+    const RECT *suggested, bool diagnostic) {
+    if (!host || !window.hwnd) return;
+    window.dpi_transition = true;
+    if (suggested) {
+        int x = suggested->left;
+        int y = suggested->top;
+        if (window.desktop_parent) {
+            POINT origin = { x, y };
+            ScreenToClient(window.desktop_parent, &origin);
+            x = origin.x;
+            y = origin.y;
+        }
+        SetWindowPos(window.hwnd, nullptr, x, y,
+            suggested->right - suggested->left,
+            suggested->bottom - suggested->top,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+    } else {
+        const UINT dpi = dpiForWindow(window.hwnd);
+        const double scale = (double)dpi / 96.0;
+        const DWORD style = (DWORD)GetWindowLongPtrW(window.hwnd, GWL_STYLE);
+        const DWORD ex_style = (DWORD)GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE);
+        const bool has_menu = GetMenu(window.hwnd) != nullptr;
+        const double content_width = window.width * scale;
+        const double content_height = window.height * scale;
+        RECT frame = { 0, 0, physicalContentExtent(content_width),
+            physicalContentExtent(content_height) };
+        adjustWindowRectForDpi(&frame, style, has_menu ? TRUE : FALSE,
+            ex_style, dpi);
+        LONG outer_width = frame.right - frame.left;
+        LONG outer_height = frame.bottom - frame.top;
+        if (windowUsesHiddenTitlebar(window)) {
+            const SIZE outer = hiddenOuterSizeForContent(style, ex_style,
+                has_menu, content_width, content_height, dpi);
+            outer_width = outer.cx;
+            outer_height = outer.cy;
+        }
+        SetWindowPos(window.hwnd, nullptr, 0, 0, outer_width, outer_height,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    window.dpi_transition = false;
+    if (windowUsesHiddenTitlebar(window)) applyHiddenTitlebarFrame(window);
+    for (auto &view_entry : host->native_views) {
+        NativeView &view = view_entry.second;
+        if (!view.hwnd || view.window_id != window.id)
+            continue;
+        applyNativeViewFrame(host, view);
+    }
+#if NATIVE_SDK_HAS_WEBVIEW2
+    for (auto &webview_entry : host->webviews) {
+        ChildWebView &webview = webview_entry.second;
+        if (!webview.frame_explicit || !webview.hwnd ||
+            webview.window_id != window.id) continue;
+        applyWebViewFrame(webview);
+    }
+#endif
+    logWindowDpiLifecycle(host, window,
+        diagnostic ? "diagnostic-transition" : "wm-dpi-changed");
+}
+
 static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCCREATE) {
         auto *create = reinterpret_cast<CREATESTRUCTW *>(lparam);
@@ -4753,6 +5032,15 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(host));
     }
     Host *host = hostFromWindow(hwnd);
+    if (message == kWeaverDpiDiagnosticSetDpiMessage &&
+        dpiDiagnosticEnabled()) {
+        const UINT dpi = static_cast<UINT>(wparam);
+        Window *window = mutableWindowForHwnd(host, hwnd);
+        if (!window || dpi < 48 || dpi > 768) return FALSE;
+        g_dpi_diagnostic_override.store(dpi);
+        applyWindowDpiTransition(host, *window, nullptr, true);
+        return TRUE;
+    }
     const Window *policy_window = windowForHwnd(host, hwnd);
     if (policy_window && message == WM_WINDOWPOSCHANGING) {
         WINDOWPOS *position = reinterpret_cast<WINDOWPOS *>(lparam);
@@ -4981,6 +5269,15 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) {
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd) {
+                        if (wparam != SIZE_MINIMIZED && !entry.second.dpi_transition) {
+                            RECT logical_client = {};
+                            GetClientRect(hwnd, &logical_client);
+                            const double scale = (double)dpiForWindow(hwnd) / 96.0;
+                            if (scale > 0) {
+                                entry.second.width = (double)(logical_client.right - logical_client.left) / scale;
+                                entry.second.height = (double)(logical_client.bottom - logical_client.top) / scale;
+                            }
+                        }
 #if NATIVE_SDK_HAS_WEBVIEW2
                         auto main = host->webviews.find(webViewKey(entry.first, "main"));
                         if (main != host->webviews.end() && !main->second.frame_explicit) {
@@ -5004,10 +5301,11 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                  * (the last emit is at least a heartbeat old, so that
                  * delay computes to zero) is a clean supersede. */
                 if (wparam != SIZE_MINIMIZED) {
+                    const Window *resized_window = windowForHwnd(host, hwnd);
                     for (auto &view_entry : host->native_views) {
                         NativeView &surface = view_entry.second;
                         if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission_scheduled) continue;
-                        if (GetAncestor(surface.hwnd, GA_ROOT) != hwnd) continue;
+                        if (!resized_window || surface.window_id != resized_window->id) continue;
                         surface.gpu_emission_scheduled = false;
                         gpuSurfaceScheduleFrameEmission(surface);
                     }
@@ -5037,39 +5335,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
              * per-monitor-DPI-aware processes receive this message. */
             if (host) {
                 const RECT *suggested = reinterpret_cast<const RECT *>(lparam);
-                if (suggested) {
-                    SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left, suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
-                }
-                for (auto &entry : host->windows) {
-                    if (entry.second.hwnd == hwnd && windowUsesHiddenTitlebar(entry.second)) applyHiddenTitlebarFrame(entry.second);
-                }
-                for (auto &view_entry : host->native_views) {
-                    NativeView &view = view_entry.second;
-                    if (!view.hwnd || GetAncestor(view.hwnd, GA_ROOT) != hwnd) continue;
-                    applyNativeViewFrame(host, view);
-                    if (view.kind != kViewGpuSurface) continue;
-                    const double surface_scale = gpuSurfaceScale(view.hwnd);
-                    double width = 0;
-                    double height = 0;
-                    if (gpuSurfaceLogicalSize(view, view.hwnd, surface_scale, &width, &height)) {
-                        (void)syncGpuSurfaceGeometry(host, view, width, height, surface_scale);
-                    }
-                }
-#if NATIVE_SDK_HAS_WEBVIEW2
-                for (auto &webview_entry : host->webviews) {
-                    ChildWebView &webview = webview_entry.second;
-                    /* Explicit frames are LOGICAL points scaled to
-                     * physical pixels at apply time, so a monitor-scale
-                     * change strands them until re-applied here. The
-                     * auto-fill main webview stores PHYSICAL client-rect
-                     * pixels and already re-derived them in the WM_SIZE
-                     * that the SetWindowPos above dispatched, so it is
-                     * skipped. */
-                    if (!webview.frame_explicit) continue;
-                    if (!webview.hwnd || GetAncestor(webview.hwnd, GA_ROOT) != hwnd) continue;
-                    applyWebViewFrame(webview);
-                }
-#endif
+                Window *window = mutableWindowForHwnd(host, hwnd);
+                if (window) applyWindowDpiTransition(host, *window,
+                    suggested, false);
                 return 0;
             }
             break;
@@ -5188,15 +5456,14 @@ static bool createNativeWindow(Host *host, Window &window) {
     if (window.no_activate) ex_style |= WS_EX_NOACTIVATE;
     /* The requested frame is a CONTENT size in LOGICAL points (the
      * other hosts size the content area); scale it to physical pixels
-     * at the DPI the window opens at (the system DPI — WM_DPICHANGED
-     * re-derives the frame if it lands on another monitor), then grow
+     * at the DPI of the monitor containing the requested origin, then grow
      * it to the outer size for this style so the client rect lands at
      * the request. The menu bar is attached after creation, so account
      * for it here when menus are declared. Hidden styles use the
      * custom-calc shape (no top chrome) — plain adjustment would land
      * their client one caption band tall. */
     const bool has_menu = !host->menus.empty();
-    const UINT dpi = systemDpi();
+    const UINT dpi = dpiForInitialWindowFrame(window.x, window.y);
     const double scale = (double)dpi / 96.0;
     const double content_width = window.width * scale;
     const double content_height = window.height * scale;
@@ -5244,6 +5511,7 @@ static bool createNativeWindow(Host *host, Window &window) {
         SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | (window.no_activate ? SWP_NOACTIVATE : 0));
     }
     UpdateWindow(hwnd);
+    logWindowDpiLifecycle(host, window, "created");
     SetTimer(hwnd, kFrameTimerId, 16, nullptr);
     return true;
 }
@@ -5481,8 +5749,8 @@ void native_sdk_windows_load_window_webview(Host *host, uint64_t window_id, cons
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
             0,
             0,
-            rect.right > rect.left ? rect.right - rect.left : webViewExtent(window->second.width),
-            rect.bottom > rect.top ? rect.bottom - rect.top : webViewExtent(window->second.height),
+            rect.right > rect.left ? rect.right - rect.left : std::max<LONG>(1, physicalContentExtent(window->second.width)),
+            rect.bottom > rect.top ? rect.bottom - rect.top : std::max<LONG>(1, physicalContentExtent(window->second.height)),
             window->second.hwnd,
             nullptr,
             host->instance,
@@ -5974,11 +6242,11 @@ int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *l
 
     view.hwnd = hwnd;
     if (kind == kViewGpuSurface && gpu_backend == 2) {
-        view.gpu_presenter = nativeSdkSharedRendererClientCreate(window->second.hwnd);
+        // DirectComposition is owned by the actual gpu_surface child. The
+        // child client rect is therefore the destination geometry and clips
+        // the imported surface without a top-level DPI reinterpretation.
+        view.gpu_presenter = nativeSdkSharedRendererClientCreate(hwnd);
         if (view.gpu_presenter) {
-            LONG_PTR child_ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, child_ex_style | WS_EX_LAYERED);
-            SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
             LONG_PTR owner_ex_style = GetWindowLongPtrW(window->second.hwnd, GWL_EXSTYLE);
             owner_ex_style &= ~((LONG_PTR)WS_EX_LAYERED);
             owner_ex_style |= WS_EX_NOREDIRECTIONBITMAP;
@@ -6046,6 +6314,11 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
     if (width > INT_MAX || height > INT_MAX) return 0;
     if (rgba8_len != width * height * 4) return 0;
     NativeView &view = found->second;
+    const NativeSdkSharedRendererGeometry geometry =
+        resolveGpuSurfaceGeometry(host, view);
+    if (width != geometry.source_texture_width_px ||
+        height != geometry.source_texture_height_px ||
+        scale != view.gpu_geometry_scale) return 0;
     auto owner = host->windows.find(view.window_id);
     const bool layered = owner != host->windows.end() && owner->second.transparent;
     const bool premultiplied = layered && view.gpu_alpha_mode == 2;
@@ -6058,10 +6331,13 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
     int dirty_right = (int)width;
     int dirty_bottom = (int)height;
     if (!resized && valid_dirty) {
-        dirty_left = std::max(0, std::min((int)width, (int)floor(dirty_x * scale)));
-        dirty_top = std::max(0, std::min((int)height, (int)floor(dirty_y * scale)));
-        dirty_right = std::max(dirty_left, std::min((int)width, (int)ceil((dirty_x + dirty_width) * scale)));
-        dirty_bottom = std::max(dirty_top, std::min((int)height, (int)ceil((dirty_y + dirty_height) * scale)));
+        const WeaverPhysicalBoxU box = weaverLogicalDirtyRectToPhysicalBox(
+            { dirty_x, dirty_y, dirty_width, dirty_height }, scale,
+            static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+        dirty_left = static_cast<int>(box.left);
+        dirty_top = static_cast<int>(box.top);
+        dirty_right = static_cast<int>(box.right);
+        dirty_bottom = static_cast<int>(box.bottom);
     }
     const bool full_update = resized || !valid_dirty || dirty_right <= dirty_left || dirty_bottom <= dirty_top;
     if (full_update) {
@@ -6152,8 +6428,12 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
     if (found == host->native_views.end() || found->second.kind != kViewGpuSurface ||
         !found->second.gpu_presenter) return 0;
     NativeView &view = found->second;
+    const NativeSdkSharedRendererGeometry geometry =
+        resolveGpuSurfaceGeometry(host, view);
+    if (!weaverValidSurfaceExtent(geometry.source_texture_width_px,
+        geometry.source_texture_height_px) || geometry.generation == 0) return 0;
     if (!nativeSdkSharedRendererClientPresent(view.gpu_presenter, surface_width, surface_height,
-        scale, clear_r, clear_g, clear_b, clear_a, packet, packet_len,
+        scale, &geometry, clear_r, clear_g, clear_b, clear_a, packet, packet_len,
         retained_generation, retained_width, retained_height, retained_dirty_rects,
         retained_dirty_rect_count, retained_rgba8, retained_rgba8_len)) {
         const bool backend_changed = view.gpu_backend != 3;
@@ -6192,9 +6472,6 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
         owner_ex_style &= ~((LONG_PTR)WS_EX_LAYERED);
         owner_ex_style |= WS_EX_NOREDIRECTIONBITMAP;
         SetWindowLongPtrW(gpu_owner->second.hwnd, GWL_EXSTYLE, owner_ex_style);
-        LONG_PTR child_ex_style = GetWindowLongPtrW(view.hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(view.hwnd, GWL_EXSTYLE, child_ex_style | WS_EX_LAYERED);
-        SetLayeredWindowAttributes(view.hwnd, 0, 0, LWA_ALPHA);
         SetWindowPos(gpu_owner->second.hwnd, nullptr, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         if (was_layered) {
@@ -6644,15 +6921,17 @@ int native_sdk_windows_create_webview(Host *host, uint64_t window_id, const char
      * webviews scale like native view frames); physical placement at
      * the owning window's DPI. */
     const double frame_scale = (double)dpiForWindow(window->second.hwnd) / 96.0;
+    const WeaverPhysicalRectI physical_frame = weaverLogicalRectToPhysicalEdges(
+        { x, y, width, height }, frame_scale);
     HWND hwnd = CreateWindowExW(
         0,
         L"STATIC",
         L"",
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-        webViewCoord(x * frame_scale),
-        webViewCoord(y * frame_scale),
-        webViewExtent(width * frame_scale),
-        webViewExtent(height * frame_scale),
+        physical_frame.left,
+        physical_frame.top,
+        physical_frame.right - physical_frame.left,
+        physical_frame.bottom - physical_frame.top,
         window->second.hwnd,
         nullptr,
         host->instance,
@@ -6694,8 +6973,9 @@ int native_sdk_windows_set_webview_frame(Host *host, uint64_t window_id, const c
     found->second.width = width;
     found->second.height = height;
     found->second.frame_explicit = true;
-    const double frame_scale = webViewFrameScale(found->second);
-    MoveWindow(found->second.hwnd, webViewCoord(x * frame_scale), webViewCoord(y * frame_scale), webViewExtent(width * frame_scale), webViewExtent(height * frame_scale), TRUE);
+    const RECT frame = childWebViewPhysicalFrame(found->second);
+    MoveWindow(found->second.hwnd, frame.left, frame.top,
+        frame.right - frame.left, frame.bottom - frame.top, TRUE);
 #if NATIVE_SDK_HAS_WEBVIEW2
     if (found->second.controller) {
         RECT bounds = webViewRect(found->second);

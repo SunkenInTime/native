@@ -25,11 +25,19 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // publishes flush after this event's present (below).
                 self.views[index].gpu_canvas_frame_requested = false;
                 const first_frame_latency_was_recorded = self.views[index].gpu_first_frame_latency_recorded;
-                if (!sizesEqual(self.views[index].gpu_size, frame_event.size) or self.views[index].gpu_scale_factor != frame_event.scale_factor) {
+                if (!sizesEqual(self.views[index].gpu_size, frame_event.size) or
+                    self.views[index].gpu_scale_factor != frame_event.scale_factor or
+                    !std.meta.eql(self.views[index].gpu_physical_size, frame_event.physical_size) or
+                    self.views[index].gpu_geometry_generation != frame_event.geometry_generation)
+                {
                     self.views[index].presented_canvas_valid = false;
+                    self.views[index].hybrid_retained_valid = false;
+                    self.views[index].canvas_packet_baseline_valid = false;
                 }
                 self.views[index].gpu_size = frame_event.size;
                 self.views[index].gpu_scale_factor = frame_event.scale_factor;
+                self.views[index].gpu_physical_size = frame_event.physical_size;
+                self.views[index].gpu_geometry_generation = frame_event.geometry_generation;
                 self.views[index].gpu_frame_index = frame_event.frame_index;
                 // Completion cadence for the frame profile: the MEASURED
                 // gap between consecutive completion-event stamps (the
@@ -150,13 +158,24 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 const previous_frame = self.views[index].frame;
                 const previous_size = self.views[index].gpu_size;
                 const previous_scale = self.views[index].gpu_scale_factor;
+                const previous_physical_size = self.views[index].gpu_physical_size;
+                const previous_geometry_generation = self.views[index].gpu_geometry_generation;
                 const next_size = resize_event.frame.size();
                 const frame_changed = !rectsEqual(previous_frame, resize_event.frame);
-                const surface_changed = !sizesEqual(previous_size, next_size) or previous_scale != resize_event.scale_factor;
+                const surface_changed = !sizesEqual(previous_size, next_size) or
+                    previous_scale != resize_event.scale_factor or
+                    !std.meta.eql(previous_physical_size, resize_event.physical_size) or
+                    previous_geometry_generation != resize_event.geometry_generation;
                 self.views[index].frame = resize_event.frame;
                 self.views[index].gpu_size = next_size;
                 self.views[index].gpu_scale_factor = resize_event.scale_factor;
-                if (surface_changed) self.views[index].presented_canvas_valid = false;
+                self.views[index].gpu_physical_size = resize_event.physical_size;
+                self.views[index].gpu_geometry_generation = resize_event.geometry_generation;
+                if (surface_changed) {
+                    self.views[index].presented_canvas_valid = false;
+                    self.views[index].hybrid_retained_valid = false;
+                    self.views[index].canvas_packet_baseline_valid = false;
+                }
                 if (self.views[index].gpu_status == .unavailable) self.views[index].gpu_status = .ready;
                 if (frame_changed or surface_changed) self.invalidateFor(.surface_resize, resize_event.frame);
             }

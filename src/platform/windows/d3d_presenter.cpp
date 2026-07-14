@@ -1,4 +1,5 @@
 #include "d3d_presenter.h"
+#include "dpi_geometry.h"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -270,6 +271,7 @@ struct NativeSdkD3DSharedSurface {
     DWORD widget_pid = 0;
     HANDLE composition_handle = nullptr;
     NsgpSurfaceState state;
+    uint64_t geometry_generation = 0;
 };
 
 bool nativeSdkD3DHardwareAvailable() {
@@ -365,12 +367,16 @@ static bool ensureInstances(NsgpEngine *engine, size_t count) {
 
 static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
     double logical_width,
-    double logical_height, double scale, uint8_t clear_r, uint8_t clear_g,
+    double logical_height, double scale, UINT physical_width_px,
+    UINT physical_height_px, uint8_t clear_r, uint8_t clear_g,
     uint8_t clear_b, uint8_t clear_a, const uint8_t *packet, size_t packet_len,
     UINT present_interval) {
-    if (!engine || !state || !state->swapchain || !packet || packet_len < 16 || scale <= 0) return false;
-    const UINT width = (UINT)std::max(1.0, std::round(logical_width * scale));
-    const UINT height = (UINT)std::max(1.0, std::round(logical_height * scale));
+    if (!engine || !state || !state->swapchain || !packet || packet_len < 16 ||
+        !weaverValidDeviceScale(scale) ||
+        !weaverValidLogicalRect({ 0, 0, logical_width, logical_height }) ||
+        !weaverValidSurfaceExtent(physical_width_px, physical_height_px)) return false;
+    const UINT width = physical_width_px;
+    const UINT height = physical_height_px;
     if (width != state->width || height != state->height) return false;
 
     PacketReader r{ packet, packet + packet_len };
@@ -457,11 +463,15 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
 bool nativeSdkD3DPresenterPresent(NativeSdkD3DPresenter *p, double logical_width,
     double logical_height, double scale, uint8_t clear_r, uint8_t clear_g,
     uint8_t clear_b, uint8_t clear_a, const uint8_t *packet, size_t packet_len) {
-    if (!p || scale <= 0) return false;
-    const UINT width = (UINT)std::max(1.0, std::round(logical_width * scale));
-    const UINT height = (UINT)std::max(1.0, std::round(logical_height * scale));
+    if (!p || !weaverValidDeviceScale(scale) ||
+        !weaverValidLogicalRect({ 0, 0, logical_width, logical_height })) return false;
+    const WeaverPhysicalRectI physical = weaverLogicalRectToPhysicalEdges(
+        { 0, 0, logical_width, logical_height }, scale);
+    const UINT width = static_cast<UINT>(weaverPhysicalWidth(physical));
+    const UINT height = static_cast<UINT>(weaverPhysicalHeight(physical));
     if ((width != p->surface.width || height != p->surface.height) && !resizeSwapchain(p, width, height)) return false;
-    return renderPacket(&p->engine, &p->surface, logical_width, logical_height, scale,
+    return renderPacket(&p->engine, &p->surface, logical_width, logical_height,
+        scale, width, height,
         clear_r, clear_g, clear_b, clear_a, packet, packet_len, 1);
 }
 
@@ -550,12 +560,18 @@ static bool resizeSharedSurface(NativeSdkD3DSharedSurface *surface, UINT width,
 
 bool nativeSdkD3DSharedSurfacePresent(NativeSdkD3DSharedSurface *surface,
     double logical_width, double logical_height, double scale,
+    UINT source_texture_width_px, UINT source_texture_height_px,
+    uint64_t geometry_generation,
     uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a,
     const uint8_t *packet, size_t packet_len, uint64_t retained_generation,
     UINT retained_width, UINT retained_height, const float *retained_dirty_rects,
     size_t retained_dirty_rect_count, const uint8_t *retained_bgra,
     uint64_t *replacement_widget_surface_handle) {
-    if (!surface || !surface->renderer || !replacement_widget_surface_handle || scale <= 0) return false;
+    if (!surface || !surface->renderer || !replacement_widget_surface_handle ||
+        geometry_generation == 0 || !weaverValidDeviceScale(scale) ||
+        !weaverValidLogicalRect({ 0, 0, logical_width, logical_height }) ||
+        !weaverValidSurfaceExtent(source_texture_width_px,
+            source_texture_height_px)) return false;
     NativeSdkD3DSharedRenderer *renderer = surface->renderer;
     std::unique_lock<std::mutex> lock(renderer->mutex);
     const uint64_t ticket = renderer->next_ticket++;
@@ -566,12 +582,23 @@ bool nativeSdkD3DSharedSurfacePresent(NativeSdkD3DSharedSurface *surface,
         renderer->turn_changed.notify_all();
     };
     *replacement_widget_surface_handle = 0;
-    const UINT width = (UINT)std::max(1.0, std::round(logical_width * scale));
-    const UINT height = (UINT)std::max(1.0, std::round(logical_height * scale));
+    const UINT width = source_texture_width_px;
+    const UINT height = source_texture_height_px;
     if ((width != surface->state.width || height != surface->state.height) &&
         !resizeSharedSurface(surface, width, height, replacement_widget_surface_handle)) {
         finish_turn();
         return false;
+    }
+    if (surface->geometry_generation != geometry_generation) {
+        // A geometry generation is a new presentation baseline even when a
+        // pure move preserves the pixel extent. Retained pixels and packet
+        // state must be republished once; subsequent frames reuse normally.
+        surface->state.retained_texture.Reset();
+        surface->state.retained_generation = 0;
+        surface->state.retained.clear();
+        surface->state.order.clear();
+        surface->state.generation = 0;
+        surface->geometry_generation = geometry_generation;
     }
     if (retained_generation != 0) {
         if (!retained_bgra || retained_width != width || retained_height != height ||
@@ -597,10 +624,13 @@ bool nativeSdkD3DSharedSurfacePresent(NativeSdkD3DSharedSurface *surface,
             UINT left = 0, top = 0, right = width, bottom = height;
             if (retained_dirty_rect_count > 0) {
                 const float *rect = retained_dirty_rects + index * 4;
-                left = (UINT)std::max(0.0, std::min((double)width, floor(rect[0] * scale)));
-                top = (UINT)std::max(0.0, std::min((double)height, floor(rect[1] * scale)));
-                right = (UINT)std::max((double)left, std::min((double)width, ceil((rect[0] + rect[2]) * scale)));
-                bottom = (UINT)std::max((double)top, std::min((double)height, ceil((rect[1] + rect[3]) * scale)));
+                const WeaverPhysicalBoxU box = weaverLogicalDirtyRectToPhysicalBox(
+                    { rect[0], rect[1], rect[2], rect[3] }, scale, width,
+                    height);
+                left = box.left;
+                top = box.top;
+                right = box.right;
+                bottom = box.bottom;
             }
             if (right <= left || bottom <= top) continue;
             D3D11_BOX box = { left, top, 0, right, bottom, 1 };
@@ -611,7 +641,7 @@ bool nativeSdkD3DSharedSurfacePresent(NativeSdkD3DSharedSurface *surface,
         surface->state.retained_generation = retained_generation;
     }
     const bool rendered = renderPacket(&renderer->engine, &surface->state,
-        logical_width, logical_height, scale, clear_r, clear_g, clear_b,
+        logical_width, logical_height, scale, width, height, clear_r, clear_g, clear_b,
         clear_a, packet, packet_len, 0);
     finish_turn();
     return rendered;

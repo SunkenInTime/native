@@ -853,6 +853,8 @@ pub const ViewInfo = struct {
     bridge_enabled: bool = false,
     gpu_size: geometry.SizeF = geometry.SizeF.init(0, 0),
     gpu_scale_factor: f32 = 1,
+    gpu_physical_size: geometry.SizeU = geometry.SizeU.init(0, 0),
+    gpu_geometry_generation: u64 = 0,
     gpu_frame_index: u64 = 0,
     gpu_timestamp_ns: u64 = 0,
     gpu_frame_interval_ns: u64 = default_gpu_frame_interval_ns,
@@ -1451,6 +1453,8 @@ pub const GpuSurfaceFrameEvent = struct {
     label: []const u8,
     size: geometry.SizeF,
     scale_factor: f32 = 1,
+    physical_size: geometry.SizeU = geometry.SizeU.init(0, 0),
+    geometry_generation: u64 = 0,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     frame_interval_ns: u64 = default_gpu_frame_interval_ns,
@@ -1557,6 +1561,8 @@ pub const GpuSurfaceResizeEvent = struct {
     label: []const u8,
     frame: geometry.RectF,
     scale_factor: f32 = 1,
+    physical_size: geometry.SizeU = geometry.SizeU.init(0, 0),
+    geometry_generation: u64 = 0,
 };
 
 pub const GpuSurfaceInputKind = enum {

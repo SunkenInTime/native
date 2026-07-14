@@ -92,6 +92,10 @@ pub const CanvasRenderPass = struct {
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
     scale: f32 = 1,
+    /// Exact OS/presentation extent after once-rounding the owning view's
+    /// logical edges. Zero means an offscreen caller should derive an extent
+    /// from `surface_size` and `scale`.
+    physical_size: geometry.SizeU = geometry.SizeU.init(0, 0),
     full_repaint: bool = false,
     dirty_bounds: ?geometry.RectF = null,
     commands: []const RenderCommand = &.{},
@@ -310,6 +314,7 @@ pub const CanvasFrame = struct {
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
     scale: f32 = 1,
+    physical_size: geometry.SizeU = geometry.SizeU.init(0, 0),
     full_repaint: bool = false,
     display_list: DisplayList = .{},
     render_plan: RenderPlan = .{},
@@ -445,6 +450,7 @@ pub const CanvasFrame = struct {
             .timestamp_ns = self.timestamp_ns,
             .surface_size = self.surface_size,
             .scale = self.scale,
+            .physical_size = self.physical_size,
             .full_repaint = self.full_repaint,
             .dirty_bounds = self.dirty_bounds,
             .commands = self.render_plan.commands,
@@ -485,6 +491,7 @@ pub const CanvasFrameOptions = struct {
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
     scale: f32 = 1,
+    physical_size: geometry.SizeU = geometry.SizeU.init(0, 0),
     full_repaint: bool = false,
     budget: CanvasFrameBudget = .{},
     previous_pipeline_cache: []const RenderPipelineCacheEntry = &.{},
@@ -643,6 +650,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         .timestamp_ns = options.timestamp_ns,
         .surface_size = options.surface_size,
         .scale = options.scale,
+        .physical_size = options.physical_size,
         .full_repaint = full_repaint,
         .display_list = next,
         .render_plan = render_plan,

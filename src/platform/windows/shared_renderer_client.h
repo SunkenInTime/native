@@ -6,6 +6,20 @@
 
 struct NativeSdkSharedRendererClient;
 
+struct NativeSdkSharedRendererGeometry {
+    double destination_x_dip;
+    double destination_y_dip;
+    double destination_width_dip;
+    double destination_height_dip;
+    int32_t destination_left_px;
+    int32_t destination_top_px;
+    int32_t destination_right_px;
+    int32_t destination_bottom_px;
+    uint32_t source_texture_width_px;
+    uint32_t source_texture_height_px;
+    uint64_t generation;
+};
+
 /// Creates only the device-less DirectComposition side of a shared surface.
 /// Pipe connection is lazy so widgets launch safely while weaverd is still
 /// bringing the renderer up, and reconnect after a renderer crash.
@@ -16,6 +30,7 @@ bool nativeSdkSharedRendererClientPresent(
     double logical_width,
     double logical_height,
     double scale,
+    const NativeSdkSharedRendererGeometry *geometry,
     uint8_t clear_r,
     uint8_t clear_g,
     uint8_t clear_b,
