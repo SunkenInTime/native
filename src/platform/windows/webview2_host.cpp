@@ -312,6 +312,16 @@ struct Window {
      * behind the button cluster matches the app's header). */
     COLORREF hidden_caption_color = 0;
     bool hidden_caption_color_set = false;
+    /* UpdateLayeredWindow requires a selected 32-bpp DIB. Keep that backing
+     * store for the lifetime of one surface size: animation frames update
+     * only their dirty rows, while the compositor still receives the full
+     * cached bitmap required by the layered-window API. */
+    HDC layered_memory_dc = nullptr;
+    HBITMAP layered_bitmap = nullptr;
+    HGDIOBJ layered_previous_bitmap = nullptr;
+    void *layered_bits = nullptr;
+    int layered_width = 0;
+    int layered_height = 0;
 };
 
 /* One rectangle of a canvas view's window-drag mirror (runtime push,
@@ -2503,35 +2513,64 @@ static void paintGpuSurface(NativeView &view, HWND hwnd, HDC dc) {
  * layered window. UpdateLayeredWindow owns the top-level redirection
  * surface; the child HWND stays as the runtime's input/timer endpoint,
  * but its WM_PAINT pixels are not the glass for this window shape. */
-static bool presentLayeredGpuSurface(Window &window, const NativeView &view) {
+static void releaseLayeredPresentSurface(Window &window) {
+    if (window.layered_memory_dc && window.layered_previous_bitmap) {
+        SelectObject(window.layered_memory_dc, window.layered_previous_bitmap);
+    }
+    if (window.layered_bitmap) DeleteObject(window.layered_bitmap);
+    if (window.layered_memory_dc) DeleteDC(window.layered_memory_dc);
+    window.layered_memory_dc = nullptr;
+    window.layered_bitmap = nullptr;
+    window.layered_previous_bitmap = nullptr;
+    window.layered_bits = nullptr;
+    window.layered_width = 0;
+    window.layered_height = 0;
+}
+
+static bool ensureLayeredPresentSurface(Window &window, HDC screen_dc, int width, int height) {
+    if (window.layered_memory_dc && window.layered_bitmap && window.layered_bits &&
+        window.layered_width == width && window.layered_height == height) return true;
+    releaseLayeredPresentSurface(window);
+    window.layered_memory_dc = CreateCompatibleDC(screen_dc);
+    if (!window.layered_memory_dc) return false;
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    window.layered_bitmap = CreateDIBSection(window.layered_memory_dc, &info, DIB_RGB_COLORS, &window.layered_bits, nullptr, 0);
+    if (!window.layered_bitmap || !window.layered_bits) {
+        releaseLayeredPresentSurface(window);
+        return false;
+    }
+    window.layered_previous_bitmap = SelectObject(window.layered_memory_dc, window.layered_bitmap);
+    window.layered_width = width;
+    window.layered_height = height;
+    return true;
+}
+
+static bool presentLayeredGpuSurface(Window &window, const NativeView &view, int dirty_left, int dirty_top, int dirty_right, int dirty_bottom, bool full_copy) {
     if (!window.hwnd || !window.transparent || view.gpu_bgra.empty()) return false;
     if (view.gpu_buf_width <= 0 || view.gpu_buf_height <= 0) return false;
 
     HDC screen_dc = GetDC(nullptr);
     if (!screen_dc) return false;
-    HDC memory_dc = CreateCompatibleDC(screen_dc);
-    if (!memory_dc) {
+    const bool resized = window.layered_width != view.gpu_buf_width || window.layered_height != view.gpu_buf_height;
+    if (!ensureLayeredPresentSurface(window, screen_dc, view.gpu_buf_width, view.gpu_buf_height)) {
         ReleaseDC(nullptr, screen_dc);
         return false;
     }
-
-    BITMAPINFO info = {};
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = view.gpu_buf_width;
-    info.bmiHeader.biHeight = -view.gpu_buf_height;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-    void *dib_bits = nullptr;
-    HBITMAP bitmap = CreateDIBSection(memory_dc, &info, DIB_RGB_COLORS, &dib_bits, nullptr, 0);
-    if (!bitmap || !dib_bits) {
-        if (bitmap) DeleteObject(bitmap);
-        DeleteDC(memory_dc);
-        ReleaseDC(nullptr, screen_dc);
-        return false;
+    if (full_copy || resized) {
+        memcpy(window.layered_bits, view.gpu_bgra.data(), view.gpu_bgra.size());
+    } else {
+        const size_t row_bytes = (size_t)(dirty_right - dirty_left) * 4;
+        for (int y = dirty_top; y < dirty_bottom; ++y) {
+            const size_t offset = ((size_t)y * (size_t)view.gpu_buf_width + (size_t)dirty_left) * 4;
+            memcpy((uint8_t *)window.layered_bits + offset, view.gpu_bgra.data() + offset, row_bytes);
+        }
     }
-    memcpy(dib_bits, view.gpu_bgra.data(), view.gpu_bgra.size());
-    HGDIOBJ previous = SelectObject(memory_dc, bitmap);
 
     RECT frame = {};
     GetWindowRect(window.hwnd, &frame);
@@ -2539,11 +2578,7 @@ static bool presentLayeredGpuSurface(Window &window, const NativeView &view) {
     POINT source = { 0, 0 };
     SIZE size = { view.gpu_buf_width, view.gpu_buf_height };
     BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    const BOOL updated = UpdateLayeredWindow(window.hwnd, screen_dc, &destination, &size, memory_dc, &source, 0, &blend, ULW_ALPHA);
-
-    SelectObject(memory_dc, previous);
-    DeleteObject(bitmap);
-    DeleteDC(memory_dc);
+    const BOOL updated = UpdateLayeredWindow(window.hwnd, screen_dc, &destination, &size, window.layered_memory_dc, &source, 0, &blend, ULW_ALPHA);
     ReleaseDC(nullptr, screen_dc);
     return updated != FALSE;
 }
@@ -4956,6 +4991,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) {
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd) {
+                        releaseLayeredPresentSurface(entry.second);
                         destroyNativeViewsForWindow(host, entry.first);
                         destroyChildWebViewsForWindow(host, entry.first);
                         entry.second.hwnd = nullptr;
@@ -5843,12 +5879,6 @@ int native_sdk_windows_note_gpu_surface_input(Host *host, uint64_t window_id, co
 }
 
 int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len) {
-    (void)scale;
-    (void)has_dirty_rect;
-    (void)dirty_x;
-    (void)dirty_y;
-    (void)dirty_width;
-    (void)dirty_height;
     if (!host || label_len == 0) return 0;
     auto found = host->native_views.find(nativeViewKey(window_id, slice(label, label_len)));
     if (found == host->native_views.end() || found->second.kind != kViewGpuSurface || !found->second.hwnd) return 0;
@@ -5859,6 +5889,27 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
     auto owner = host->windows.find(view.window_id);
     const bool layered = owner != host->windows.end() && owner->second.transparent;
     const bool premultiplied = layered && view.gpu_alpha_mode == 2;
+    const bool resized = view.gpu_buf_width != (int)width || view.gpu_buf_height != (int)height;
+    const bool valid_dirty = has_dirty_rect && scale > 0 && std::isfinite(scale) &&
+        std::isfinite(dirty_x) && std::isfinite(dirty_y) && std::isfinite(dirty_width) && std::isfinite(dirty_height) &&
+        dirty_width > 0 && dirty_height > 0;
+    int dirty_left = 0;
+    int dirty_top = 0;
+    int dirty_right = (int)width;
+    int dirty_bottom = (int)height;
+    if (!resized && valid_dirty) {
+        dirty_left = std::max(0, std::min((int)width, (int)floor(dirty_x * scale)));
+        dirty_top = std::max(0, std::min((int)height, (int)floor(dirty_y * scale)));
+        dirty_right = std::max(dirty_left, std::min((int)width, (int)ceil((dirty_x + dirty_width) * scale)));
+        dirty_bottom = std::max(dirty_top, std::min((int)height, (int)ceil((dirty_y + dirty_height) * scale)));
+    }
+    const bool full_update = resized || !valid_dirty || dirty_right <= dirty_left || dirty_bottom <= dirty_top;
+    if (full_update) {
+        dirty_left = 0;
+        dirty_top = 0;
+        dirty_right = (int)width;
+        dirty_bottom = (int)height;
+    }
 
     /* Straight RGBA8 -> top-down BGRA rows for a BI_RGB 32bpp DIB.
      * Layered windows require premultiplied BGRA for AC_SRC_ALPHA, so
@@ -5871,20 +5922,22 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
      * chrome (only the punched button hole yields on purpose). */
     view.gpu_bgra.resize(width * height * 4);
     uint8_t *dst = view.gpu_bgra.data();
-    const size_t pixel_count = width * height;
-    for (size_t index = 0; index < pixel_count; index++) {
-        const uint8_t *src = rgba8 + index * 4;
-        const uint8_t alpha = premultiplied ? src[3] : 255;
-        if (premultiplied) {
-            dst[index * 4 + 0] = (uint8_t)(((uint32_t)src[2] * alpha + 127) / 255);
-            dst[index * 4 + 1] = (uint8_t)(((uint32_t)src[1] * alpha + 127) / 255);
-            dst[index * 4 + 2] = (uint8_t)(((uint32_t)src[0] * alpha + 127) / 255);
-        } else {
-            dst[index * 4 + 0] = src[2];
-            dst[index * 4 + 1] = src[1];
-            dst[index * 4 + 2] = src[0];
+    for (int y = dirty_top; y < dirty_bottom; ++y) {
+        for (int x = dirty_left; x < dirty_right; ++x) {
+            const size_t index = (size_t)y * width + (size_t)x;
+            const uint8_t *src = rgba8 + index * 4;
+            const uint8_t alpha = premultiplied ? src[3] : 255;
+            if (premultiplied) {
+                dst[index * 4 + 0] = (uint8_t)(((uint32_t)src[2] * alpha + 127) / 255);
+                dst[index * 4 + 1] = (uint8_t)(((uint32_t)src[1] * alpha + 127) / 255);
+                dst[index * 4 + 2] = (uint8_t)(((uint32_t)src[0] * alpha + 127) / 255);
+            } else {
+                dst[index * 4 + 0] = src[2];
+                dst[index * 4 + 1] = src[1];
+                dst[index * 4 + 2] = src[0];
+            }
+            dst[index * 4 + 3] = alpha;
         }
-        dst[index * 4 + 3] = alpha;
     }
     view.gpu_buf_width = (int)width;
     view.gpu_buf_height = (int)height;
@@ -5904,9 +5957,10 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
     }
 
     if (layered) {
-        if (!presentLayeredGpuSurface(owner->second, view)) return 0;
+        if (!presentLayeredGpuSurface(owner->second, view, dirty_left, dirty_top, dirty_right, dirty_bottom, full_update)) return 0;
     } else {
-        InvalidateRect(view.hwnd, nullptr, FALSE);
+        RECT dirty = { dirty_left, dirty_top, dirty_right, dirty_bottom };
+        InvalidateRect(view.hwnd, full_update ? nullptr : &dirty, FALSE);
     }
     /* A present is the completion producer on the surface's single
      * frame-event scheduler: the completion event it arms is what
