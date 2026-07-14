@@ -6156,9 +6156,10 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
         scale, clear_r, clear_g, clear_b, clear_a, packet, packet_len,
         retained_generation, retained_width, retained_height, retained_dirty_rects,
         retained_dirty_rect_count, retained_rgba8, retained_rgba8_len)) {
+        const bool backend_changed = view.gpu_backend != 3;
         view.gpu_backend = 3;
         auto owner = host->windows.find(window_id);
-        if (owner != host->windows.end() && owner->second.transparent) {
+        if (backend_changed && owner != host->windows.end() && owner->second.transparent) {
             /* Recreate the window's DWM presentation binding, not merely its
              * style bits. Detaching a dead DComp visual is asynchronous; an
              * immediate UpdateLayeredWindow otherwise targets the stale
@@ -6181,9 +6182,10 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
         }
         return 0;
     }
+    const bool backend_changed = view.gpu_backend != 2;
     view.gpu_backend = 2;
     auto gpu_owner = host->windows.find(window_id);
-    if (gpu_owner != host->windows.end()) {
+    if (backend_changed && gpu_owner != host->windows.end()) {
         const bool was_layered = (GetWindowLongPtrW(gpu_owner->second.hwnd, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
         if (was_layered) ShowWindow(gpu_owner->second.hwnd, SW_HIDE);
         LONG_PTR owner_ex_style = GetWindowLongPtrW(gpu_owner->second.hwnd, GWL_EXSTYLE);
