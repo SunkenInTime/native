@@ -137,6 +137,8 @@ test "runtime rejects oversized shell before creating partial views" {
 }
 
 test "runtime rolls back shell views when a later view fails" {
+    if (comptime platform.max_views < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "shell-rollback", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
@@ -241,6 +243,8 @@ test "runtime restores main webview state when shell creation fails after main u
 }
 
 test "runtime materializes manifest shell windows into laid out views" {
+    if (comptime platform.max_windows < 2 or platform.max_views < 11) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "shell-materialize", .source = platform.WebViewSource.html("<h1>Host</h1>") };
@@ -455,6 +459,8 @@ test "runtime applies mobile viewport insets to shell layout" {
 }
 
 test "shell window resizable reaches the platform create seam" {
+    if (comptime platform.max_windows < 3 or platform.max_webviews < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "shell-resizable", .source = platform.WebViewSource.html("<h1>Host</h1>") };
@@ -511,6 +517,8 @@ test "shell window resizable reaches the platform create seam" {
 }
 
 test "shell window titlebar style reaches the platform create seam" {
+    if (comptime platform.max_windows < 5 or platform.max_webviews < 4) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "shell-titlebar", .source = platform.WebViewSource.html("<h1>Host</h1>") };
@@ -597,6 +605,8 @@ test "shell window titlebar style reaches the platform create seam" {
 }
 
 test "canvas shell windows present before they become visible" {
+    if (comptime platform.max_windows < 3) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "present-before-show", .source = platform.WebViewSource.html("<h1>Host</h1>") };
@@ -663,6 +673,8 @@ test "canvas shell windows present before they become visible" {
 }
 
 test "runtime lays out created shell windows with native returned bounds" {
+    if (comptime platform.max_views < 2) return error.SkipZigTest;
+
     const ShellCreatePlatform = struct {
         create_count: usize = 0,
         load_count: usize = 0,
@@ -755,6 +767,8 @@ test "runtime lays out created shell windows with native returned bounds" {
 }
 
 test "runtime lays out startup shell windows with native configured bounds" {
+    if (comptime platform.max_views < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         const scene_views = [_]app_manifest.ShellView{
             .{ .label = "toolbar", .kind = .toolbar, .edge = .top, .height = 50 },
@@ -877,6 +891,8 @@ test "runtime loads canvas-only startup shell without implicit main webview" {
 }
 
 test "runtime relayouts shell views attached to startup window" {
+    if (comptime platform.max_views < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "startup-shell-layout", .source = platform.WebViewSource.html("<h1>Startup</h1>") };
@@ -955,6 +971,8 @@ test "runtime relayout uses owned shell view storage" {
 }
 
 test "runtime clamps shell view layout constraints" {
+    if (comptime platform.max_views < 3) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "shell-constraints", .source = platform.WebViewSource.html("<h1>Constraints</h1>") };
@@ -995,6 +1013,8 @@ test "runtime clamps shell view layout constraints" {
 }
 
 test "runtime lays out stack children by column axis" {
+    if (comptime platform.max_views < 5) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "shell-stack-axis", .source = platform.WebViewSource.html("<h1>Stack</h1>") };
@@ -1034,6 +1054,8 @@ test "runtime lays out stack children by column axis" {
 }
 
 test "runtime lays out split panes and parented webview frames" {
+    if (comptime platform.max_views < 3) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "shell-split", .source = platform.WebViewSource.html("<h1>Split</h1>") };
@@ -1119,6 +1141,8 @@ test "runtime platform window close clears shell views and child WebViews" {
 }
 
 test "runtime loads scene hook as native shell startup" {
+    if (comptime platform.max_views < 3) return error.SkipZigTest;
+
     const TestApp = struct {
         const scene_views = [_]app_manifest.ShellView{
             .{ .label = "toolbar", .kind = .toolbar, .edge = .top, .height = 48, .role = "Toolbar" },

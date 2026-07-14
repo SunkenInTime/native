@@ -208,6 +208,8 @@ test "runtime rejects oversized webview source" {
 }
 
 test "runtime refreshes app source and keeps reload fields owned" {
+    if (comptime platform.max_windows < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         root_path: [8]u8 = "dist-one".*,
         entry: [10]u8 = "index.html".*,

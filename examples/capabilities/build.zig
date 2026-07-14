@@ -147,6 +147,9 @@ fn nativeSdkPath(b: *std.Build, native_sdk_path: []const u8, sub_path: []const u
 }
 
 fn nativeSdkModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, native_sdk_path: []const u8) *std.Build.Module {
+    const options = b.addOptions();
+    options.addOption(bool, "widget_profile", b.option(bool, "widget-profile", "Use bounded capacities for single-window widget processes") orelse false);
+    const native_sdk_options = options.createModule();
     const geometry_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/geometry/root.zig");
     const assets_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/assets/root.zig");
     const app_dirs_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/app_dirs/root.zig");
@@ -156,6 +159,7 @@ fn nativeSdkModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     const platform_info_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/platform_info/root.zig");
     const json_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/json/root.zig");
     const canvas_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/canvas/root.zig");
+    canvas_mod.addImport("native_sdk_options", native_sdk_options);
     canvas_mod.addImport("geometry", geometry_mod);
     canvas_mod.addImport("json", json_mod);
     const debug_mod = externalModule(b, target, optimize, native_sdk_path, "src/debug/root.zig");
@@ -163,6 +167,7 @@ fn nativeSdkModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     debug_mod.addImport("trace", trace_mod);
 
     const native_sdk_mod = externalModule(b, target, optimize, native_sdk_path, "src/root.zig");
+    native_sdk_mod.addImport("native_sdk_options", native_sdk_options);
     native_sdk_mod.addImport("geometry", geometry_mod);
     native_sdk_mod.addImport("assets", assets_mod);
     native_sdk_mod.addImport("app_dirs", app_dirs_mod);

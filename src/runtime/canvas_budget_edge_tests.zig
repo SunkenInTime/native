@@ -378,6 +378,11 @@ test "budget edge: chart series" {
 }
 
 test "budget edge: chart points through band series" {
+    // This test pins the desktop profile's relationship between the chart
+    // point pool and path budget. The widget profile deliberately makes the
+    // command/path budget fail first and has its own capacity contract test.
+    if (canvas_limits.max_canvas_widget_chart_points_per_view < 16384) return error.SkipZigTest;
+
     const saved_log_level = std.testing.log_level;
     std.testing.log_level = .err;
     defer std.testing.log_level = saved_log_level;

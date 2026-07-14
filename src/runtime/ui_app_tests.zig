@@ -1774,8 +1774,11 @@ test "a hybrid app with no registered fragments keeps the markup watch off" {
     try std.testing.expect(!harness.runtime.markup_watch_armed);
 }
 
+const roster_row_count: usize = if (core.max_canvas_widget_nodes_per_view >= 211) 70 else 30;
+const roster_node_count: usize = roster_row_count * 3 + 1;
+
 const RosterModel = struct {
-    row_count: usize = 70,
+    row_count: usize = roster_row_count,
 
     pub fn rows(model: *const RosterModel, arena: std.mem.Allocator) []const usize {
         const out = arena.alloc(usize, model.row_count) catch return &.{};
@@ -1835,14 +1838,16 @@ test "widget trees beyond the old 64-node cap install and reconcile" {
     } });
     try std.testing.expect(app_state.installed);
 
-    // 70 keyed rows x (row + checkbox + text) + root column = 211 nodes.
+    // Both profiles stay above the old 64-node cap: stock keeps the original
+    // 211-node stress, while the widget profile exercises 91 nodes inside its
+    // intentionally bounded 128-node budget.
     const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
     try std.testing.expect(layout.nodes.len > 64);
-    try std.testing.expectEqual(@as(usize, 211), layout.nodes.len);
+    try std.testing.expectEqual(roster_node_count, layout.nodes.len);
 
     // A rebuild through the reconcile path holds at that size.
     try app_state.rebuild(&harness.runtime, 1);
-    try std.testing.expectEqual(@as(usize, 211), (try harness.runtime.canvasWidgetLayout(1, canvas_label)).nodes.len);
+    try std.testing.expectEqual(roster_node_count, (try harness.runtime.canvasWidgetLayout(1, canvas_label)).nodes.len);
 }
 
 // ---------------------------------------------------------------- set_text

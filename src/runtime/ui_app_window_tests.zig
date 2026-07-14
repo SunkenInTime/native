@@ -163,6 +163,8 @@ fn widgetIdByText(layout: canvas.WidgetLayoutTree, kind: canvas.WidgetKind, text
 }
 
 test "a Msg declares the settings window, its canvas installs, and automation drives it by label" {
+    if (comptime support.platform.max_windows < 2) return error.SkipZigTest;
+
     const fixture = try Fixture.create();
     defer fixture.destroy();
     try std.testing.expect(fixture.settingsWindowInfo() == null);
@@ -227,6 +229,8 @@ test "a Msg declares the settings window, its canvas installs, and automation dr
 }
 
 test "a user close dispatches on_close and the model owns the consequence" {
+    if (comptime support.platform.max_windows < 2) return error.SkipZigTest;
+
     const fixture = try Fixture.create();
     defer fixture.destroy();
 
@@ -253,6 +257,8 @@ test "a user close dispatches on_close and the model owns the consequence" {
 }
 
 test "a model that keeps declaring the window vetoes the user close (source wins)" {
+    if (comptime support.platform.max_windows < 2) return error.SkipZigTest;
+
     const fixture = try Fixture.create();
     defer fixture.destroy();
 
@@ -280,6 +286,8 @@ test "a model that keeps declaring the window vetoes the user close (source wins
 }
 
 test "input from the secondary window dispatches through its own tree with its window identity" {
+    if (comptime support.platform.max_windows < 2) return error.SkipZigTest;
+
     const fixture = try Fixture.create();
     defer fixture.destroy();
 
@@ -310,6 +318,8 @@ test "input from the secondary window dispatches through its own tree with its w
 }
 
 test "each window's tokens carry its own surface density, not the main canvas's" {
+    if (comptime support.platform.max_windows < 2) return error.SkipZigTest;
+
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
@@ -456,6 +466,8 @@ fn verbWindowView(ui: *VerbApp.Ui, model: *const VerbModel, window_label: []cons
 }
 
 test "window-action effects resolve labels to live windows and drive the real verbs" {
+    if (comptime support.platform.max_windows < 2) return error.SkipZigTest;
+
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;

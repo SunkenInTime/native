@@ -1,5 +1,6 @@
 const std = @import("std");
 const geometry = @import("geometry");
+const native_sdk_options = @import("native_sdk_options");
 const security = @import("../security/root.zig");
 
 pub const default_gpu_frame_interval_ns: u64 = 16_666_667;
@@ -187,7 +188,7 @@ pub const WebViewSource = struct {
 
 pub const WindowId = u64;
 pub const ViewId = u64;
-pub const max_windows: usize = 16;
+pub const max_windows: usize = if (native_sdk_options.widget_profile) 1 else 16;
 pub const max_window_label_bytes: usize = 64;
 pub const max_window_title_bytes: usize = 128;
 /// Budget for a window's webview source payload — for `.html` sources this
@@ -197,7 +198,7 @@ pub const max_window_source_bytes: usize = 65536;
 /// Budget for the path-shaped source fields (asset root, entry, origin),
 /// which never need the full document budget.
 pub const max_window_source_path_bytes: usize = 4096;
-pub const max_webviews: usize = 16;
+pub const max_webviews: usize = if (native_sdk_options.widget_profile) 1 else 16;
 pub const max_webview_label_bytes: usize = 64;
 pub const max_webview_url_bytes: usize = 4096;
 pub const max_external_url_bytes: usize = 4096;
@@ -221,7 +222,7 @@ pub const max_drop_paths_bytes: usize = 8192;
 pub const max_drop_paths: usize = max_drop_paths_bytes / 2 + 1;
 pub const max_window_event_name_bytes: usize = 64;
 pub const max_window_event_detail_bytes: usize = 8192;
-pub const max_views: usize = 32;
+pub const max_views: usize = if (native_sdk_options.widget_profile) 1 else 32;
 pub const max_view_label_bytes: usize = 64;
 pub const max_view_role_bytes: usize = 64;
 pub const max_view_accessibility_label_bytes: usize = 256;
@@ -249,7 +250,7 @@ pub const max_gpu_surface_packet_json_bytes: usize = 128 * 1024;
 /// 512 KiB leaves headroom for gradients, paths, and format growth. The
 /// buffer is a single static per UiApp instance, so the cost is fixed
 /// address space, not per-frame allocation.
-pub const max_gpu_surface_packet_binary_bytes: usize = 512 * 1024;
+pub const max_gpu_surface_packet_binary_bytes: usize = if (native_sdk_options.widget_profile) 64 * 1024 else 512 * 1024;
 /// Bound for the fallback-detail command-kind name recorded when a
 /// packet present falls back because a command is not representable
 /// (fits every `CanvasCommand` tag name).
@@ -257,11 +258,11 @@ pub const max_gpu_present_fallback_detail_bytes: usize = 32;
 /// Per-image bound for the binary gpu-surface image upload side-channel;
 /// matches the runtime registry's per-slot bound
 /// (`canvas_limits.max_registered_canvas_image_pixel_bytes`).
-pub const max_gpu_surface_image_pixel_bytes: usize = 1024 * 1024;
+pub const max_gpu_surface_image_pixel_bytes: usize = if (native_sdk_options.widget_profile) 256 * 1024 else 1024 * 1024;
 /// Per-font bound for the gpu-surface font registration side-channel;
 /// matches the runtime registry's per-slot bound
 /// (`canvas_limits.max_registered_canvas_font_bytes`).
-pub const max_gpu_surface_font_bytes: usize = 2 * 1024 * 1024;
+pub const max_gpu_surface_font_bytes: usize = if (native_sdk_options.widget_profile) 512 * 1024 else 2 * 1024 * 1024;
 
 pub const ShortcutModifiers = struct {
     primary: bool = false,

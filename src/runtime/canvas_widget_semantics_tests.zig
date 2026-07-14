@@ -343,6 +343,8 @@ test "runtime emits canvas display list from focused widget layout" {
 }
 
 test "runtime shows canvas widget focus rings only for keyboard-visible focus" {
+    if (comptime platform.max_views < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "gpu-widget-view-focus-render-state", .source = platform.WebViewSource.html("<h1>GPU</h1>") };
@@ -487,6 +489,8 @@ test "runtime shows canvas widget focus rings only for keyboard-visible focus" {
 }
 
 test "runtime ignores stale canvas widget keyboard focus when canvas view loses focus" {
+    if (comptime platform.max_views < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "gpu-widget-view-focus-keyboard-route", .source = platform.WebViewSource.html("<h1>GPU</h1>") };

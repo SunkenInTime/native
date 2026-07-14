@@ -383,6 +383,8 @@ test "null platform records webview lifecycle" {
 }
 
 test "null platform rejects invalid native view parents" {
+    if (comptime max_views < 2) return error.SkipZigTest;
+
     var null_platform = NullPlatform.init(.{});
     const services = null_platform.platform().services;
 
@@ -559,6 +561,8 @@ test "null platform records gpu surface image upload lifecycle" {
 }
 
 test "null platform preserves shifted webview storage after close" {
+    if (comptime max_webviews < 2) return error.SkipZigTest;
+
     var null_platform = NullPlatform.init(.{});
     const services = null_platform.platform().services;
 

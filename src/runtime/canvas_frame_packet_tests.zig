@@ -1084,6 +1084,10 @@ test "runtime prefers the compact binary packet encoding when the platform decod
 }
 
 test "chat-transcript-shaped heavy frame stays on the packet path through the binary encoding" {
+    // The transcript fixture is intentionally desktop-sized (400 commands);
+    // widget-profile packet coverage lives in the bounded fixtures above.
+    if (max_canvas_commands_per_view < 400) return error.SkipZigTest;
+
     // Shaped like a long rich chat transcript: hundreds of measured text
     // runs (each with wrap layout and a measured glyph array), message
     // bubbles, and separators. The JSON encoding of this frame exceeds

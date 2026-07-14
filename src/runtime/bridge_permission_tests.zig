@@ -155,6 +155,8 @@ test "runtime gates JavaScript webview API by origin and configured permission" 
 }
 
 test "runtime gates built-in bridge commands through explicit policy" {
+    if (comptime platform.max_windows < 2 or platform.max_views < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "builtin-policy", .source = platform.WebViewSource.html("<p>Windows</p>") };

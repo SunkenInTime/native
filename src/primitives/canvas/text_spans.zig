@@ -34,6 +34,7 @@ const FontId = canvas.FontId;
 const Color = @import("drawing.zig").Color;
 const TextWrap = @import("text_layout_types.zig").TextWrap;
 const TextAlign = @import("text_layout_types.zig").TextAlign;
+const native_sdk_options = @import("native_sdk_options");
 
 /// Capacity conventions (documented in `src/runtime/canvas_limits.zig`
 /// style): a paragraph carries at most this many spans; layout emits at
@@ -41,7 +42,7 @@ const TextAlign = @import("text_layout_types.zig").TextAlign;
 /// `max_text_span_lines_per_paragraph` lines. Overflow truncates
 /// deterministically instead of failing.
 pub const max_text_spans_per_paragraph: usize = 32;
-pub const max_text_span_runs_per_paragraph: usize = 128;
+pub const max_text_span_runs_per_paragraph: usize = if (native_sdk_options.widget_profile) 32 else 128;
 pub const max_text_span_lines_per_paragraph: usize = 64;
 
 pub const TextSpanWeight = enum {
@@ -462,7 +463,7 @@ fn layoutTextSpansUncached(spans: []const TextSpan, options: TextSpanLayoutOptio
 /// degrades to a 100% miss rate when the steadily revisited set
 /// outgrows the slots, so capacity errs generously (256 x ~4 KiB of
 /// threadlocal storage).
-pub const span_wrap_cache_capacity: usize = 256;
+pub const span_wrap_cache_capacity: usize = if (native_sdk_options.widget_profile) 64 else 256;
 
 const SpanWrapKey = struct {
     fingerprint: u64 = 0,

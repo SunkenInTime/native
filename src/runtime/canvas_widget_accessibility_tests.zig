@@ -1374,6 +1374,8 @@ test "runtime accepts larger retained widget shells for automation" {
 }
 
 test "runtime automation snapshot retains widgets from multiple canvas surfaces" {
+    if (comptime platform.max_views < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "gpu-widget-multi-surface-snapshot", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
@@ -1456,6 +1458,10 @@ test "runtime validates canvas widget layout targets and limits" {
         .frame = geometry.RectF.init(0, 0, 320, 40),
     });
     try std.testing.expectError(error.InvalidViewOptions, harness.runtime.setCanvasWidgetLayout(1, "status", .{}));
+    // The widget profile has one native-view slot. Releasing the non-canvas
+    // target keeps the validation semantics identical without requiring the
+    // stock profile's multi-view capacity.
+    try harness.runtime.closeView(1, "status");
 
     _ = try harness.runtime.createView(.{
         .window_id = 1,

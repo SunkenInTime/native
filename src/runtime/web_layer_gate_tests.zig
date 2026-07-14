@@ -38,6 +38,8 @@ const CanvasApp = struct {
 };
 
 test "native-only runtime starts a canvas scene and refuses webview creation with the teaching error" {
+    if (comptime platform.max_windows < 2) return error.SkipZigTest;
+
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
     // The null platform's gpu_surface support is opt-in; the fixture

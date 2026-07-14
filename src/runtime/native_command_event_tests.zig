@@ -66,6 +66,8 @@ const testViewByLabel = support.testViewByLabel;
 const testCanvasWidgetPartId = support.testCanvasWidgetPartId;
 
 test "runtime dispatches native view command events" {
+    if (comptime platform.max_views < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         command_count: u32 = 0,
         last_name: []const u8 = "",

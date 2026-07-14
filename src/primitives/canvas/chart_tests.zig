@@ -521,19 +521,22 @@ test "hover-detail chrome renders only under interaction and is deterministic" {
 
 // ------------------------------------------------------------ path budget
 
-test "a downsampled 10k-point multi-series chart renders within the frame path budget" {
+test "a downsampled 10k-point chart renders within the active profile's frame path budget" {
     var raw: [10_000]f32 = undefined;
     for (&raw, 0..) |*value, index| value.* = @sin(@as(f32, @floatFromInt(index)) * 0.01);
 
-    // Downsample the way Ui.chart does, then emit three filled line
-    // series — the star-history shape — and count every path element the
-    // frame references.
-    var storage: [3][chart_model.max_chart_points_per_series]f32 = undefined;
-    var series: [3]canvas.ChartSeries = undefined;
+    // Stock keeps the original three-filled-series star-history stress.
+    // The bounded widget profile emits one unfilled maximal series: 256
+    // downsampled points exactly exercise its 256-element path budget.
+    const desktop_filled_series_elements = chart_model.max_chart_points_per_series * 2 + 3;
+    const series_count: usize = if (chart_model.max_chart_path_elements_per_frame >= desktop_filled_series_elements * 3) 3 else 1;
+    const filled = series_count == 3;
+    var storage: [series_count][chart_model.max_chart_points_per_series]f32 = undefined;
+    var series: [series_count]canvas.ChartSeries = undefined;
     for (&series, 0..) |*entry, index| {
         const points = chart_model.downsampleChartValues(&raw, &storage[index]);
         try testing.expectEqual(chart_model.max_chart_points_per_series, points.len);
-        entry.* = .{ .kind = .line, .values = points, .fill = true };
+        entry.* = .{ .kind = .line, .values = points, .fill = filled };
     }
     const widget = Widget{
         .id = 92,

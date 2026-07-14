@@ -726,6 +726,10 @@ test "a JSON present invalidates the retained baseline so the next binary presen
 }
 
 test "chat-transcript-shaped interactions ride small patches" {
+    // The transcript fixture is intentionally desktop-sized (400 commands);
+    // widget-profile patch coverage lives in the bounded fixtures above.
+    if (max_canvas_commands_per_view < 400) return error.SkipZigTest;
+
     // The 200-message transcript shape from the heavy-frame packet test,
     // driven through the interactions that dominate a chat view: a
     // hover/toggle color flip, a single text edit, and a message append.

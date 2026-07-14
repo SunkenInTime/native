@@ -378,6 +378,8 @@ test "runtime gates JavaScript view API with view permission" {
 }
 
 test "runtime returns closed webview info before compacting storage" {
+    if (comptime platform.max_webviews < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "webview-close-response", .source = platform.WebViewSource.html("<p>WebView</p>") };
@@ -416,6 +418,8 @@ test "runtime returns closed webview info before compacting storage" {
 }
 
 test "runtime defaults webview commands to source window" {
+    if (comptime platform.max_windows < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "webview-source-window", .source = platform.WebViewSource.html("<p>WebView</p>") };
@@ -452,6 +456,8 @@ test "runtime defaults webview commands to source window" {
 }
 
 test "runtime validates webview bridge commands" {
+    if (comptime platform.max_webviews < 2 or platform.max_views < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "webview-validation", .source = platform.WebViewSource.html("<p>WebView</p>") };

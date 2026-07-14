@@ -407,6 +407,8 @@ test "real spectrum reports round-trip: deterministic fake, honest gating, snaps
 }
 
 test "occluded-emission rule: spectrum stops while every window is off the glass, resumes current on reveal" {
+    if (comptime platform.max_windows < 2) return error.SkipZigTest;
+
     var h = try Harness.create();
     defer h.destroy();
     const np = &h.harness.null_platform;

@@ -66,6 +66,8 @@ const testViewByLabel = support.testViewByLabel;
 const testCanvasWidgetPartId = support.testCanvasWidgetPartId;
 
 test "runtime creates lists focuses and closes windows" {
+    if (comptime platform.max_windows < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "windows", .source = platform.WebViewSource.html("<p>Windows</p>") };
@@ -90,6 +92,8 @@ test "runtime creates lists focuses and closes windows" {
 }
 
 test "runtime handles built-in JavaScript window bridge commands" {
+    if (comptime platform.max_windows < 2 or platform.max_views < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "window-bridge", .source = platform.WebViewSource.html("<p>Windows</p>") };

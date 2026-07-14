@@ -392,17 +392,21 @@ test "runtime rejects invalid native view parents" {
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.view_count);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.view_count);
 
-    const action = try harness.runtime.createView(.{
-        .window_id = 1,
-        .label = "action",
-        .kind = .button,
-        .parent = "toolbar",
-        .frame = geometry.RectF.init(8, 8, 96, 32),
-    });
-    try std.testing.expectEqualStrings("toolbar", action.parent.?);
+    if (comptime platform.max_views >= 2) {
+        const action = try harness.runtime.createView(.{
+            .window_id = 1,
+            .label = "action",
+            .kind = .button,
+            .parent = "toolbar",
+            .frame = geometry.RectF.init(8, 8, 96, 32),
+        });
+        try std.testing.expectEqualStrings("toolbar", action.parent.?);
+    }
 }
 
 test "runtime closes native view descendants and logical WebView children with parent" {
+    if (comptime platform.max_views < 3) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "parent-close", .source = platform.WebViewSource.html("<h1>Close</h1>") };
@@ -461,6 +465,8 @@ test "runtime closes native view descendants and logical WebView children with p
 }
 
 test "runtime traverses focus across WebViews and native controls" {
+    if (comptime platform.max_views < 2) return error.SkipZigTest;
+
     const TestApp = struct {
         fn app(self: *@This()) App {
             return .{ .context = self, .name = "focus-traversal", .source = platform.WebViewSource.html("<h1>Focus</h1>") };
@@ -583,6 +589,10 @@ test "runtime rejects unsupported GPU surface configuration" {
         .frame = geometry.RectF.init(0, 0, 320, 240),
         .gpu_surface = .{ .vsync = false },
     }));
+
+    // Both profiles exercise the supported configuration below; the bounded
+    // widget profile reuses its single native-view slot.
+    try harness.runtime.closeView(1, "transparent-canvas");
 
     const supported = try harness.runtime.createView(.{
         .window_id = 1,

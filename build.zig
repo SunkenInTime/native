@@ -56,6 +56,7 @@ pub fn build(b: *std.Build) void {
     const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
     const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
     _ = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;
+    const widget_profile = b.option(bool, "widget-profile", "Use bounded capacities for single-window widget processes") orelse false;
     const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux, ios, android") orelse .macos;
     const signing_mode = b.option(SigningMode, "signing", "Signing mode: none, adhoc, identity") orelse .none;
     const package_version = packageVersion(b);
@@ -103,6 +104,8 @@ pub fn build(b: *std.Build) void {
     const platform_info_mod = module(b, target, optimize, "src/primitives/platform_info/root.zig");
     const json_mod = module(b, target, optimize, "src/primitives/json/root.zig");
     const canvas_mod = module(b, target, optimize, "src/primitives/canvas/root.zig");
+    const native_sdk_options = nativeSdkOptionsModule(b, widget_profile);
+    canvas_mod.addImport("native_sdk_options", native_sdk_options);
     canvas_mod.addImport("geometry", geometry_mod);
     canvas_mod.addImport("json", json_mod);
     if (target.result.os.tag == .macos) {
@@ -129,6 +132,7 @@ pub fn build(b: *std.Build) void {
     const canvas_tests = testArtifact(b, canvas_mod);
 
     const desktop_mod = module(b, target, optimize, "src/root.zig");
+    desktop_mod.addImport("native_sdk_options", native_sdk_options);
     desktop_mod.addImport("geometry", geometry_mod);
     desktop_mod.addImport("app_dirs", app_dirs_mod);
     desktop_mod.addImport("assets", assets_mod);
@@ -140,6 +144,10 @@ pub fn build(b: *std.Build) void {
     desktop_mod.addImport("canvas", canvas_mod);
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
+    const widget_profile_test_mod = module(b, target, optimize, "src/widget_profile_tests.zig");
+    widget_profile_test_mod.addImport("native_sdk", desktop_mod);
+    widget_profile_test_mod.addImport("native_sdk_options", native_sdk_options);
+    const widget_profile_tests = testArtifact(b, widget_profile_test_mod);
 
     // The embeddable static library's root module carries only the C ABI
     // exports (fixed WebView shell host); user-app canvas libraries are
@@ -325,9 +333,11 @@ pub fn build(b: *std.Build) void {
     const wasm_geometry_mod = module(b, wasm_target, wasm_optimize, "src/primitives/geometry/root.zig");
     const wasm_json_mod = module(b, wasm_target, wasm_optimize, "src/primitives/json/root.zig");
     const wasm_canvas_mod = module(b, wasm_target, wasm_optimize, "src/primitives/canvas/root.zig");
+    wasm_canvas_mod.addImport("native_sdk_options", native_sdk_options);
     wasm_canvas_mod.addImport("geometry", wasm_geometry_mod);
     wasm_canvas_mod.addImport("json", wasm_json_mod);
     const wasm_native_mod = module(b, wasm_target, wasm_optimize, "src/root.zig");
+    wasm_native_mod.addImport("native_sdk_options", native_sdk_options);
     wasm_native_mod.addImport("geometry", wasm_geometry_mod);
     wasm_native_mod.addImport("json", wasm_json_mod);
     wasm_native_mod.addImport("canvas", wasm_canvas_mod);
@@ -394,6 +404,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(platform_info_tests).step);
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
+    test_step.dependOn(&b.addRunArtifact(widget_profile_tests).step);
     for (desktop_test_shards) |shard_tests| {
         test_step.dependOn(&b.addRunArtifact(shard_tests).step);
     }
@@ -787,6 +798,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-platform-info", "Run platform info module tests", platform_info_tests);
     addTestStep(b, "test-json", "Run JSON primitive tests", json_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
+    addTestStep(b, "test-widget-profile", "Verify stock and widget capacity profiles", widget_profile_tests);
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
     for (desktop_test_shard_specs, desktop_test_shards) |spec, shard_tests| {
         addTestStep(b, b.fmt("test-desktop-{s}", .{spec.name}), spec.description, shard_tests);
@@ -2405,6 +2417,12 @@ pub fn build(b: *std.Build) void {
         cef_bundle_script.step.dependOn(&cef_bundle_auto.step);
     }
     cef_bundle_step.dependOn(&cef_bundle_script.step);
+}
+
+fn nativeSdkOptionsModule(b: *std.Build, widget_profile: bool) *std.Build.Module {
+    const options = b.addOptions();
+    options.addOption(bool, "widget_profile", widget_profile);
+    return options.createModule();
 }
 
 fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, path: []const u8) *std.Build.Module {
