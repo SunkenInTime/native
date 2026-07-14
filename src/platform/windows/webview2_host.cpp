@@ -321,6 +321,11 @@ struct Window {
     int layer = 0;
     bool click_through = false;
     bool no_activate = false;
+    /* Desktop-layer windows are parented to the shell's wallpaper WorkerW.
+     * Z-order alone survives ordinary app activation but Show Desktop hides
+     * unowned top-level popups. The shell-owned parent keeps both software
+     * and DirectComposition widget windows on the desktop plane. */
+    HWND desktop_parent = nullptr;
     /* Declared content min-size floor for user resizes; axes <= 0 keep
      * the natural minimum (WM_GETMINMAXINFO applies the floor). */
     double min_width = 0;
@@ -341,6 +346,40 @@ struct Window {
     int layered_width = 0;
     int layered_height = 0;
 };
+
+static BOOL CALLBACK findWallpaperWorkerWindow(HWND top, LPARAM output_param) {
+    HWND shell_view = FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr);
+    if (!shell_view) return TRUE;
+    HWND worker = FindWindowExW(nullptr, top, L"WorkerW", nullptr);
+    if (!worker) return TRUE;
+    *reinterpret_cast<HWND *>(output_param) = worker;
+    return FALSE;
+}
+
+static HWND wallpaperWorkerWindow() {
+    HWND progman = FindWindowW(L"Progman", nullptr);
+    if (progman) {
+        DWORD_PTR ignored = 0;
+        SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, &ignored);
+    }
+    HWND worker = nullptr;
+    EnumWindows(findWallpaperWorkerWindow, reinterpret_cast<LPARAM>(&worker));
+    return worker;
+}
+
+static void attachDesktopWindow(Window &window) {
+    if (!window.hwnd || window.layer != 1) return;
+    HWND worker = wallpaperWorkerWindow();
+    if (!worker) return;
+    RECT frame = {};
+    GetWindowRect(window.hwnd, &frame);
+    POINT origin = { frame.left, frame.top };
+    ScreenToClient(worker, &origin);
+    SetParent(window.hwnd, worker);
+    SetWindowPos(window.hwnd, HWND_BOTTOM, origin.x, origin.y, 0, 0,
+        SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    window.desktop_parent = worker;
+}
 
 /* One rectangle of a canvas view's window-drag mirror (runtime push,
  * view-local logical coordinates). `exclusion` rects are the
@@ -487,9 +526,10 @@ struct HostLifetime {
     bool alive = true;
 };
 
-/* App timers (runtime `startTimer`) on the Win32 message loop: each slot
- * owns the SetTimer id kAppTimerIdBase + slot index, scheduled on the
- * first live top-level window so WM_TIMER lands in windowProc. */
+/* App timers (runtime `startTimer`) still dispatch on the Win32 message loop.
+ * Sub-frame intervals use a timer-queue deadline which posts the same
+ * WM_TIMER message: USER SetTimer quantizes 21-24 ms canvas wakes toward
+ * 31 ms on common systems, limiting a requested 30 Hz surface to ~21-28 Hz. */
 constexpr size_t kMaxAppTimers = 64;
 constexpr UINT_PTR kAppTimerIdBase = 0x1000;
 /* The 16 ms per-window frame-pump timer (SetTimer id on each top-level
@@ -499,9 +539,27 @@ constexpr UINT_PTR kFrameTimerId = 1;
 struct AppTimer {
     uint64_t id = 0;
     HWND hwnd = nullptr;
+    UINT_PTR message_id = 0;
+    HANDLE queue_timer = nullptr;
     bool repeats = false;
     bool in_use = false;
 };
+
+static VOID CALLBACK appTimerQueueCallback(PVOID context, BOOLEAN) {
+    AppTimer *slot = static_cast<AppTimer *>(context);
+    if (slot && slot->hwnd && slot->message_id) {
+        PostMessageW(slot->hwnd, WM_TIMER, slot->message_id, 0);
+    }
+}
+
+static void cancelAppTimerSlot(AppTimer &slot) {
+    if (slot.queue_timer) {
+        DeleteTimerQueueTimer(nullptr, slot.queue_timer, INVALID_HANDLE_VALUE);
+    } else if (slot.hwnd && slot.message_id) {
+        KillTimer(slot.hwnd, slot.message_id);
+    }
+    slot = {};
+}
 
 /* Cancellation handle for the audio cache-fill download: the host and
  * the detached download thread share it, so a replaced or stopped
@@ -4676,9 +4734,7 @@ static bool handleAppTimerMessage(Host *host, WPARAM wparam) {
     if (!slot.in_use) return true;
     const uint64_t timer_id = slot.id;
     if (!slot.repeats) {
-        if (slot.hwnd) KillTimer(slot.hwnd, wparam);
-        slot.in_use = false;
-        slot.hwnd = nullptr;
+        cancelAppTimerSlot(slot);
     }
     if (host->callback) {
         WindowsEvent event = {};
@@ -5180,6 +5236,7 @@ static bool createNativeWindow(Host *host, Window &window) {
          * `window` referencing the stored map entry for exactly this. */
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
+    attachDesktopWindow(window);
     ShowWindow(hwnd, window.no_activate ? SW_SHOWNOACTIVATE : SW_SHOW);
     if (window.layer == 1) {
         SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -5256,9 +5313,7 @@ void native_sdk_windows_destroy(Host *host) {
     host->bridge_callback = nullptr;
     for (size_t index = 0; index < kMaxAppTimers; ++index) {
         AppTimer &slot = host->app_timers[index];
-        if (slot.in_use && slot.hwnd) KillTimer(slot.hwnd, kAppTimerIdBase + index);
-        slot.in_use = false;
-        slot.hwnd = nullptr;
+        if (slot.in_use) cancelAppTimerSlot(slot);
     }
     /* Retire the audio pipeline: the session closes asynchronously on
      * Media Foundation worker threads (the event pump owns the refs),
@@ -5646,9 +5701,18 @@ void native_sdk_windows_start_timer(Host *host, uint64_t timer_id, uint64_t inte
     if (interval_ms == 0) interval_ms = 1;
     slot->id = timer_id;
     slot->hwnd = hwnd;
+    slot->message_id = win32_id;
     slot->repeats = repeats != 0;
     slot->in_use = true;
-    SetTimer(hwnd, win32_id, interval_ms, nullptr);
+    if (interval_ms < 40) {
+        if (!CreateTimerQueueTimer(&slot->queue_timer, nullptr, appTimerQueueCallback,
+            slot, interval_ms, repeats ? interval_ms : 0, WT_EXECUTEDEFAULT)) {
+            slot->queue_timer = nullptr;
+            SetTimer(hwnd, win32_id, interval_ms, nullptr);
+        }
+    } else {
+        SetTimer(hwnd, win32_id, interval_ms, nullptr);
+    }
 }
 
 void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id) {
@@ -5656,9 +5720,7 @@ void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id) {
     for (size_t index = 0; index < kMaxAppTimers; ++index) {
         AppTimer &slot = host->app_timers[index];
         if (slot.in_use && slot.id == timer_id) {
-            if (slot.hwnd) KillTimer(slot.hwnd, kAppTimerIdBase + index);
-            slot.in_use = false;
-            slot.hwnd = nullptr;
+            cancelAppTimerSlot(slot);
         }
     }
 }
@@ -6097,18 +6159,33 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
         view.gpu_backend = 3;
         auto owner = host->windows.find(window_id);
         if (owner != host->windows.end() && owner->second.transparent) {
+            /* Recreate the window's DWM presentation binding, not merely its
+             * style bits. Detaching a dead DComp visual is asynchronous; an
+             * immediate UpdateLayeredWindow otherwise targets the stale
+             * no-redirection surface and the animation freezes during the
+             * renderer gap. A bounded hide/style/show transition gives DWM
+             * an unambiguous layered binding for the same HWND. */
+            ShowWindow(owner->second.hwnd, SW_HIDE);
             LONG_PTR ex_style = GetWindowLongPtrW(owner->second.hwnd, GWL_EXSTYLE);
             ex_style &= ~((LONG_PTR)WS_EX_NOREDIRECTIONBITMAP);
             ex_style |= WS_EX_LAYERED;
             SetWindowLongPtrW(owner->second.hwnd, GWL_EXSTYLE, ex_style);
             SetWindowPos(owner->second.hwnd, nullptr, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            ShowWindow(owner->second.hwnd, SW_SHOWNOACTIVATE);
+            if (owner->second.layer == 1) {
+                SetWindowPos(owner->second.hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            DwmFlush();
         }
         return 0;
     }
     view.gpu_backend = 2;
     auto gpu_owner = host->windows.find(window_id);
     if (gpu_owner != host->windows.end()) {
+        const bool was_layered = (GetWindowLongPtrW(gpu_owner->second.hwnd, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
+        if (was_layered) ShowWindow(gpu_owner->second.hwnd, SW_HIDE);
         LONG_PTR owner_ex_style = GetWindowLongPtrW(gpu_owner->second.hwnd, GWL_EXSTYLE);
         owner_ex_style &= ~((LONG_PTR)WS_EX_LAYERED);
         owner_ex_style |= WS_EX_NOREDIRECTIONBITMAP;
@@ -6118,6 +6195,14 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
         SetLayeredWindowAttributes(view.hwnd, 0, 0, LWA_ALPHA);
         SetWindowPos(gpu_owner->second.hwnd, nullptr, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        if (was_layered) {
+            ShowWindow(gpu_owner->second.hwnd, SW_SHOWNOACTIVATE);
+            if (gpu_owner->second.layer == 1) {
+                SetWindowPos(gpu_owner->second.hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            DwmFlush();
+        }
     }
     view.gpu_nonblank = 1;
     view.gpu_sample_color = ((uint32_t)clear_a << 24) | ((uint32_t)clear_r << 16) |
