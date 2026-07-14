@@ -63,6 +63,7 @@ pub const ShellEdge = types.ShellEdge;
 pub const ShellAxis = types.ShellAxis;
 pub const ShellView = types.ShellView;
 pub const ShellWindow = types.ShellWindow;
+pub const WindowLayer = types.WindowLayer;
 pub const ShellConfig = types.ShellConfig;
 pub const ShellTab = types.ShellTab;
 pub const ShellPrimaryAction = types.ShellPrimaryAction;

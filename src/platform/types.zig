@@ -416,6 +416,12 @@ pub const WindowTitlebarStyle = enum {
     chromeless,
 };
 
+pub const WindowLayer = enum {
+    normal,
+    bottom,
+    topmost,
+};
+
 /// The host-reported form factor (size class) of the surface an app
 /// runs on, riding the window-chrome channel beside the inset geometry.
 /// `.unknown` is the honest default everywhere the host has not said —
@@ -516,6 +522,10 @@ pub const WindowOptions = struct {
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     titlebar: WindowTitlebarStyle = .standard,
+    transparent: bool = false,
+    layer: WindowLayer = .normal,
+    click_through: bool = false,
+    no_activate: bool = false,
     show: WindowShowMode = .immediate,
     /// Content min-size floor the WINDOW enforces (macOS
     /// `contentMinSize`): the user cannot resize below it, so declared
@@ -573,6 +583,10 @@ pub const WindowCreateOptions = struct {
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
     titlebar: WindowTitlebarStyle = .standard,
+    transparent: bool = false,
+    layer: WindowLayer = .normal,
+    click_through: bool = false,
+    no_activate: bool = false,
     show: WindowShowMode = .immediate,
     /// Window-enforced content min-size floor (see
     /// `WindowOptions.min_width`/`min_height`); 0 = no floor.
@@ -590,6 +604,10 @@ pub const WindowCreateOptions = struct {
             .restore_state = self.restore_state,
             .restore_policy = self.restore_policy,
             .titlebar = self.titlebar,
+            .transparent = self.transparent,
+            .layer = self.layer,
+            .click_through = self.click_through,
+            .no_activate = self.no_activate,
             .show = self.show,
             .min_width = self.min_width,
             .min_height = self.min_height,
@@ -757,7 +775,7 @@ pub const GpuSurfaceOptions = struct {
         return (self.backend == .metal or self.backend == .software) and
             self.pixel_format == .bgra8_unorm and
             self.present_mode == .timer and
-            self.alpha_mode == .@"opaque" and
+            (self.alpha_mode == .@"opaque" or self.alpha_mode == .premultiplied) and
             self.color_space == .srgb and
             self.vsync;
     }

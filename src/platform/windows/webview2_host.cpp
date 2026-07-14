@@ -209,6 +209,7 @@ struct WindowsEvent {
      * window was minimized (heartbeat pacing; nothing painted): its
      * timestamp is pacing policy, never a latency endpoint. */
     int occluded;
+    int alpha_mode;
     int input_kind;
     int button;
     double delta_x;
@@ -297,6 +298,16 @@ struct Window {
      * app draws its header into the band while min/max/close, snap
      * layouts, and the resize borders stay the OS's own. */
     int titlebar_style = 0;
+    bool transparent = false;
+    /* 0 normal, 1 bottom, 2 topmost. */
+    int layer = 0;
+    bool click_through = false;
+    bool no_activate = false;
+    /* Desktop-layer windows are parented to the shell's wallpaper WorkerW.
+     * Z-order alone survives ordinary app activation but Show Desktop hides
+     * unowned top-level popups. The shell-owned parent keeps transparent
+     * software widgets on the desktop plane. */
+    HWND desktop_parent = nullptr;
     /* Declared content min-size floor for user resizes; axes <= 0 keep
      * the natural minimum (WM_GETMINMAXINFO applies the floor). */
     double min_width = 0;
@@ -307,6 +318,40 @@ struct Window {
     COLORREF hidden_caption_color = 0;
     bool hidden_caption_color_set = false;
 };
+
+static BOOL CALLBACK findWallpaperWorkerWindow(HWND top, LPARAM output_param) {
+    HWND shell_view = FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr);
+    if (!shell_view) return TRUE;
+    HWND worker = FindWindowExW(nullptr, top, L"WorkerW", nullptr);
+    if (!worker) return TRUE;
+    *reinterpret_cast<HWND *>(output_param) = worker;
+    return FALSE;
+}
+
+static HWND wallpaperWorkerWindow() {
+    HWND progman = FindWindowW(L"Progman", nullptr);
+    if (progman) {
+        DWORD_PTR ignored = 0;
+        SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, &ignored);
+    }
+    HWND worker = nullptr;
+    EnumWindows(findWallpaperWorkerWindow, reinterpret_cast<LPARAM>(&worker));
+    return worker;
+}
+
+static void attachDesktopWindow(Window &window) {
+    if (!window.hwnd || window.layer != 1) return;
+    HWND worker = wallpaperWorkerWindow();
+    if (!worker) return;
+    RECT frame = {};
+    GetWindowRect(window.hwnd, &frame);
+    POINT origin = { frame.left, frame.top };
+    ScreenToClient(worker, &origin);
+    SetParent(window.hwnd, worker);
+    SetWindowPos(window.hwnd, HWND_BOTTOM, origin.x, origin.y, 0, 0,
+        SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    window.desktop_parent = worker;
+}
 
 /* One rectangle of a canvas view's window-drag mirror (runtime push,
  * view-local logical coordinates). `exclusion` rects are the
@@ -362,6 +407,8 @@ struct NativeView {
     double width = 0;
     double height = 0;
     int kind = kViewLabel;
+    /* GpuSurfaceAlphaMode ordinal: 1 opaque, 2 premultiplied. */
+    int gpu_alpha_mode = 1;
     int layer = 0;
     uint64_t creation_order = 0;
     bool visible = true;
@@ -2430,6 +2477,7 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
      * timestamp measures the deliberate minimized cadence, not a paint
      * — the runtime skips input-latency stamping for them. */
     event.occluded = gpuSurfaceOccludedPacingActive(view) ? 1 : 0;
+    event.alpha_mode = view.gpu_alpha_mode;
     emitGpuSurfaceEvent(host, view, event);
 }
 
@@ -2488,6 +2536,55 @@ static void paintGpuSurface(NativeView &view, HWND hwnd, HDC dc) {
     SetStretchBltMode(dc, HALFTONE);
     SetBrushOrgEx(dc, 0, 0, nullptr);
     StretchDIBits(dc, 0, 0, client_width, client_height, 0, 0, view.gpu_buf_width, view.gpu_buf_height, view.gpu_bgra.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+}
+
+/* Present one full-surface gpu view into a per-pixel-alpha top-level
+ * layered window. UpdateLayeredWindow owns the top-level redirection
+ * surface; the child HWND stays as the runtime's input/timer endpoint,
+ * but its WM_PAINT pixels are not the glass for this window shape. */
+static bool presentLayeredGpuSurface(Window &window, const NativeView &view) {
+    if (!window.hwnd || !window.transparent || view.gpu_bgra.empty()) return false;
+    if (view.gpu_buf_width <= 0 || view.gpu_buf_height <= 0) return false;
+
+    HDC screen_dc = GetDC(nullptr);
+    if (!screen_dc) return false;
+    HDC memory_dc = CreateCompatibleDC(screen_dc);
+    if (!memory_dc) {
+        ReleaseDC(nullptr, screen_dc);
+        return false;
+    }
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = view.gpu_buf_width;
+    info.bmiHeader.biHeight = -view.gpu_buf_height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void *dib_bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(memory_dc, &info, DIB_RGB_COLORS, &dib_bits, nullptr, 0);
+    if (!bitmap || !dib_bits) {
+        if (bitmap) DeleteObject(bitmap);
+        DeleteDC(memory_dc);
+        ReleaseDC(nullptr, screen_dc);
+        return false;
+    }
+    memcpy(dib_bits, view.gpu_bgra.data(), view.gpu_bgra.size());
+    HGDIOBJ previous = SelectObject(memory_dc, bitmap);
+
+    RECT frame = {};
+    GetWindowRect(window.hwnd, &frame);
+    POINT destination = { frame.left, frame.top };
+    POINT source = { 0, 0 };
+    SIZE size = { view.gpu_buf_width, view.gpu_buf_height };
+    BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    const BOOL updated = UpdateLayeredWindow(window.hwnd, screen_dc, &destination, &size, memory_dc, &source, 0, &blend, ULW_ALPHA);
+
+    SelectObject(memory_dc, previous);
+    DeleteObject(bitmap);
+    DeleteDC(memory_dc);
+    ReleaseDC(nullptr, screen_dc);
+    return updated != FALSE;
 }
 
 /* Key names match shortcutKeyFromWParam (which mirrors the GTK/AppKit gpu
@@ -2574,6 +2671,8 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
         case WM_ERASEBKGND:
             return 1;
         case WM_NCHITTEST: {
+            auto owner = host->windows.find(view->window_id);
+            if (owner != host->windows.end() && owner->second.click_through) return HTTRANSPARENT;
             /* This child covers the parent's whole client area, so the
              * parent's WM_NCHITTEST — where the hidden-titlebar caption
              * behavior lives — is only ever consulted where this child
@@ -4539,6 +4638,21 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(host));
     }
     Host *host = hostFromWindow(hwnd);
+    const Window *policy_window = windowForHwnd(host, hwnd);
+    if (policy_window && message == WM_WINDOWPOSCHANGING) {
+        WINDOWPOS *position = reinterpret_cast<WINDOWPOS *>(lparam);
+        if (position && policy_window->layer == 1) {
+            position->hwndInsertAfter = HWND_BOTTOM;
+            position->flags &= ~SWP_NOZORDER;
+            position->flags |= SWP_NOACTIVATE;
+        } else if (position && policy_window->layer == 2) {
+            position->hwndInsertAfter = HWND_TOPMOST;
+            position->flags &= ~SWP_NOZORDER;
+            if (policy_window->no_activate) position->flags |= SWP_NOACTIVATE;
+        }
+    }
+    if (policy_window && policy_window->click_through && message == WM_NCHITTEST) return HTTRANSPARENT;
+    if (policy_window && policy_window->no_activate && message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
     /* Hidden-titlebar (custom frame) windows first: DwmDefWindowProc
      * gets FIRST CLAIM on every message — it owns the DWM-drawn caption
      * buttons over the extended frame (hit-test, hover wash, press), and
@@ -4927,6 +5041,17 @@ static bool createNativeWindow(Host *host, Window &window) {
         style = WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX;
         if (window.resizable) style |= WS_THICKFRAME | WS_MAXIMIZEBOX;
     }
+    if (window.transparent) {
+        /* Per-pixel alpha has no meaningful non-client frame: the DWM
+         * would otherwise composite a rectangular caption/border around
+         * the layered bitmap. Transparent windows are single-surface
+         * popups even if a caller forgot to pair the flag with chromeless. */
+        style = WS_POPUP;
+    }
+    DWORD ex_style = 0;
+    if (window.transparent || window.click_through) ex_style |= WS_EX_LAYERED;
+    if (window.click_through) ex_style |= WS_EX_TRANSPARENT;
+    if (window.no_activate) ex_style |= WS_EX_NOACTIVATE;
     /* The requested frame is a CONTENT size in LOGICAL points (the
      * other hosts size the content area); scale it to physical pixels
      * at the DPI the window opens at (the system DPI — WM_DPICHANGED
@@ -4942,7 +5067,7 @@ static bool createNativeWindow(Host *host, Window &window) {
     const double content_width = window.width * scale;
     const double content_height = window.height * scale;
     RECT frame = { 0, 0, physicalContentExtent(content_width), physicalContentExtent(content_height) };
-    adjustWindowRectForDpi(&frame, style, has_menu ? TRUE : FALSE, 0, dpi);
+    adjustWindowRectForDpi(&frame, style, has_menu ? TRUE : FALSE, ex_style, dpi);
     LONG outer_width = frame.right - frame.left;
     LONG outer_height = frame.bottom - frame.top;
     if (windowUsesHiddenTitlebar(window)) {
@@ -4950,13 +5075,15 @@ static bool createNativeWindow(Host *host, Window &window) {
         outer_width = outer.cx;
         outer_height = outer.cy;
     }
+    const int create_x = (window.x != 0 || window.y != 0) ? (int)std::lround(window.x * scale) : CW_USEDEFAULT;
+    const int create_y = (window.x != 0 || window.y != 0) ? (int)std::lround(window.y * scale) : CW_USEDEFAULT;
     HWND hwnd = CreateWindowExW(
-        0,
+        ex_style,
         L"NativeSdkWindowsHost",
         title.c_str(),
         style,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
+        create_x,
+        create_y,
         outer_width,
         outer_height,
         nullptr,
@@ -4975,7 +5102,13 @@ static bool createNativeWindow(Host *host, Window &window) {
          * `window` referencing the stored map entry for exactly this. */
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
-    ShowWindow(hwnd, SW_SHOW);
+    attachDesktopWindow(window);
+    ShowWindow(hwnd, window.no_activate ? SW_SHOWNOACTIVATE : SW_SHOW);
+    if (window.layer == 1) {
+        SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    } else if (window.layer == 2) {
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | (window.no_activate ? SWP_NOACTIVATE : 0));
+    }
     UpdateWindow(hwnd);
     SetTimer(hwnd, kFrameTimerId, 16, nullptr);
     return true;
@@ -4992,7 +5125,7 @@ size_t native_sdk_windows_clipboard_read_data(Host *host, const char *mime_type,
 int native_sdk_windows_clipboard_write_data(Host *host, const char *mime_type, size_t mime_type_len, const char *bytes, size_t bytes_len);
 void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id);
 
-Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
+Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, double min_width, double min_height) {
     (void)restore_frame;
     INITCOMMONCONTROLSEX controls = {};
     controls.dwSize = sizeof(controls);
@@ -5023,6 +5156,10 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     window.height = height;
     window.resizable = resizable != 0;
     window.titlebar_style = titlebar_style;
+    window.transparent = transparent != 0;
+    window.layer = window_layer;
+    window.click_through = click_through != 0;
+    window.no_activate = no_activate != 0;
     window.min_width = min_width;
     window.min_height = min_height;
     host->windows[window.id] = window;
@@ -5382,7 +5519,7 @@ void native_sdk_windows_set_shortcuts(Host *host, const char *const *ids, const 
     }
 }
 
-int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
+int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, double min_width, double min_height) {
     (void)restore_frame;
     if (!host || host->windows.find(window_id) != host->windows.end()) return 0;
     Window window;
@@ -5395,6 +5532,10 @@ int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char 
     window.height = height;
     window.resizable = resizable != 0;
     window.titlebar_style = titlebar_style;
+    window.transparent = transparent != 0;
+    window.layer = window_layer;
+    window.click_through = click_through != 0;
+    window.no_activate = no_activate != 0;
     window.min_width = min_width;
     window.min_height = min_height;
     /* Register BEFORE creating: createNativeWindow's post-create frame
@@ -5570,7 +5711,7 @@ int native_sdk_windows_minimize_window(Host *host, uint64_t window_id) {
     return 1;
 }
 
-int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len) {
+int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len, int alpha_mode) {
     if (!host || label_len == 0 || !isSupportedNativeViewKind(kind) || !validNativeViewFrame(x, y, width, height)) return 0;
     auto window = host->windows.find(window_id);
     if (window == host->windows.end() || !window->second.hwnd) return 0;
@@ -5598,6 +5739,7 @@ int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *l
     view.width = width;
     view.height = height;
     view.kind = kind;
+    view.gpu_alpha_mode = kind == kViewGpuSurface ? alpha_mode : 1;
     view.layer = layer;
     view.creation_order = host->next_child_order++;
     view.visible = visible != 0;
@@ -5609,6 +5751,7 @@ int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *l
     std::wstring class_name;
     DWORD style = WS_CHILD | WS_CLIPSIBLINGS;
     DWORD ex_style = 0;
+    if (window->second.click_through) ex_style |= WS_EX_TRANSPARENT;
     switch (kind) {
         case kViewToolbar:
         case kViewTitlebarAccessory:
@@ -5753,10 +5896,14 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
     if (width > INT_MAX || height > INT_MAX) return 0;
     if (rgba8_len != width * height * 4) return 0;
     NativeView &view = found->second;
+    auto owner = host->windows.find(view.window_id);
+    const bool layered = owner != host->windows.end() && owner->second.transparent;
+    const bool premultiplied = layered && view.gpu_alpha_mode == 2;
 
-    /* Straight RGBA8 -> top-down BGRA rows for a BI_RGB 32bpp DIB. The
-     * surface is opaque (alpha_mode "opaque"), so no premultiply is
-     * needed. The fourth byte is FORCED to 255, not copied: plain GDI
+    /* Straight RGBA8 -> top-down BGRA rows for a BI_RGB 32bpp DIB.
+     * Layered windows require premultiplied BGRA for AC_SRC_ALPHA, so
+     * the straight-alpha reference-renderer output is multiplied here.
+     * Ordinary GDI surfaces keep forcing alpha to 255: plain GDI
      * ignores it, but on hidden-titlebar windows the DWM frame extends
      * over the top band and composites its own caption material wherever
      * the redirection surface's alpha is 0 — the app's pixels must read
@@ -5767,17 +5914,23 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
     const size_t pixel_count = width * height;
     for (size_t index = 0; index < pixel_count; index++) {
         const uint8_t *src = rgba8 + index * 4;
-        dst[index * 4 + 0] = src[2];
-        dst[index * 4 + 1] = src[1];
-        dst[index * 4 + 2] = src[0];
-        dst[index * 4 + 3] = 255;
+        const uint8_t alpha = premultiplied ? src[3] : 255;
+        if (premultiplied) {
+            dst[index * 4 + 0] = (uint8_t)(((uint32_t)src[2] * alpha + 127) / 255);
+            dst[index * 4 + 1] = (uint8_t)(((uint32_t)src[1] * alpha + 127) / 255);
+            dst[index * 4 + 2] = (uint8_t)(((uint32_t)src[0] * alpha + 127) / 255);
+        } else {
+            dst[index * 4 + 0] = src[2];
+            dst[index * 4 + 1] = src[1];
+            dst[index * 4 + 2] = src[0];
+        }
+        dst[index * 4 + 3] = alpha;
     }
     view.gpu_buf_width = (int)width;
     view.gpu_buf_height = (int)height;
 
     /* Hidden-titlebar windows: keep the DWM caption material behind the
      * button cluster matched to the header the app just presented. */
-    auto owner = host->windows.find(view.window_id);
     if (owner != host->windows.end()) syncHiddenCaptionColor(host, owner->second, view, rgba8, width, height);
 
     const size_t sample_index = ((height / 2) * width + width / 2) * 4;
@@ -5790,7 +5943,11 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
         view.gpu_sample_color = ((uint32_t)sa << 24) | ((uint32_t)sr << 16) | ((uint32_t)sg << 8) | (uint32_t)sb;
     }
 
-    InvalidateRect(view.hwnd, nullptr, FALSE);
+    if (layered) {
+        if (!presentLayeredGpuSurface(owner->second, view)) return 0;
+    } else {
+        InvalidateRect(view.hwnd, nullptr, FALSE);
+    }
     /* A present is the completion producer on the surface's single
      * frame-event scheduler: the completion event it arms is what
      * drives the runtime's frame loop (an armed animation presents,

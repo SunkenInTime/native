@@ -81,6 +81,7 @@ pub const WindowOptions = types.WindowOptions;
 pub const WindowState = types.WindowState;
 pub const WindowInfo = types.WindowInfo;
 pub const WindowCreateOptions = types.WindowCreateOptions;
+pub const WindowLayer = types.WindowLayer;
 pub const WebViewOptions = types.WebViewOptions;
 pub const WebViewInfo = types.WebViewInfo;
 pub const ViewKind = types.ViewKind;

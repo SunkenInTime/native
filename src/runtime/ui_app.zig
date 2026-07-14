@@ -2861,7 +2861,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // invalidates before the first present, and the surface would
             // stay blank until the first input arrives.
             const services = runtime.options.platform.services;
-            const clear_color = self.effectiveTokens().colors.background;
+            // Premultiplied surfaces are composited by their host; the
+            // untouched window must stay transparent so rounded widget
+            // chrome does not reveal an opaque rectangular clear behind it.
+            const clear_color = if (frame_event.alpha_mode == .premultiplied)
+                canvas.Color.rgba8(0, 0, 0, 0)
+            else
+                self.effectiveTokens().colors.background;
             var packet_attempted = false;
             if (services.present_gpu_surface_packet_fn != null or services.present_gpu_surface_packet_binary_fn != null) {
                 packet_attempted = true;
