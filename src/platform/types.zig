@@ -662,6 +662,9 @@ pub const ViewKind = enum {
 pub const GpuSurfaceBackend = enum {
     none,
     metal,
+    /// Windows hardware packet renderer: D3D11 raster into a
+    /// DirectComposition flip-model swapchain.
+    d3d11,
     /// CPU rasterization (reference renderer) presented through the
     /// platform's pixel blit path. Platforms without a GPU packet renderer
     /// (Linux/GTK) report this backend in their frame events; manifests
@@ -771,7 +774,7 @@ pub const GpuSurfaceOptions = struct {
     vsync: bool = true,
 
     pub fn isSupported(self: GpuSurfaceOptions) bool {
-        return (self.backend == .metal or self.backend == .software) and
+        return (self.backend == .metal or self.backend == .d3d11 or self.backend == .software) and
             self.pixel_format == .bgra8_unorm and
             self.present_mode == .timer and
             (self.alpha_mode == .@"opaque" or self.alpha_mode == .premultiplied) and

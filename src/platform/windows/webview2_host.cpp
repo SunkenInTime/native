@@ -9,6 +9,7 @@
 #include <wincodec.h>
 #include <uxtheme.h>
 #include <dwmapi.h>
+#include "d3d_presenter.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -154,6 +155,21 @@ constexpr UINT kAudioSessionMessage = WM_APP + 45;
 constexpr UINT kAudioSpectrumMessage = WM_APP + 46;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
+static void reportWeaverBackend(const char *backend) {
+    static std::string reported;
+    if (reported == backend) return;
+    WCHAR path[32768] = {};
+    const DWORD length = GetEnvironmentVariableW(L"WEAVER_BACKEND_FILE", path, (DWORD)(sizeof(path) / sizeof(path[0])));
+    if (length == 0 || length >= sizeof(path) / sizeof(path[0])) return;
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(file, backend, (DWORD)strlen(backend), &written, nullptr);
+    CloseHandle(file);
+    if (written == strlen(backend)) reported = backend;
+}
+
 constexpr int kViewWebView = 0;
 constexpr int kViewToolbar = 1;
 constexpr int kViewTitlebarAccessory = 2;
@@ -210,6 +226,8 @@ struct WindowsEvent {
      * timestamp is pacing policy, never a latency endpoint. */
     int occluded;
     int alpha_mode;
+    /* GpuSurfaceBackend ordinal: 2 D3D11, 3 software. */
+    int gpu_backend;
     int input_kind;
     int button;
     double delta_x;
@@ -380,6 +398,8 @@ struct NativeView {
     int kind = kViewLabel;
     /* GpuSurfaceAlphaMode ordinal: 1 opaque, 2 premultiplied. */
     int gpu_alpha_mode = 1;
+    int gpu_backend = 3;
+    NativeSdkD3DPresenter *gpu_presenter = nullptr;
     int layer = 0;
     uint64_t creation_order = 0;
     bool visible = true;
@@ -1753,6 +1773,7 @@ static void destroyNativeViewAndChildren(Host *host, const std::string &key) {
         if (entry.second.window_id == window_id && entry.second.parent == label) children.push_back(entry.first);
     }
     for (const std::string &child : children) destroyNativeViewAndChildren(host, child);
+    if (found->second.gpu_presenter) nativeSdkD3DPresenterDestroy(found->second.gpu_presenter);
     if (found->second.hwnd) DestroyWindow(found->second.hwnd);
     host->native_views.erase(found);
 }
@@ -2449,6 +2470,7 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
      * — the runtime skips input-latency stamping for them. */
     event.occluded = gpuSurfaceOccludedPacingActive(view) ? 1 : 0;
     event.alpha_mode = view.gpu_alpha_mode;
+    event.gpu_backend = view.gpu_presenter ? 2 : 3;
     emitGpuSurfaceEvent(host, view, event);
 }
 
@@ -4764,6 +4786,24 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         }
     }
     switch (message) {
+        case WM_ERASEBKGND:
+            if (host) {
+                for (auto &entry : host->windows) {
+                    if (entry.second.hwnd == hwnd && entry.second.transparent) return 1;
+                }
+            }
+            break;
+        case WM_PAINT:
+            if (host) {
+                for (auto &entry : host->windows) {
+                    if (entry.second.hwnd != hwnd || !entry.second.transparent) continue;
+                    PAINTSTRUCT paint = {};
+                    BeginPaint(hwnd, &paint);
+                    EndPaint(hwnd, &paint);
+                    return 0;
+                }
+            }
+            break;
         case kWakeMessage:
             if (host) {
                 WindowsEvent wake = {};
@@ -5707,7 +5747,7 @@ int native_sdk_windows_minimize_window(Host *host, uint64_t window_id) {
     return 1;
 }
 
-int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len, int alpha_mode) {
+int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len, int alpha_mode, int gpu_backend) {
     if (!host || label_len == 0 || !isSupportedNativeViewKind(kind) || !validNativeViewFrame(x, y, width, height)) return 0;
     auto window = host->windows.find(window_id);
     if (window == host->windows.end() || !window->second.hwnd) return 0;
@@ -5736,6 +5776,7 @@ int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *l
     view.height = height;
     view.kind = kind;
     view.gpu_alpha_mode = kind == kViewGpuSurface ? alpha_mode : 1;
+    view.gpu_backend = kind == kViewGpuSurface ? gpu_backend : 3;
     view.layer = layer;
     view.creation_order = host->next_child_order++;
     view.visible = visible != 0;
@@ -5829,6 +5870,22 @@ int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *l
     if (!hwnd) return 0;
 
     view.hwnd = hwnd;
+    if (kind == kViewGpuSurface && gpu_backend == 2) {
+        view.gpu_presenter = nativeSdkD3DPresenterCreate(window->second.hwnd);
+        if (view.gpu_presenter) {
+            LONG_PTR child_ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, child_ex_style | WS_EX_LAYERED);
+            SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+            LONG_PTR owner_ex_style = GetWindowLongPtrW(window->second.hwnd, GWL_EXSTYLE);
+            owner_ex_style &= ~((LONG_PTR)WS_EX_LAYERED);
+            owner_ex_style |= WS_EX_NOREDIRECTIONBITMAP;
+            SetWindowLongPtrW(window->second.hwnd, GWL_EXSTYLE, owner_ex_style);
+            SetWindowPos(window->second.hwnd, nullptr, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        } else {
+            view.gpu_backend = 3;
+        }
+    }
     applyNativeViewState(view, true, display_text);
     if (view.kind == kViewProgressIndicator) {
         SendMessageW(view.hwnd, PBM_SETMARQUEE, TRUE, 30);
@@ -5974,6 +6031,43 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
     view.gpu_presented = true;
     if (first_present) view.gpu_prompt_frame_pending = true;
     gpuSurfaceScheduleFrameEmission(view);
+    reportWeaverBackend("software");
+    return 1;
+}
+
+int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t window_id,
+    const char *label, size_t label_len, double surface_width, double surface_height,
+    double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a,
+    int requires_render, size_t command_count, size_t unsupported_command_count,
+    int representable, const uint8_t *packet, size_t packet_len) {
+    if (!host || label_len == 0 || !packet || packet_len == 0 || !requires_render ||
+        !representable || unsupported_command_count != 0 || command_count == 0) return 0;
+    auto found = host->native_views.find(nativeViewKey(window_id, slice(label, label_len)));
+    if (found == host->native_views.end() || found->second.kind != kViewGpuSurface ||
+        !found->second.gpu_presenter) return 0;
+    NativeView &view = found->second;
+    if (!nativeSdkD3DPresenterPresent(view.gpu_presenter, surface_width, surface_height,
+        scale, clear_r, clear_g, clear_b, clear_a, packet, packet_len)) {
+        nativeSdkD3DPresenterDestroy(view.gpu_presenter);
+        view.gpu_presenter = nullptr;
+        view.gpu_backend = 3;
+        auto owner = host->windows.find(window_id);
+        if (owner != host->windows.end() && owner->second.transparent) {
+            LONG_PTR ex_style = GetWindowLongPtrW(owner->second.hwnd, GWL_EXSTYLE);
+            ex_style &= ~((LONG_PTR)WS_EX_NOREDIRECTIONBITMAP);
+            ex_style |= WS_EX_LAYERED;
+            SetWindowLongPtrW(owner->second.hwnd, GWL_EXSTYLE, ex_style);
+        }
+        return 0;
+    }
+    view.gpu_nonblank = 1;
+    view.gpu_sample_color = ((uint32_t)clear_a << 24) | ((uint32_t)clear_r << 16) |
+        ((uint32_t)clear_g << 8) | (uint32_t)clear_b;
+    const bool first_present = !view.gpu_presented;
+    view.gpu_presented = true;
+    if (first_present) view.gpu_prompt_frame_pending = true;
+    gpuSurfaceScheduleFrameEmission(view);
+    reportWeaverBackend("gpu");
     return 1;
 }
 

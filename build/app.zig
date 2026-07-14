@@ -593,6 +593,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 // fails the compile by design if it cannot be found.
                 app_mod.addIncludePath(dep.path("third_party/webview2/include"));
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = &.{"-std=c++17"} });
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/d3d_presenter.cpp"), .flags = &.{"-std=c++17"} });
                 // WebView2Loader.dll rides next to the installed app
                 // executable: the host loads it at runtime to discover
                 // the machine's WebView2 runtime. Canvas apps never
@@ -609,6 +610,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 // — no WebView2Loader.dll is installed or path-wired,
                 // and the executable carries no reference to it at all.
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17", "-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB" } });
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/windows/d3d_presenter.cpp"), .flags = &.{"-std=c++17"} });
             },
             .chromium => {
                 const cef_check = addCefCheck(b, target, cef_dir);
@@ -638,6 +640,9 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkSystemLibrary("mf", .{});
         app_mod.linkSystemLibrary("mfplat", .{});
         app_mod.linkSystemLibrary("winhttp", .{});
+        app_mod.linkSystemLibrary("d3d11", .{});
+        app_mod.linkSystemLibrary("dxgi", .{});
+        app_mod.linkSystemLibrary("dcomp", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
     }
 }

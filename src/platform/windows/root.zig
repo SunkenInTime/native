@@ -71,6 +71,7 @@ const WindowsEvent = extern struct {
     /// timestamp is pacing policy, never a latency endpoint.
     occluded: c_int,
     alpha_mode: c_int,
+    gpu_backend: c_int,
     input_kind: c_int,
     button: c_int,
     delta_x: f64,
@@ -135,7 +136,7 @@ extern fn native_sdk_windows_cancel_timer(host: *WindowsHost, timer_id: u64) voi
 extern fn native_sdk_windows_focus_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_close_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_minimize_window(host: *WindowsHost, window_id: u64) c_int;
-extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize, alpha_mode: c_int) c_int;
+extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize, alpha_mode: c_int, gpu_backend: c_int) c_int;
 extern fn native_sdk_windows_update_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_accessibility_label: c_int, accessibility_label: [*]const u8, accessibility_label_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_windows_set_view_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_windows_set_view_visible(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, visible: c_int) c_int;
@@ -144,6 +145,7 @@ extern fn native_sdk_windows_close_view(host: *WindowsHost, window_id: u64, labe
 extern fn native_sdk_windows_request_gpu_surface_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_windows_note_gpu_surface_input(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_windows_present_gpu_surface_pixels(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, has_dirty_rect: c_int, dirty_x: f64, dirty_y: f64, dirty_width: f64, dirty_height: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
+extern fn native_sdk_windows_present_gpu_surface_packet_binary(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, surface_width: f64, surface_height: f64, scale: f64, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, requires_render: c_int, command_count: usize, unsupported_command_count: usize, representable: c_int, packet: [*]const u8, packet_len: usize) c_int;
 extern fn native_sdk_windows_create_webview(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn native_sdk_windows_set_webview_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_windows_navigate_webview(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize) c_int;
@@ -290,6 +292,7 @@ pub const WindowsPlatform = struct {
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .note_gpu_surface_input_fn = noteGpuSurfaceInput,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
+                .present_gpu_surface_packet_binary_fn = presentGpuSurfacePacketBinary,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -484,7 +487,7 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .nonblank = event.nonblank != 0,
             .sample_color = event.sample_color,
             .occluded = event.occluded != 0,
-            .backend = .software,
+            .backend = gpuBackendFromInt(event.gpu_backend),
             .pixel_format = .bgra8_unorm,
             .present_mode = .timer,
             .alpha_mode = switch (event.alpha_mode) {
@@ -835,7 +838,20 @@ fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!
         options.command.ptr,
         options.command.len,
         gpuAlphaModeInt(options.gpu_surface.alpha_mode),
+        gpuBackendInt(options.gpu_surface.backend),
     ) == 0) return error.CreateFailed;
+}
+
+fn gpuBackendFromInt(value: c_int) platform_mod.GpuSurfaceBackend {
+    return if (value == 2) .d3d11 else .software;
+}
+
+fn gpuBackendInt(backend: platform_mod.GpuSurfaceBackend) c_int {
+    return switch (backend) {
+        .d3d11 => 2,
+        .software => 3,
+        else => 0,
+    };
 }
 
 fn gpuAlphaModeInt(mode: platform_mod.GpuSurfaceAlphaMode) c_int {
@@ -942,6 +958,30 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
         pixels.rgba8.ptr,
         pixels.rgba8.len,
     ) == 0) return error.ViewNotFound;
+}
+
+fn presentGpuSurfacePacketBinary(context: ?*anyopaque, packet: platform_mod.GpuSurfacePacket) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system or packet.binary.len == 0) return error.UnsupportedService;
+    if (native_sdk_windows_present_gpu_surface_packet_binary(
+        self.host,
+        packet.window_id,
+        packet.label.ptr,
+        packet.label.len,
+        packet.surface_size.width,
+        packet.surface_size.height,
+        packet.scale_factor,
+        packet.clear_color_rgba8[0],
+        packet.clear_color_rgba8[1],
+        packet.clear_color_rgba8[2],
+        packet.clear_color_rgba8[3],
+        if (packet.requires_render) 1 else 0,
+        packet.command_count,
+        packet.unsupported_command_count,
+        if (packet.representable) 1 else 0,
+        packet.binary.ptr,
+        packet.binary.len,
+    ) == 0) return error.UnsupportedService;
 }
 
 fn createWebView(context: ?*anyopaque, options: platform_mod.WebViewOptions) anyerror!void {
@@ -1469,6 +1509,12 @@ test "windows chromium reports unsupported native surfaces" {
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .gpu_surfaces));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .audio_playback));
     try std.testing.expect(!WindowsPlatform.supportsFeature(&chromium, .audio_streaming));
+}
+
+test "windows frame events report the actual renderer backend" {
+    try std.testing.expectEqual(platform_mod.GpuSurfaceBackend.d3d11, gpuBackendFromInt(2));
+    try std.testing.expectEqual(platform_mod.GpuSurfaceBackend.software, gpuBackendFromInt(3));
+    try std.testing.expectEqual(platform_mod.GpuSurfaceBackend.software, gpuBackendFromInt(0));
 }
 
 test "windows audio event maps kinds and payload" {
