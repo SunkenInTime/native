@@ -365,6 +365,7 @@ pub const ViewKind = enum {
 pub const GpuSurfaceBackend = enum {
     none,
     metal,
+    d3d11,
     software,
 };
 

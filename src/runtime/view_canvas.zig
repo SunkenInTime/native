@@ -223,6 +223,17 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             return .{ .commands = self.canvas_commands[0..self.canvas_command_count] };
         }
 
+        pub fn hybridImmediateDisplayList(self: *const RuntimeView) ?canvas.DisplayList {
+            if (!self.hybrid_immediate_valid) return null;
+            return .{ .commands = self.hybrid_immediate_commands[0..self.hybrid_immediate_command_count] };
+        }
+
+        fn cacheHybridImmediateDisplayList(self: *RuntimeView) anyerror!void {
+            const filtered = try self.canvasDisplayList().copyPresentationLayer(.immediate, &self.hybrid_immediate_commands);
+            self.hybrid_immediate_command_count = filtered.commands.len;
+            self.hybrid_immediate_valid = true;
+        }
+
         pub fn validateCanvasWidgetDisplayListChrome(self: *const RuntimeView, chrome: CanvasWidgetDisplayListChrome) anyerror!void {
             if (chrome.prefix_command_count > self.canvas_command_count) return error.InvalidCommand;
             if (chrome.suffix_command_count > self.canvas_command_count - chrome.prefix_command_count) return error.InvalidCommand;
@@ -272,9 +283,28 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         pub fn copyCanvasDisplayList(self: *RuntimeView, display_list: canvas.DisplayList) anyerror!void {
             _ = try CanvasResourceCounts.fromDisplayList(display_list);
             if (display_list.commands.len > 0 and display_list.commands.ptr == self.canvas_commands[0..].ptr) {
+                // The builder emits into the view-owned list in place, so an
+                // aliased publish is the mutation signal and has no old bytes
+                // left to compare. Clean completion events are gated before
+                // rebuild/present in UiApp; real builder writes stay visible.
+                const retained_fingerprint = self.canvasDisplayList().presentationLayerSourceFingerprint(.retained);
+                if (retained_fingerprint != self.hybrid_retained_source_fingerprint) self.hybrid_retained_valid = false;
+                self.hybrid_retained_source_fingerprint = retained_fingerprint;
+                try cacheHybridImmediateDisplayList(self);
                 self.canvas_revision += 1;
                 return;
             }
+
+            const current = self.canvasDisplayList();
+            // A surface-clock tick may rebuild the builder tree without
+            // changing any draw command (30 fps canvases intentionally drop
+            // every other 60 Hz tick; provider updates can change only the
+            // JS closure they capture). Treating an identical owned copy as
+            // a new revision forced a redundant present and defeated that
+            // coalescing contract.
+            if (current.eql(display_list)) return;
+            const retained_unchanged = current.presentationLayerSourceFingerprint(.retained) ==
+                display_list.presentationLayerSourceFingerprint(.retained);
 
             self.canvas_command_count = 0;
             self.canvas_gradient_stop_count = 0;
@@ -286,6 +316,9 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
                 self.canvas_commands[self.canvas_command_count] = try self.copyCanvasCommand(command);
                 self.canvas_command_count += 1;
             }
+            try cacheHybridImmediateDisplayList(self);
+            if (!retained_unchanged) self.hybrid_retained_valid = false;
+            self.hybrid_retained_source_fingerprint = self.canvasDisplayList().presentationLayerSourceFingerprint(.retained);
             self.canvas_revision += 1;
         }
 

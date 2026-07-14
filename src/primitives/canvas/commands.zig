@@ -47,6 +47,7 @@ const CanvasFrameStorage = frame_model.CanvasFrameStorage;
 const CanvasFrame = frame_model.CanvasFrame;
 const buildCanvasFrame = frame_model.buildCanvasFrame;
 const commandsEqual = equality_model.commandsEqual;
+const canvasCommandFingerprint = @import("render_fingerprints.zig").canvasCommandFingerprint;
 
 pub const CanvasCommand = union(enum) {
     push_clip: Clip,
@@ -121,6 +122,49 @@ pub const DiffChange = struct {
     dirty_bounds: ?geometry.RectF = null,
 };
 
+const PresentationLayerIterator = struct {
+    commands: []const CanvasCommand,
+    wanted: canvas.PresentationLayer,
+    index: usize = 0,
+    layer: canvas.PresentationLayer = .retained,
+    stack: [32]canvas.PresentationLayer = undefined,
+    depth: usize = 0,
+    valid: bool = true,
+
+    fn next(self: *PresentationLayerIterator) ?CanvasCommand {
+        while (self.index < self.commands.len) {
+            const command = self.commands[self.index];
+            self.index += 1;
+            const include = switch (command) {
+                .push_clip => |clip| include: {
+                    if (self.depth >= self.stack.len) {
+                        self.valid = false;
+                        return null;
+                    }
+                    self.stack[self.depth] = self.layer;
+                    self.depth += 1;
+                    self.layer = clip.presentation_layer;
+                    break :include true;
+                },
+                .pop_clip => include: {
+                    if (self.depth == 0) {
+                        self.valid = false;
+                        return null;
+                    }
+                    self.depth -= 1;
+                    self.layer = self.stack[self.depth];
+                    break :include true;
+                },
+                .push_opacity, .pop_opacity, .transform => true,
+                else => self.layer == self.wanted,
+            };
+            if (include) return command;
+        }
+        if (self.depth != 0) self.valid = false;
+        return null;
+    }
+};
+
 pub const DisplayList = struct {
     commands: []const CanvasCommand = &.{},
 
@@ -130,6 +174,120 @@ pub const DisplayList = struct {
 
     pub fn commandCount(self: DisplayList) usize {
         return self.commands.len;
+    }
+
+    pub fn eql(a: DisplayList, b: DisplayList) bool {
+        if (a.commands.len != b.commands.len) return false;
+        for (a.commands, b.commands) |a_command, b_command| {
+            if (!commandsEqual(a_command, b_command)) return false;
+        }
+        return true;
+    }
+
+    pub fn hasPresentationLayer(self: DisplayList, wanted: canvas.PresentationLayer) bool {
+        var layer: canvas.PresentationLayer = .retained;
+        var stack: [32]canvas.PresentationLayer = undefined;
+        var depth: usize = 0;
+        for (self.commands) |command| switch (command) {
+            .push_clip => |clip| {
+                if (depth < stack.len) {
+                    stack[depth] = layer;
+                    depth += 1;
+                }
+                layer = clip.presentation_layer;
+            },
+            .pop_clip => if (depth > 0) {
+                depth -= 1;
+                layer = stack[depth];
+            },
+            .push_opacity, .pop_opacity, .transform => {},
+            else => if (layer == wanted) return true,
+        };
+        return false;
+    }
+
+    /// Copy one presentation layer without asking the renderer to plan the
+    /// other one. Structural commands stay in the stream so nested clips,
+    /// transforms, and opacity retain their original semantics; only leaf
+    /// draws are selected. Hybrid surfaces use this before frame planning so
+    /// a 60 Hz immediate canvas never re-enters static retained text layout.
+    pub fn copyPresentationLayer(self: DisplayList, wanted: canvas.PresentationLayer, output: []CanvasCommand) Error!DisplayList {
+        var layer: canvas.PresentationLayer = .retained;
+        var stack: [32]canvas.PresentationLayer = undefined;
+        var depth: usize = 0;
+        var len: usize = 0;
+        for (self.commands) |command| {
+            const include = switch (command) {
+                .push_clip => |clip| include: {
+                    if (depth >= stack.len) return error.RenderStackOverflow;
+                    stack[depth] = layer;
+                    depth += 1;
+                    layer = clip.presentation_layer;
+                    break :include true;
+                },
+                .pop_clip => include: {
+                    if (depth == 0) return error.RenderStackUnderflow;
+                    depth -= 1;
+                    layer = stack[depth];
+                    break :include true;
+                },
+                .push_opacity, .pop_opacity, .transform => true,
+                else => layer == wanted,
+            };
+            if (!include) continue;
+            if (len >= output.len) return error.DisplayListFull;
+            output[len] = command;
+            len += 1;
+        }
+        if (depth != 0) return error.RenderStackUnderflow;
+        return .{ .commands = output[0..len] };
+    }
+
+    /// Compare just one presentation layer. This is intentionally the same
+    /// filtered stream used by hybrid planning: immediate command mutations
+    /// leave the cached retained pixels valid, while any retained draw or
+    /// structural-state change invalidates them before the next present.
+    pub fn presentationLayerEqual(a: DisplayList, b: DisplayList, wanted: canvas.PresentationLayer) bool {
+        var a_iterator = PresentationLayerIterator{ .commands = a.commands, .wanted = wanted };
+        var b_iterator = PresentationLayerIterator{ .commands = b.commands, .wanted = wanted };
+        while (true) {
+            const a_command = a_iterator.next();
+            const b_command = b_iterator.next();
+            if (!a_iterator.valid or !b_iterator.valid) return false;
+            if (a_command == null or b_command == null) return a_command == null and b_command == null;
+            if (!commandsEqual(a_command.?, b_command.?)) return false;
+        }
+    }
+
+    pub fn presentationLayerSourceFingerprint(self: DisplayList, wanted: canvas.PresentationLayer) u64 {
+        var hasher = std.hash.Wyhash.init(@intFromEnum(wanted));
+        var layer: canvas.PresentationLayer = .retained;
+        var stack: [32]canvas.PresentationLayer = undefined;
+        var depth: usize = 0;
+        for (self.commands) |command| {
+            const include = switch (command) {
+                .push_clip => |clip| include: {
+                    if (depth >= stack.len) return 0;
+                    stack[depth] = layer;
+                    depth += 1;
+                    layer = clip.presentation_layer;
+                    break :include layer == wanted;
+                },
+                .pop_clip => include: {
+                    if (depth == 0) return 0;
+                    const child_layer = layer;
+                    depth -= 1;
+                    layer = stack[depth];
+                    break :include child_layer == wanted;
+                },
+                .push_opacity, .pop_opacity, .transform => layer == wanted,
+                else => layer == wanted,
+            };
+            if (!include) continue;
+            const fingerprint = canvasCommandFingerprint(command);
+            hasher.update(std.mem.asBytes(&fingerprint));
+        }
+        return if (depth == 0) hasher.final() else 0;
     }
 
     pub fn findCommandById(self: DisplayList, id: ObjectId) ?CommandRef {

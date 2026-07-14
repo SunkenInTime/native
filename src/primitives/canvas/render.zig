@@ -13,6 +13,7 @@ const ReferenceImage = canvas.ReferenceImage;
 const Affine = drawing_model.Affine;
 const Fill = drawing_model.Fill;
 const Stroke = drawing_model.Stroke;
+const PresentationLayer = drawing_model.PresentationLayer;
 const Easing = token_model.Easing;
 const SpringToken = token_model.SpringToken;
 
@@ -84,6 +85,7 @@ pub const RenderState = struct {
     opacity: f32 = 1,
     clip: ?geometry.RectF = null,
     transform: Affine = .{},
+    presentation_layer: PresentationLayer = .retained,
 };
 
 pub const RenderCommand = struct {
@@ -94,6 +96,7 @@ pub const RenderCommand = struct {
     transform: Affine = .{},
     local_bounds: geometry.RectF,
     bounds: geometry.RectF,
+    presentation_layer: PresentationLayer = .retained,
 };
 
 pub const CanvasRenderOverride = struct {
@@ -410,6 +413,7 @@ pub const RenderPlanner = struct {
     state: RenderState = .{},
     bounds_value: ?geometry.RectF = null,
     clip_stack: [max_render_state_stack]?geometry.RectF = undefined,
+    layer_stack: [max_render_state_stack]PresentationLayer = undefined,
     clip_stack_len: usize = 0,
     opacity_stack: [max_render_state_stack]f32 = undefined,
     opacity_stack_len: usize = 0,
@@ -451,6 +455,7 @@ pub const RenderPlanner = struct {
     fn pushClip(self: *RenderPlanner, clip: drawing_model.Clip) Error!void {
         if (self.clip_stack_len >= self.clip_stack.len) return error.RenderStackOverflow;
         self.clip_stack[self.clip_stack_len] = self.state.clip;
+        self.layer_stack[self.clip_stack_len] = self.state.presentation_layer;
         self.clip_stack_len += 1;
 
         const transformed_clip = self.state.transform.transformRect(clip.rect);
@@ -458,12 +463,14 @@ pub const RenderPlanner = struct {
             geometry.RectF.intersection(existing, transformed_clip)
         else
             transformed_clip;
+        self.state.presentation_layer = clip.presentation_layer;
     }
 
     fn popClip(self: *RenderPlanner) Error!void {
         if (self.clip_stack_len == 0) return error.RenderStackUnderflow;
         self.clip_stack_len -= 1;
         self.state.clip = self.clip_stack[self.clip_stack_len];
+        self.state.presentation_layer = self.layer_stack[self.clip_stack_len];
     }
 
     fn pushOpacity(self: *RenderPlanner, opacity: f32) Error!void {
@@ -498,6 +505,7 @@ pub const RenderPlanner = struct {
             .transform = self.state.transform,
             .local_bounds = command_bounds,
             .bounds = clipped_bounds,
+            .presentation_layer = self.state.presentation_layer,
         };
         self.len += 1;
         self.bounds_value = unionOptionalBounds(self.bounds_value, clipped_bounds);

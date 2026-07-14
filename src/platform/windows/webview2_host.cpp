@@ -9,6 +9,7 @@
 #include <wincodec.h>
 #include <uxtheme.h>
 #include <dwmapi.h>
+#include "shared_renderer_client.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -154,6 +155,21 @@ constexpr UINT kAudioSessionMessage = WM_APP + 45;
 constexpr UINT kAudioSpectrumMessage = WM_APP + 46;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
+static void reportWeaverBackend(const char *backend) {
+    static std::string reported;
+    if (reported == backend) return;
+    WCHAR path[32768] = {};
+    const DWORD length = GetEnvironmentVariableW(L"WEAVER_BACKEND_FILE", path, (DWORD)(sizeof(path) / sizeof(path[0])));
+    if (length == 0 || length >= sizeof(path) / sizeof(path[0])) return;
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(file, backend, (DWORD)strlen(backend), &written, nullptr);
+    CloseHandle(file);
+    if (written == strlen(backend)) reported = backend;
+}
+
 constexpr int kViewWebView = 0;
 constexpr int kViewToolbar = 1;
 constexpr int kViewTitlebarAccessory = 2;
@@ -210,6 +226,8 @@ struct WindowsEvent {
      * timestamp is pacing policy, never a latency endpoint. */
     int occluded;
     int alpha_mode;
+    /* GpuSurfaceBackend ordinal: 2 D3D11, 3 software. */
+    int gpu_backend;
     int input_kind;
     int button;
     double delta_x;
@@ -305,8 +323,8 @@ struct Window {
     bool no_activate = false;
     /* Desktop-layer windows are parented to the shell's wallpaper WorkerW.
      * Z-order alone survives ordinary app activation but Show Desktop hides
-     * unowned top-level popups. The shell-owned parent keeps transparent
-     * software widgets on the desktop plane. */
+     * unowned top-level popups. The shell-owned parent keeps both software
+     * and DirectComposition widget windows on the desktop plane. */
     HWND desktop_parent = nullptr;
     /* Declared content min-size floor for user resizes; axes <= 0 keep
      * the natural minimum (WM_GETMINMAXINFO applies the floor). */
@@ -419,6 +437,8 @@ struct NativeView {
     int kind = kViewLabel;
     /* GpuSurfaceAlphaMode ordinal: 1 opaque, 2 premultiplied. */
     int gpu_alpha_mode = 1;
+    int gpu_backend = 3;
+    NativeSdkSharedRendererClient *gpu_presenter = nullptr;
     int layer = 0;
     uint64_t creation_order = 0;
     bool visible = true;
@@ -506,9 +526,10 @@ struct HostLifetime {
     bool alive = true;
 };
 
-/* App timers (runtime `startTimer`) on the Win32 message loop: each slot
- * owns the SetTimer id kAppTimerIdBase + slot index, scheduled on the
- * first live top-level window so WM_TIMER lands in windowProc. */
+/* App timers (runtime `startTimer`) still dispatch on the Win32 message loop.
+ * Sub-frame intervals use a timer-queue deadline which posts the same
+ * WM_TIMER message: USER SetTimer quantizes 21-24 ms canvas wakes toward
+ * 31 ms on common systems, limiting a requested 30 Hz surface to ~21-28 Hz. */
 constexpr size_t kMaxAppTimers = 64;
 constexpr UINT_PTR kAppTimerIdBase = 0x1000;
 /* The 16 ms per-window frame-pump timer (SetTimer id on each top-level
@@ -518,9 +539,27 @@ constexpr UINT_PTR kFrameTimerId = 1;
 struct AppTimer {
     uint64_t id = 0;
     HWND hwnd = nullptr;
+    UINT_PTR message_id = 0;
+    HANDLE queue_timer = nullptr;
     bool repeats = false;
     bool in_use = false;
 };
+
+static VOID CALLBACK appTimerQueueCallback(PVOID context, BOOLEAN) {
+    AppTimer *slot = static_cast<AppTimer *>(context);
+    if (slot && slot->hwnd && slot->message_id) {
+        PostMessageW(slot->hwnd, WM_TIMER, slot->message_id, 0);
+    }
+}
+
+static void cancelAppTimerSlot(AppTimer &slot) {
+    if (slot.queue_timer) {
+        DeleteTimerQueueTimer(nullptr, slot.queue_timer, INVALID_HANDLE_VALUE);
+    } else if (slot.hwnd && slot.message_id) {
+        KillTimer(slot.hwnd, slot.message_id);
+    }
+    slot = {};
+}
 
 /* Cancellation handle for the audio cache-fill download: the host and
  * the detached download thread share it, so a replaced or stopped
@@ -1792,6 +1831,7 @@ static void destroyNativeViewAndChildren(Host *host, const std::string &key) {
         if (entry.second.window_id == window_id && entry.second.parent == label) children.push_back(entry.first);
     }
     for (const std::string &child : children) destroyNativeViewAndChildren(host, child);
+    if (found->second.gpu_presenter) nativeSdkSharedRendererClientDestroy(found->second.gpu_presenter);
     if (found->second.hwnd) DestroyWindow(found->second.hwnd);
     host->native_views.erase(found);
 }
@@ -2457,6 +2497,34 @@ static bool gpuSurfaceOccludedPacingActive(const NativeView &view) {
     return root != nullptr && IsIconic(root);
 }
 
+using TimeSetEventFn = UINT (WINAPI *)(UINT, UINT,
+    void (CALLBACK *)(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR),
+    DWORD_PTR, UINT);
+
+static void CALLBACK gpuSurfaceDeadlineCallback(UINT, UINT, DWORD_PTR user,
+    DWORD_PTR, DWORD_PTR) {
+    HWND hwnd = reinterpret_cast<HWND>(user);
+    if (hwnd) PostMessageW(hwnd, WM_TIMER, kGpuEmitTimerId, 0);
+}
+
+/* Animated shared surfaces need a deadline timer, not SetTimer's UI timer
+ * class: its 10 ms clamp and delivery tail turn a 16.67 ms grid into ~17.4
+ * ms under multiple renderer roundtrips. Resolve winmm dynamically so static
+ * and software-only apps neither load it nor pay a new import. */
+static bool scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns) {
+    using LoadFn = HMODULE (WINAPI *)(LPCWSTR);
+    static HMODULE winmm = LoadLibraryW(L"winmm.dll");
+    static TimeSetEventFn time_set_event = winmm
+        ? reinterpret_cast<TimeSetEventFn>(GetProcAddress(winmm, "timeSetEvent"))
+        : nullptr;
+    if (!time_set_event) return false;
+    constexpr UINT kTimeOneShot = 0;
+    constexpr UINT kTimeKillSynchronous = 0x0100;
+    const UINT delay_ms = (UINT)std::max<uint64_t>(1, (delay_ns + 999999ull) / 1000000ull);
+    return time_set_event(delay_ms, 1, gpuSurfaceDeadlineCallback,
+        reinterpret_cast<DWORD_PTR>(hwnd), kTimeOneShot | kTimeKillSynchronous) != 0;
+}
+
 /* The single frame-event emission: view state (nonblank verdict, sample
  * color, buffer geometry) is the payload, so one event serves frame
  * requests and present completions alike. */
@@ -2488,6 +2556,7 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
      * — the runtime skips input-latency stamping for them. */
     event.occluded = gpuSurfaceOccludedPacingActive(view) ? 1 : 0;
     event.alpha_mode = view.gpu_alpha_mode;
+    event.gpu_backend = nativeSdkSharedRendererClientConnected(view.gpu_presenter) ? 2 : 3;
     emitGpuSurfaceEvent(host, view, event);
 }
 
@@ -2513,7 +2582,20 @@ static void gpuSurfaceScheduleFrameEmission(NativeView &view) {
         delay_ns = view.gpu_last_emit_ns + pace_ns - now;
     }
     const UINT delay_ms = (UINT)((delay_ns + 500000ull) / 1000000ull);
-    if (SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr)) {
+    /* SetTimer clamps a zero delay to USER_TIMER_MINIMUM (normally 10 ms).
+     * A shared renderer adds a small, variable pipe/compositor hop; when it
+     * returns just after the next grid point, paying that clamp skips an
+     * entire 60 Hz interval. An already-due emission is ordinary queued
+     * work, so post the same WM_TIMER message directly. The scheduled flag
+     * still folds all producers and the handler keeps one-shot semantics. */
+    if (delay_ns == 0) {
+        if (PostMessageW(view.hwnd, WM_TIMER, kGpuEmitTimerId, 0)) {
+            view.gpu_emission_scheduled = true;
+        }
+        return;
+    }
+    if (scheduleGpuSurfaceDeadline(view.hwnd, delay_ns) ||
+        SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr)) {
         view.gpu_emission_scheduled = true;
     }
 }
@@ -4652,9 +4734,7 @@ static bool handleAppTimerMessage(Host *host, WPARAM wparam) {
     if (!slot.in_use) return true;
     const uint64_t timer_id = slot.id;
     if (!slot.repeats) {
-        if (slot.hwnd) KillTimer(slot.hwnd, wparam);
-        slot.in_use = false;
-        slot.hwnd = nullptr;
+        cancelAppTimerSlot(slot);
     }
     if (host->callback) {
         WindowsEvent event = {};
@@ -4803,6 +4883,24 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         }
     }
     switch (message) {
+        case WM_ERASEBKGND:
+            if (host) {
+                for (auto &entry : host->windows) {
+                    if (entry.second.hwnd == hwnd && entry.second.transparent) return 1;
+                }
+            }
+            break;
+        case WM_PAINT:
+            if (host) {
+                for (auto &entry : host->windows) {
+                    if (entry.second.hwnd != hwnd || !entry.second.transparent) continue;
+                    PAINTSTRUCT paint = {};
+                    BeginPaint(hwnd, &paint);
+                    EndPaint(hwnd, &paint);
+                    return 0;
+                }
+            }
+            break;
         case kWakeMessage:
             if (host) {
                 WindowsEvent wake = {};
@@ -5215,9 +5313,7 @@ void native_sdk_windows_destroy(Host *host) {
     host->bridge_callback = nullptr;
     for (size_t index = 0; index < kMaxAppTimers; ++index) {
         AppTimer &slot = host->app_timers[index];
-        if (slot.in_use && slot.hwnd) KillTimer(slot.hwnd, kAppTimerIdBase + index);
-        slot.in_use = false;
-        slot.hwnd = nullptr;
+        if (slot.in_use) cancelAppTimerSlot(slot);
     }
     /* Retire the audio pipeline: the session closes asynchronously on
      * Media Foundation worker threads (the event pump owns the refs),
@@ -5605,9 +5701,18 @@ void native_sdk_windows_start_timer(Host *host, uint64_t timer_id, uint64_t inte
     if (interval_ms == 0) interval_ms = 1;
     slot->id = timer_id;
     slot->hwnd = hwnd;
+    slot->message_id = win32_id;
     slot->repeats = repeats != 0;
     slot->in_use = true;
-    SetTimer(hwnd, win32_id, interval_ms, nullptr);
+    if (interval_ms < 40) {
+        if (!CreateTimerQueueTimer(&slot->queue_timer, nullptr, appTimerQueueCallback,
+            slot, interval_ms, repeats ? interval_ms : 0, WT_EXECUTEDEFAULT)) {
+            slot->queue_timer = nullptr;
+            SetTimer(hwnd, win32_id, interval_ms, nullptr);
+        }
+    } else {
+        SetTimer(hwnd, win32_id, interval_ms, nullptr);
+    }
 }
 
 void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id) {
@@ -5615,9 +5720,7 @@ void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id) {
     for (size_t index = 0; index < kMaxAppTimers; ++index) {
         AppTimer &slot = host->app_timers[index];
         if (slot.in_use && slot.id == timer_id) {
-            if (slot.hwnd) KillTimer(slot.hwnd, kAppTimerIdBase + index);
-            slot.in_use = false;
-            slot.hwnd = nullptr;
+            cancelAppTimerSlot(slot);
         }
     }
 }
@@ -5747,7 +5850,7 @@ int native_sdk_windows_minimize_window(Host *host, uint64_t window_id) {
     return 1;
 }
 
-int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len, int alpha_mode) {
+int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len, int alpha_mode, int gpu_backend) {
     if (!host || label_len == 0 || !isSupportedNativeViewKind(kind) || !validNativeViewFrame(x, y, width, height)) return 0;
     auto window = host->windows.find(window_id);
     if (window == host->windows.end() || !window->second.hwnd) return 0;
@@ -5776,6 +5879,7 @@ int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *l
     view.height = height;
     view.kind = kind;
     view.gpu_alpha_mode = kind == kViewGpuSurface ? alpha_mode : 1;
+    view.gpu_backend = kind == kViewGpuSurface ? gpu_backend : 3;
     view.layer = layer;
     view.creation_order = host->next_child_order++;
     view.visible = visible != 0;
@@ -5869,6 +5973,22 @@ int native_sdk_windows_create_view(Host *host, uint64_t window_id, const char *l
     if (!hwnd) return 0;
 
     view.hwnd = hwnd;
+    if (kind == kViewGpuSurface && gpu_backend == 2) {
+        view.gpu_presenter = nativeSdkSharedRendererClientCreate(window->second.hwnd);
+        if (view.gpu_presenter) {
+            LONG_PTR child_ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, child_ex_style | WS_EX_LAYERED);
+            SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+            LONG_PTR owner_ex_style = GetWindowLongPtrW(window->second.hwnd, GWL_EXSTYLE);
+            owner_ex_style &= ~((LONG_PTR)WS_EX_LAYERED);
+            owner_ex_style |= WS_EX_NOREDIRECTIONBITMAP;
+            SetWindowLongPtrW(window->second.hwnd, GWL_EXSTYLE, owner_ex_style);
+            SetWindowPos(window->second.hwnd, nullptr, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        } else {
+            view.gpu_backend = 3;
+        }
+    }
     applyNativeViewState(view, true, display_text);
     if (view.kind == kViewProgressIndicator) {
         SendMessageW(view.hwnd, PBM_SETMARQUEE, TRUE, 30);
@@ -6014,6 +6134,86 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
     view.gpu_presented = true;
     if (first_present) view.gpu_prompt_frame_pending = true;
     gpuSurfaceScheduleFrameEmission(view);
+    reportWeaverBackend("software");
+    return 1;
+}
+
+int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t window_id,
+    const char *label, size_t label_len, double surface_width, double surface_height,
+    double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a,
+    int requires_render, size_t command_count, size_t unsupported_command_count,
+    int representable, const uint8_t *packet, size_t packet_len,
+    uint64_t retained_generation, size_t retained_width, size_t retained_height,
+    const float *retained_dirty_rects, size_t retained_dirty_rect_count,
+    const uint8_t *retained_rgba8, size_t retained_rgba8_len) {
+    if (!host || label_len == 0 || !packet || packet_len == 0 || !requires_render ||
+        !representable || unsupported_command_count != 0 || command_count == 0) return 0;
+    auto found = host->native_views.find(nativeViewKey(window_id, slice(label, label_len)));
+    if (found == host->native_views.end() || found->second.kind != kViewGpuSurface ||
+        !found->second.gpu_presenter) return 0;
+    NativeView &view = found->second;
+    if (!nativeSdkSharedRendererClientPresent(view.gpu_presenter, surface_width, surface_height,
+        scale, clear_r, clear_g, clear_b, clear_a, packet, packet_len,
+        retained_generation, retained_width, retained_height, retained_dirty_rects,
+        retained_dirty_rect_count, retained_rgba8, retained_rgba8_len)) {
+        const bool backend_changed = view.gpu_backend != 3;
+        view.gpu_backend = 3;
+        auto owner = host->windows.find(window_id);
+        if (backend_changed && owner != host->windows.end() && owner->second.transparent) {
+            /* Recreate the window's DWM presentation binding, not merely its
+             * style bits. Detaching a dead DComp visual is asynchronous; an
+             * immediate UpdateLayeredWindow otherwise targets the stale
+             * no-redirection surface and the animation freezes during the
+             * renderer gap. A bounded hide/style/show transition gives DWM
+             * an unambiguous layered binding for the same HWND. */
+            ShowWindow(owner->second.hwnd, SW_HIDE);
+            LONG_PTR ex_style = GetWindowLongPtrW(owner->second.hwnd, GWL_EXSTYLE);
+            ex_style &= ~((LONG_PTR)WS_EX_NOREDIRECTIONBITMAP);
+            ex_style |= WS_EX_LAYERED;
+            SetWindowLongPtrW(owner->second.hwnd, GWL_EXSTYLE, ex_style);
+            SetWindowPos(owner->second.hwnd, nullptr, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            ShowWindow(owner->second.hwnd, SW_SHOWNOACTIVATE);
+            if (owner->second.layer == 1) {
+                SetWindowPos(owner->second.hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            DwmFlush();
+        }
+        return 0;
+    }
+    const bool backend_changed = view.gpu_backend != 2;
+    view.gpu_backend = 2;
+    auto gpu_owner = host->windows.find(window_id);
+    if (backend_changed && gpu_owner != host->windows.end()) {
+        const bool was_layered = (GetWindowLongPtrW(gpu_owner->second.hwnd, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
+        if (was_layered) ShowWindow(gpu_owner->second.hwnd, SW_HIDE);
+        LONG_PTR owner_ex_style = GetWindowLongPtrW(gpu_owner->second.hwnd, GWL_EXSTYLE);
+        owner_ex_style &= ~((LONG_PTR)WS_EX_LAYERED);
+        owner_ex_style |= WS_EX_NOREDIRECTIONBITMAP;
+        SetWindowLongPtrW(gpu_owner->second.hwnd, GWL_EXSTYLE, owner_ex_style);
+        LONG_PTR child_ex_style = GetWindowLongPtrW(view.hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(view.hwnd, GWL_EXSTYLE, child_ex_style | WS_EX_LAYERED);
+        SetLayeredWindowAttributes(view.hwnd, 0, 0, LWA_ALPHA);
+        SetWindowPos(gpu_owner->second.hwnd, nullptr, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        if (was_layered) {
+            ShowWindow(gpu_owner->second.hwnd, SW_SHOWNOACTIVATE);
+            if (gpu_owner->second.layer == 1) {
+                SetWindowPos(gpu_owner->second.hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            DwmFlush();
+        }
+    }
+    view.gpu_nonblank = 1;
+    view.gpu_sample_color = ((uint32_t)clear_a << 24) | ((uint32_t)clear_r << 16) |
+        ((uint32_t)clear_g << 8) | (uint32_t)clear_b;
+    const bool first_present = !view.gpu_presented;
+    view.gpu_presented = true;
+    if (first_present) view.gpu_prompt_frame_pending = true;
+    gpuSurfaceScheduleFrameEmission(view);
+    reportWeaverBackend("gpu");
     return 1;
 }
 

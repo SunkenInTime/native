@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const render_model = @import("render.zig");
@@ -260,6 +261,30 @@ pub const CanvasRenderPass = struct {
         return planner.build(self);
     }
 
+    pub fn gpuPacketForLayer(self: CanvasRenderPass, layer: canvas.PresentationLayer, output: []CanvasGpuCommand) Error!CanvasGpuPacket {
+        var planner = CanvasGpuPacketPlanner.init(output);
+        return planner.buildLayer(self, layer);
+    }
+
+    pub fn hasPresentationLayer(self: CanvasRenderPass, layer: canvas.PresentationLayer) bool {
+        for (self.commands) |command| if (command.presentation_layer == layer) return true;
+        return false;
+    }
+
+    /// Content hash for one composited layer. Geometry, ink, strings, and
+    /// command order all ride the packet fingerprint, while the other layer's
+    /// high-rate changes cannot spur a retained reraster/upload.
+    pub fn presentationLayerFingerprint(self: CanvasRenderPass, layer: canvas.PresentationLayer) u64 {
+        var hasher = std.hash.Wyhash.init(@intFromEnum(layer));
+        for (self.commands, 0..) |command, index| {
+            if (command.presentation_layer != layer) continue;
+            const gpu_command = canvasGpuCommandFromRenderCommand(command, index);
+            const fingerprint = canvas.canvasGpuCommandFingerprint(gpu_command);
+            hasher.update(std.mem.asBytes(&fingerprint));
+        }
+        return hasher.final();
+    }
+
     pub fn gpuPacketSummary(self: CanvasRenderPass) CanvasGpuPacketSummary {
         if (!self.requiresRender()) return .{};
         var summary = CanvasGpuPacketSummary{
@@ -444,6 +469,10 @@ pub const CanvasFrame = struct {
 
     pub fn gpuPacket(self: CanvasFrame, output: []CanvasGpuCommand) Error!CanvasGpuPacket {
         return self.renderPass().gpuPacket(output);
+    }
+
+    pub fn gpuPacketForLayer(self: CanvasFrame, layer: canvas.PresentationLayer, output: []CanvasGpuCommand) Error!CanvasGpuPacket {
+        return self.renderPass().gpuPacketForLayer(layer, output);
     }
 
     pub fn gpuPacketSummary(self: CanvasFrame) CanvasGpuPacketSummary {

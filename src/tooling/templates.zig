@@ -1190,6 +1190,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                // fails the compile by design if it cannot be found.
         \\                app_mod.addIncludePath(nativeSdkPath(b, native_sdk_path, "third_party/webview2/include"));
         \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17" } });
+        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/shared_renderer_client.cpp"), .flags = &.{ "-std=c++17" } });
         \\                // WebView2Loader.dll rides next to the installed app
         \\                // executable: the host loads it at runtime to discover
         \\                // the machine's WebView2 runtime. Canvas apps never
@@ -1206,6 +1207,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                // — no WebView2Loader.dll is installed or path-wired,
         \\                // and the executable carries no reference to it at all.
         \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17", "-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB" } });
+        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/shared_renderer_client.cpp"), .flags = &.{ "-std=c++17" } });
         \\            },
         \\            .chromium => {
         \\                const cef_check = addCefCheck(b, target, cef_dir);
@@ -1235,6 +1237,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        app_mod.linkSystemLibrary("mf", .{});
         \\        app_mod.linkSystemLibrary("mfplat", .{});
         \\        app_mod.linkSystemLibrary("winhttp", .{});
+        \\        app_mod.linkSystemLibrary("dcomp", .{});
         \\        if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
         \\    }
         \\}

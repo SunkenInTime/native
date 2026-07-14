@@ -3,6 +3,14 @@ const geometry = @import("geometry");
 const ObjectId = u64;
 const ImageId = u64;
 
+/// Presentation ownership survives display-list lowering so a platform can
+/// composite CPU-retained chrome below an immediate GPU island without
+/// teaching either renderer about the widget tree that produced it.
+pub const PresentationLayer = enum {
+    retained,
+    immediate,
+};
+
 pub const Color = struct {
     r: f32 = 0,
     g: f32 = 0,
@@ -131,6 +139,7 @@ pub const Clip = struct {
     id: ObjectId = 0,
     rect: geometry.RectF,
     radius: Radius = .{},
+    presentation_layer: PresentationLayer = .retained,
 };
 
 pub const FillRect = struct {

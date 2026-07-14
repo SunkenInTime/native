@@ -2809,13 +2809,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     self.applyWebPanes(runtime, frame_event.window_id, layout);
                 } else |_| {}
             }
-            try self.presentFrame(runtime, frame_event, self.options.canvas_label, installing);
-            if (installing) return;
-            const on_frame = self.options.on_frame orelse return;
-            const gpu_frame = runtime.gpuSurfaceFrame(frame_event.window_id, self.options.canvas_label) catch return;
-            if (on_frame(&self.model, gpu_frame)) |msg| {
-                try self.dispatch(runtime, frame_event.window_id, msg);
+            if (!installing) {
+                // Completion-clock callbacks mutate first, then this same
+                // scheduler event presents the resulting generation. The
+                // hybrid clean gate makes provider/no-op callbacks free; this
+                // ordering gives max-rate canvas exactly one present per
+                // completion instead of presenting stale content first.
+                if (self.options.on_frame) |on_frame| {
+                    if (runtime.gpuSurfaceFrame(frame_event.window_id, self.options.canvas_label)) |gpu_frame| {
+                        if (on_frame(&self.model, gpu_frame)) |msg| {
+                            try self.dispatch(runtime, frame_event.window_id, msg);
+                        }
+                    } else |_| {}
+                }
             }
+            try self.presentFrame(runtime, frame_event, self.options.canvas_label, installing);
         }
 
         /// A presented frame for one of the declared secondary windows:
@@ -2869,7 +2877,43 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             else
                 self.effectiveTokens().colors.background;
             var packet_attempted = false;
-            if (services.present_gpu_surface_packet_fn != null or services.present_gpu_surface_packet_binary_fn != null) {
+            if (services.gpu_surface_hybrid_layers and runtime.canvasViewHasHybridLayers(frame_event.window_id, canvas_label)) {
+                packet_attempted = true;
+                self.ensurePixelBuffers(frame_event.size, frame_event.scale_factor) catch return;
+                const hybrid_presented = blk: {
+                    const packet = runtime.presentNextCanvasHybridPacket(
+                        frame_event.window_id,
+                        canvas_label,
+                        .{
+                            .frame_index = frame_event.frame_index,
+                            .timestamp_ns = frame_event.timestamp_ns,
+                            .surface_size = frame_event.size,
+                            .scale = frame_event.scale_factor,
+                            .full_repaint = frame_event.canvas_frame_full_repaint or installing,
+                        },
+                        runtime.canvasFrameScratchStorage(),
+                        clear_color,
+                        &self.gpu_commands,
+                        &self.packet_bytes,
+                        self.pixel_buffer,
+                        self.pixel_scratch,
+                    ) catch |err| switch (err) {
+                        error.UnsupportedService => break :blk false,
+                        else => return err,
+                    };
+                    // A clean completion event is handled successfully but
+                    // produces no packet. Returning here preserves the
+                    // surface's last contents and keeps the frame loop honest.
+                    if (packet == null) break :blk true;
+                    break :blk true;
+                };
+                if (hybrid_presented) return;
+            }
+            // A failed hybrid packet already exercised this host packet
+            // channel. Retrying the full mixed display list is both
+            // redundant and invalid for retained text; go straight to the
+            // full-repaint pixel fallback so renderer loss visibly demotes.
+            if (!packet_attempted and (services.present_gpu_surface_packet_fn != null or services.present_gpu_surface_packet_binary_fn != null)) {
                 packet_attempted = true;
                 const packet_presented = blk: {
                     _ = runtime.presentNextCanvasGpuPacketWithScale(
