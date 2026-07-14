@@ -2897,7 +2897,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 };
                 if (hybrid_presented) return;
             }
-            if (services.present_gpu_surface_packet_fn != null or services.present_gpu_surface_packet_binary_fn != null) {
+            // A failed hybrid packet already exercised this host packet
+            // channel. Retrying the full mixed display list is both
+            // redundant and invalid for retained text; go straight to the
+            // full-repaint pixel fallback so renderer loss visibly demotes.
+            if (!packet_attempted and (services.present_gpu_surface_packet_fn != null or services.present_gpu_surface_packet_binary_fn != null)) {
                 packet_attempted = true;
                 const packet_presented = blk: {
                     _ = runtime.presentNextCanvasGpuPacketWithScale(

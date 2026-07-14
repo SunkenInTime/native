@@ -6101,6 +6101,8 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
             ex_style &= ~((LONG_PTR)WS_EX_NOREDIRECTIONBITMAP);
             ex_style |= WS_EX_LAYERED;
             SetWindowLongPtrW(owner->second.hwnd, GWL_EXSTYLE, ex_style);
+            SetWindowPos(owner->second.hwnd, nullptr, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
         return 0;
     }

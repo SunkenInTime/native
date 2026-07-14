@@ -32,6 +32,20 @@ static void disconnectRenderer(NativeSdkSharedRendererClient *client) {
     if (client->pipe != INVALID_HANDLE_VALUE) CloseHandle(client->pipe);
     client->pipe = INVALID_HANDLE_VALUE;
     client->connected = false;
+    // A dead renderer leaves its last composition surface valid in DWM.
+    // Release that visual tree before the host switches the HWND back to a
+    // layered bitmap; otherwise UpdateLayeredWindow fails and the widget
+    // appears frozen until a replacement renderer publishes another handle.
+    if (client->target) {
+        client->target->SetRoot(nullptr);
+        if (client->composition) client->composition->Commit();
+    }
+    client->surface.Reset();
+    client->visual.Reset();
+    client->target.Reset();
+    client->composition.Reset();
+    if (client->surface_handle) CloseHandle(client->surface_handle);
+    client->surface_handle = nullptr;
 }
 
 static bool writeExact(HANDLE file, const void *bytes, size_t length) {
@@ -88,7 +102,6 @@ NativeSdkSharedRendererClient *nativeSdkSharedRendererClientCreate(HWND window) 
 void nativeSdkSharedRendererClientDestroy(NativeSdkSharedRendererClient *client) {
     if (!client) return;
     disconnectRenderer(client);
-    if (client->surface_handle) CloseHandle(client->surface_handle);
     if (client->retained_pixels) UnmapViewOfFile(client->retained_pixels);
     if (client->retained_mapping) CloseHandle(client->retained_mapping);
     delete client;
