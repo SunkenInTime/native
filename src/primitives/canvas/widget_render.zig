@@ -219,7 +219,11 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack, .row, .column, .grid, .list, .breadcrumb, .pagination, .radio_group, .toggle_group, .split, .tree => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
+        .stack => if (paint_widget.immediate_commands.len > 0)
+            try emitImmediateCanvas(builder, paint_widget)
+        else
+            try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
+        .row, .column, .grid, .list, .breadcrumb, .pagination, .radio_group, .toggle_group, .split, .tree => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
         .button_group => try emitButtonGroupWidget(builder, paint_widget, tokens, depth),
         .table, .data_grid => {
             try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
@@ -496,7 +500,11 @@ fn emitWidgetLayoutNodeContent(
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack, .row, .column, .breadcrumb, .button_group, .pagination, .radio_group, .toggle_group, .split, .tree => {},
+        .stack => if (paint_widget.immediate_commands.len > 0) {
+            try emitImmediateCanvas(builder, paint_widget);
+            return;
+        },
+        .row, .column, .breadcrumb, .button_group, .pagination, .radio_group, .toggle_group, .split, .tree => {},
         .data_row => try emitDataRowWidgetWash(builder, paint_widget, tokens),
         .tabs => try widget_render_surfaces.emitTabsListWidgetChrome(builder, paint_widget, tokens),
         .table, .data_grid => {
@@ -620,6 +628,75 @@ fn emitWidgetLayoutNodeContent(
     }
 
     try emitWidgetLayoutClippedChildren(builder, layout, node_index, tokens, state, paint_widget);
+}
+
+/// Lower a local immediate batch into the same keyed display list as retained
+/// chrome. The clip command itself is keyed, and every draw id is derived from
+/// the widget id plus its ordinal, so the runtime's existing edit-script
+/// damage calculation can isolate changed commands while preserving pixels
+/// outside this frame.
+fn emitImmediateCanvas(builder: *Builder, widget: Widget) Error!void {
+    try builder.pushClip(.{ .id = immediateCanvasCommandId(widget.id, 0), .rect = widget.frame });
+    for (widget.immediate_commands, 0..) |command, index| {
+        const id = immediateCanvasCommandId(widget.id, index + 1);
+        switch (command) {
+            .fill_rect => |value| try builder.fillRect(.{
+                .id = id,
+                .rect = value.rect.translate(.{ .dx = widget.frame.x, .dy = widget.frame.y }),
+                .fill = .{ .color = value.color },
+            }),
+            .fill_rounded_rect => |value| try builder.fillRoundedRect(.{
+                .id = id,
+                .rect = value.rect.translate(.{ .dx = widget.frame.x, .dy = widget.frame.y }),
+                .radius = Radius.all(@max(0, value.radius)),
+                .fill = .{ .color = value.color },
+            }),
+            .fill_circle => |value| try builder.fillRoundedRect(.{
+                .id = id,
+                .rect = geometry.RectF.init(
+                    widget.frame.x + value.center.x - value.radius,
+                    widget.frame.y + value.center.y - value.radius,
+                    value.radius * 2,
+                    value.radius * 2,
+                ),
+                .radius = Radius.all(@max(0, value.radius)),
+                .fill = .{ .color = value.color },
+            }),
+            .line => |value| try builder.drawLine(.{
+                .id = id,
+                .from = geometry.PointF.init(widget.frame.x + value.from.x, widget.frame.y + value.from.y),
+                .to = geometry.PointF.init(widget.frame.x + value.to.x, widget.frame.y + value.to.y),
+                .stroke = .{ .fill = .{ .color = value.color }, .width = @max(0, value.width) },
+            }),
+            .polyline => |value| {
+                if (value.points.len < 2) continue;
+                const elements = try builder.allocPathElements(value.points.len);
+                for (value.points, 0..) |point, point_index| {
+                    elements[point_index] = .{
+                        .verb = if (point_index == 0) .move_to else .line_to,
+                        .points = .{
+                            geometry.PointF.init(widget.frame.x + point.x, widget.frame.y + point.y),
+                            geometry.PointF.zero(),
+                            geometry.PointF.zero(),
+                        },
+                    };
+                }
+                try builder.strokePath(.{
+                    .id = id,
+                    .elements = elements,
+                    .stroke = .{ .fill = .{ .color = value.color }, .width = @max(0, value.width) },
+                });
+            },
+        }
+    }
+    try builder.popClip();
+}
+
+fn immediateCanvasCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {
+    var hasher = std.hash.Wyhash.init(widget_id ^ 0x6361_6e76_6173); // "canvas"
+    hasher.update(std.mem.asBytes(&ordinal));
+    const id = hasher.final();
+    return if (id == 0) widget_id else id;
 }
 
 fn emitWidgetLayoutScrollableChildren(

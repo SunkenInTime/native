@@ -597,6 +597,12 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .js_window_api = options.js_window_api,
         .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
+        // The Windows pixel host preserves both its RGBA surface and its
+        // layered DIB across presents. Its keyed mirror therefore describes
+        // the pixels actually on glass, allowing rebuild damage to refine to
+        // changed command bounds instead of conservatively repainting the
+        // whole widget. Packet patches remain guarded from pixel baselines.
+        .pixel_present_retained_baseline = true,
         .security = options.security,
         .menus = options.menus,
         .shortcuts = shortcuts,

@@ -702,6 +702,20 @@ pub const WidgetOverscroll = enum {
     rubber_band,
 };
 
+/// One local-space immediate drawing command attached to a retained widget.
+/// The widget renderer translates these coordinates into the laid-out frame,
+/// clips them to that frame, and assigns stable display-list ids by command
+/// ordinal. This keeps immediate islands on the ordinary retained damage path:
+/// changing one command dirties its old/new bounds without invalidating the
+/// surrounding widget tree.
+pub const ImmediateCanvasCommand = union(enum) {
+    fill_rect: struct { rect: geometry.RectF, color: Color },
+    fill_rounded_rect: struct { rect: geometry.RectF, radius: f32, color: Color },
+    fill_circle: struct { center: geometry.PointF, radius: f32, color: Color },
+    line: struct { from: geometry.PointF, to: geometry.PointF, width: f32, color: Color },
+    polyline: struct { points: []const geometry.PointF, width: f32, color: Color },
+};
+
 /// Where a control sits inside a FLUSH button group (`button_group`
 /// with gap 0), stamped onto the render-time widget copy by BOTH render
 /// walks — never authored, never serialized, never retained. The stamp
@@ -780,6 +794,10 @@ pub const Widget = struct {
     /// keyboard the moment it appears.
     autofocus: bool = false,
     command: []const u8 = "",
+    /// Local-space immediate commands. Empty is free and preserves every
+    /// existing widget byte-for-byte at emission; `Ui.immediateCanvas` is the intended
+    /// authoring seam for this field.
+    immediate_commands: []const ImmediateCanvasCommand = &.{},
     image_id: ImageId = 0,
     image_src: ?geometry.RectF = null,
     image_fit: ImageFit = .stretch,
