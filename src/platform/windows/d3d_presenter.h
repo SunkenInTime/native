@@ -55,5 +55,11 @@ bool nativeSdkD3DSharedSurfacePresent(
     uint8_t clear_a,
     const uint8_t *packet,
     size_t packet_len,
+    uint64_t retained_generation,
+    UINT retained_width,
+    UINT retained_height,
+    const float *retained_dirty_rects,
+    size_t retained_dirty_rect_count,
+    const uint8_t *retained_bgra,
     uint64_t *replacement_widget_surface_handle);
 

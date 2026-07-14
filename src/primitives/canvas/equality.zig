@@ -95,7 +95,7 @@ pub fn commandsEqual(a: CanvasCommand, b: CanvasCommand) bool {
 }
 
 pub fn clipsEqual(a: Clip, b: Clip) bool {
-    return a.id == b.id and rectsEqual(a.rect, b.rect) and radiiEqual(a.radius, b.radius);
+    return a.id == b.id and a.presentation_layer == b.presentation_layer and rectsEqual(a.rect, b.rect) and radiiEqual(a.radius, b.radius);
 }
 
 pub fn fillRectsEqual(a: FillRect, b: FillRect) bool {

@@ -231,6 +231,8 @@ struct NsgpSurfaceState {
     std::map<uint64_t, RetainedCommand> retained;
     std::vector<uint64_t> order;
     ComPtr<IDXGISwapChain1> swapchain;
+    ComPtr<ID3D11Texture2D> retained_texture;
+    uint64_t retained_generation = 0;
 };
 
 struct NsgpEngine {
@@ -427,10 +429,14 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
     ComPtr<ID3D11RenderTargetView> rtv;
     if (FAILED(state->swapchain->GetBuffer(0, IID_PPV_ARGS(&back))) ||
         FAILED(engine->device->CreateRenderTargetView(back.Get(), nullptr, &rtv))) return false;
-    const float alpha = clear_a / 255.0f;
-    const float clear[4] = { clear_r / 255.0f * alpha, clear_g / 255.0f * alpha,
-        clear_b / 255.0f * alpha, alpha };
-    engine->context->ClearRenderTargetView(rtv.Get(), clear);
+    if (state->retained_texture) {
+        engine->context->CopyResource(back.Get(), state->retained_texture.Get());
+    } else {
+        const float alpha = clear_a / 255.0f;
+        const float clear[4] = { clear_r / 255.0f * alpha, clear_g / 255.0f * alpha,
+            clear_b / 255.0f * alpha, alpha };
+        engine->context->ClearRenderTargetView(rtv.Get(), clear);
+    }
     engine->context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
     engine->context->OMSetBlendState(engine->blend.Get(), nullptr, 0xffffffff);
     D3D11_VIEWPORT viewport = { 0, 0, (float)width, (float)height, 0, 1 };
@@ -503,6 +509,8 @@ static bool resizeSharedSurface(NativeSdkD3DSharedSurface *surface, UINT width,
     if (!renderer || width == 0 || height == 0) return false;
     renderer->engine.context->OMSetRenderTargets(0, nullptr, nullptr);
     surface->state.swapchain.Reset();
+    surface->state.retained_texture.Reset();
+    surface->state.retained_generation = 0;
     if (surface->composition_handle) {
         CloseHandle(surface->composition_handle);
         surface->composition_handle = nullptr;
@@ -543,7 +551,9 @@ static bool resizeSharedSurface(NativeSdkD3DSharedSurface *surface, UINT width,
 bool nativeSdkD3DSharedSurfacePresent(NativeSdkD3DSharedSurface *surface,
     double logical_width, double logical_height, double scale,
     uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a,
-    const uint8_t *packet, size_t packet_len,
+    const uint8_t *packet, size_t packet_len, uint64_t retained_generation,
+    UINT retained_width, UINT retained_height, const float *retained_dirty_rects,
+    size_t retained_dirty_rect_count, const uint8_t *retained_bgra,
     uint64_t *replacement_widget_surface_handle) {
     if (!surface || !surface->renderer || !replacement_widget_surface_handle || scale <= 0) return false;
     NativeSdkD3DSharedRenderer *renderer = surface->renderer;
@@ -562,6 +572,43 @@ bool nativeSdkD3DSharedSurfacePresent(NativeSdkD3DSharedSurface *surface,
         !resizeSharedSurface(surface, width, height, replacement_widget_surface_handle)) {
         finish_turn();
         return false;
+    }
+    if (retained_generation != 0) {
+        if (!retained_bgra || retained_width != width || retained_height != height ||
+            retained_dirty_rect_count > 8) {
+            finish_turn();
+            return false;
+        }
+        if (!surface->state.retained_texture) {
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = width; desc.Height = height;
+            desc.MipLevels = 1; desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+            if (FAILED(renderer->engine.device->CreateTexture2D(&desc, nullptr,
+                &surface->state.retained_texture))) {
+                finish_turn();
+                return false;
+            }
+            retained_dirty_rect_count = 0;
+        }
+        const size_t rect_count = retained_dirty_rect_count == 0 ? 1 : retained_dirty_rect_count;
+        for (size_t index = 0; index < rect_count; ++index) {
+            UINT left = 0, top = 0, right = width, bottom = height;
+            if (retained_dirty_rect_count > 0) {
+                const float *rect = retained_dirty_rects + index * 4;
+                left = (UINT)std::max(0.0, std::min((double)width, floor(rect[0] * scale)));
+                top = (UINT)std::max(0.0, std::min((double)height, floor(rect[1] * scale)));
+                right = (UINT)std::max((double)left, std::min((double)width, ceil((rect[0] + rect[2]) * scale)));
+                bottom = (UINT)std::max((double)top, std::min((double)height, ceil((rect[1] + rect[3]) * scale)));
+            }
+            if (right <= left || bottom <= top) continue;
+            D3D11_BOX box = { left, top, 0, right, bottom, 1 };
+            const uint8_t *source = retained_bgra + ((size_t)top * width + left) * 4;
+            renderer->engine.context->UpdateSubresource(surface->state.retained_texture.Get(),
+                0, &box, source, width * 4, width * height * 4);
+        }
+        surface->state.retained_generation = retained_generation;
     }
     const bool rendered = renderPacket(&renderer->engine, &surface->state,
         logical_width, logical_height, scale, clear_r, clear_g, clear_b,

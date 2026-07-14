@@ -225,6 +225,13 @@ pub const ReferenceRenderSurface = struct {
     }
 
     pub fn renderPass(self: ReferenceRenderSurface, pass: CanvasRenderPass, clear_color: Color) Error!void {
+        return self.renderPassLayer(pass, clear_color, null);
+    }
+
+    /// Raster one presentation layer while retaining the same clear/scissor
+    /// semantics as a normal pass. Hybrid hosts use this for the CPU chrome;
+    /// ordinary callers pass through `renderPass` and see no behavior change.
+    pub fn renderPassLayer(self: ReferenceRenderSurface, pass: CanvasRenderPass, clear_color: Color, layer: ?canvas.PresentationLayer) Error!void {
         // One-time sRGB decode/encode table fills (see the tables' doc
         // comments); outside the per-pixel loops so the hot path pays no
         // checks.
@@ -239,7 +246,10 @@ pub const ReferenceRenderSurface = struct {
             .clear => self.clear(clear_color),
             .load => if (scissor) |bounds| self.clearRect(bounds, clear_color),
         }
-        for (pass.commands) |command| try self.renderCommand(referenceScaleCommand(command, scale), scissor);
+        for (pass.commands) |command| {
+            if (layer) |wanted| if (command.presentation_layer != wanted) continue;
+            try self.renderCommand(referenceScaleCommand(command, scale), scissor);
+        }
     }
 
     pub fn pixelRgba8(self: ReferenceRenderSurface, x: usize, y: usize) [4]u8 {

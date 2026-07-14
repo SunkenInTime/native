@@ -271,6 +271,122 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             return packet;
         }
 
+        pub fn canvasViewHasHybridLayers(self: *Runtime, window_id: platform.WindowId, label: []const u8) bool {
+            const index = runtimeFindViewIndex(self, window_id, label) orelse return false;
+            const view = &self.views[index];
+            const list = canvas.DisplayList{ .commands = view.canvas_commands[0..view.canvas_command_count] };
+            return list.hasPresentationLayer(.retained) and list.hasPresentationLayer(.immediate);
+        }
+
+        /// Present an immediate-canvas packet over a CPU-rasterized retained
+        /// layer. The retained hash deliberately excludes immediate commands:
+        /// static text/chrome rerasterizes and crosses shared memory once,
+        /// while every animation frame carries only the compact NSGP shapes.
+        pub fn presentNextCanvasHybridPacket(
+            self: *Runtime,
+            window_id: platform.WindowId,
+            label: []const u8,
+            options: canvas.CanvasFrameOptions,
+            storage: canvas.CanvasFrameStorage,
+            clear_color: canvas.Color,
+            output: []canvas.CanvasGpuCommand,
+            packet_bytes_buffer: []u8,
+            pixels: []u8,
+            scratch: []u8,
+        ) anyerror!canvas.CanvasGpuPacket {
+            const services = self.options.platform.services;
+            if (!services.gpu_surface_hybrid_layers or services.present_gpu_surface_packet_binary_fn == null) return error.UnsupportedService;
+            const canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
+            var pass = canvas_frame.renderPass();
+            if (!pass.hasPresentationLayer(.retained) or !pass.hasPresentationLayer(.immediate)) return error.UnsupportedService;
+            var packet = try pass.gpuPacketForLayer(.immediate, output);
+            packet.scale = canvas_frame.scale;
+            packet.images = &.{};
+            packet.image_actions = &.{};
+            if (!packet.fullyRepresentable() or packet.commandCount() == 0) return error.UnsupportedService;
+
+            const view_index = runtimeFindViewIndex(self, window_id, label) orelse return error.UnsupportedViewKind;
+            const view = &self.views[view_index];
+            const pixel_size = try canvasFramePixelSize(canvas_frame);
+            if (pixels.len < pixel_size.byte_len) return error.InvalidGpuSurfacePixels;
+            const fingerprint = pass.presentationLayerFingerprint(.retained);
+            const resized = !view.hybrid_retained_valid or
+                !sizesEqual(view.hybrid_retained_surface_size, canvas_frame.surface_size) or
+                view.hybrid_retained_scale != canvas_frame.scale;
+            const retained_changed = resized or fingerprint != view.hybrid_retained_fingerprint;
+            var dirty_one: [1]geometry.RectF = undefined;
+            var retained_dirty: []const geometry.RectF = &.{};
+            var retained_generation: u64 = 0;
+            if (retained_changed) {
+                var surface = if (scratch.len >= pixel_size.byte_len)
+                    try canvas.ReferenceRenderSurface.initWithScratch(pixel_size.width, pixel_size.height, pixels, scratch)
+                else
+                    try canvas.ReferenceRenderSurface.init(pixel_size.width, pixel_size.height, pixels);
+                // A hybrid retained layer starts from a transparent buffer and
+                // is uploaded only when its own fingerprint changes. The
+                // ordinary pixel-present memo includes the composited scene
+                // beneath a command, so replaying its patches into this
+                // layer-only surface can restore pixels from the immediate
+                // canvas. The infrequent retained reraster is the cache here;
+                // keep its pixel source deterministic and layer-local.
+                surface = surface.withImages(canvas_frame.image_resources).withFonts(canvas_frame.font_resources);
+                if (resized) {
+                    pass.full_repaint = true;
+                    pass.dirty_bounds = null;
+                }
+                try surface.renderPassLayer(pass, clear_color, .retained);
+                if (!resized) {
+                    retained_dirty = canvas_frame.dirtyRects();
+                    if (retained_dirty.len == 0) if (canvas_frame.dirty_bounds) |bounds| {
+                        dirty_one[0] = bounds;
+                        retained_dirty = &dirty_one;
+                    };
+                }
+                retained_generation = if (view.hybrid_retained_generation == std.math.maxInt(u64)) 1 else view.hybrid_retained_generation + 1;
+            }
+
+            var writer = std.Io.Writer.fixed(packet_bytes_buffer[0..@min(packet_bytes_buffer.len, platform.max_gpu_surface_packet_binary_bytes)]);
+            try packet.writeBinary(&writer);
+            const base = platform.GpuSurfacePacket{
+                .window_id = window_id,
+                .label = label,
+                .frame_index = packet.frame_index,
+                .timestamp_ns = packet.timestamp_ns,
+                .surface_size = packet.surface_size,
+                .scale_factor = packet.scale,
+                .clear_color_rgba8 = canvasColorToRgba8(clear_color),
+                .requires_render = true,
+                .command_count = packet.commandCount(),
+                .unsupported_command_count = 0,
+                .representable = true,
+                .binary = writer.buffered(),
+                .retained_width = pixel_size.width,
+                .retained_height = pixel_size.height,
+                .retained_generation = retained_generation,
+                .retained_dirty_rects = retained_dirty,
+                .retained_rgba8 = if (retained_changed) pixels[0..pixel_size.byte_len] else "",
+            };
+            services.presentGpuSurfacePacketBinary(base) catch |err| {
+                view.hybrid_retained_valid = false;
+                return err;
+            };
+            if (retained_changed) {
+                view.hybrid_retained_valid = true;
+                view.hybrid_retained_fingerprint = fingerprint;
+                view.hybrid_retained_generation = retained_generation;
+                view.hybrid_retained_surface_size = canvas_frame.surface_size;
+                view.hybrid_retained_scale = canvas_frame.scale;
+            }
+            view.recordCanvasFramePresentationComplete(canvas_frame);
+            view.gpu_present_path = .packet;
+            view.gpu_present_packet_mode = .full;
+            view.canvas_packet_baseline_valid = false;
+            clearCanvasPacketFallback(view);
+            recordCanvasPresentInputLatency(view);
+            recordCanvasClearColor(self, window_id, label, clear_color);
+            return packet;
+        }
+
         pub fn presentNextCanvasFrame(
             self: *Runtime,
             window_id: platform.WindowId,

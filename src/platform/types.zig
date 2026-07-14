@@ -1742,6 +1742,14 @@ pub const GpuSurfacePacket = struct {
     /// encoding on text-heavy frames because field names, decimal
     /// formatting, and the host-unused glyph arrays never ride it.
     binary: []const u8 = "",
+    /// Optional CPU-retained layer accompanying an immediate-only packet.
+    /// Bytes are straight RGBA here; the Windows transport premultiplies into
+    /// its shared BGRA section before the renderer uploads the dirty rects.
+    retained_width: usize = 0,
+    retained_height: usize = 0,
+    retained_generation: u64 = 0,
+    retained_dirty_rects: []const geometry.RectF = &.{},
+    retained_rgba8: []const u8 = "",
 };
 
 pub const WidgetAccessibilityRole = enum(c_int) {
@@ -2103,6 +2111,10 @@ pub const PlatformServices = struct {
     /// per-present conversation and the JSON path survives for
     /// compatibility and wire-level debugging.
     present_gpu_surface_packet_binary_fn: ?*const fn (context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void = null,
+    /// The binary presenter can composite `GpuSurfacePacket.retained_rgba8`
+    /// beneath its packet commands. Kept separate from function presence so
+    /// Metal and other complete packet renderers retain their normal path.
+    gpu_surface_hybrid_layers: bool = false,
     /// Binary side-channel for gpu-surface image pixels: create or
     /// replace the host texture for `image.id` out-of-band, so packets
     /// carry only id + fingerprint references. Host-wide (not per view);
@@ -2584,6 +2596,12 @@ pub const PlatformServices = struct {
     pub fn presentGpuSurfacePacketBinary(self: PlatformServices, packet: GpuSurfacePacket) anyerror!void {
         if (packet.label.len == 0 or packet.label.len > max_view_label_bytes) return error.InvalidGpuSurfacePacket;
         if (packet.binary.len == 0 or packet.binary.len > max_gpu_surface_packet_binary_bytes) return error.InvalidGpuSurfacePacket;
+        if (packet.retained_rgba8.len > 0) {
+            const pixels = std.math.mul(usize, packet.retained_width, packet.retained_height) catch return error.InvalidGpuSurfacePacket;
+            const bytes = std.math.mul(usize, pixels, 4) catch return error.InvalidGpuSurfacePacket;
+            if (!self.gpu_surface_hybrid_layers or packet.retained_rgba8.len != bytes or
+                packet.retained_generation == 0 or packet.retained_dirty_rects.len > 8) return error.InvalidGpuSurfacePacket;
+        }
         const present_fn = self.present_gpu_surface_packet_binary_fn orelse return error.UnsupportedService;
         return present_fn(self.context, packet);
     }

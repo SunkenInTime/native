@@ -132,6 +132,22 @@ pub const DisplayList = struct {
         return self.commands.len;
     }
 
+    pub fn hasPresentationLayer(self: DisplayList, wanted: canvas.PresentationLayer) bool {
+        var layer: canvas.PresentationLayer = .retained;
+        var stack: [32]canvas.PresentationLayer = undefined;
+        var depth: usize = 0;
+        for (self.commands) |command| switch (command) {
+            .push_clip => |clip| {
+                if (depth < stack.len) { stack[depth] = layer; depth += 1; }
+                layer = clip.presentation_layer;
+            },
+            .pop_clip => if (depth > 0) { depth -= 1; layer = stack[depth]; },
+            .push_opacity, .pop_opacity, .transform => {},
+            else => if (layer == wanted) return true,
+        };
+        return false;
+    }
+
     pub fn findCommandById(self: DisplayList, id: ObjectId) ?CommandRef {
         if (id == 0) return null;
         for (self.commands, 0..) |command, index| {

@@ -636,7 +636,7 @@ fn emitWidgetLayoutNodeContent(
 /// damage calculation can isolate changed commands while preserving pixels
 /// outside this frame.
 fn emitImmediateCanvas(builder: *Builder, widget: Widget) Error!void {
-    try builder.pushClip(.{ .id = immediateCanvasCommandId(widget.id, 0), .rect = widget.frame });
+    try builder.pushClip(.{ .id = immediateCanvasCommandId(widget.id, 0), .rect = widget.frame, .presentation_layer = .immediate });
     for (widget.immediate_commands, 0..) |command, index| {
         const id = immediateCanvasCommandId(widget.id, index + 1);
         switch (command) {

@@ -202,6 +202,14 @@ pub const RuntimeView = struct {
     /// an upsert/evict must repaint the command's OLD extent too — these
     /// are those extents.
     canvas_packet_baseline_bounds: [max_canvas_retained_packet_commands_per_view]geometry.RectF = undefined,
+    /// CPU-retained half of a hybrid immediate-canvas surface. Its hash is
+    /// independent of canvas commands, so a 60 fps island cannot trigger a
+    /// reraster or shared-memory upload of static chrome/text.
+    hybrid_retained_valid: bool = false,
+    hybrid_retained_fingerprint: u64 = 0,
+    hybrid_retained_generation: u64 = 0,
+    hybrid_retained_surface_size: geometry.SizeF = geometry.SizeF.init(0, 0),
+    hybrid_retained_scale: f32 = 1,
     /// Patch telemetry surfaced on the automation snapshot view line
     /// (present_mode= / present_patch_*= / present_retained_commands=).
     gpu_present_packet_mode: platform.GpuPresentPacketMode = .none,

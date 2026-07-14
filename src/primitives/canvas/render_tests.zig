@@ -3184,3 +3184,31 @@ test "canvas frame plan reports diff storage overflow" {
         .changes = &changes,
     }));
 }
+
+test "hybrid presentation keeps retained pixels below immediate packet commands" {
+    var command_storage: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&command_storage);
+    try builder.fillRect(.{ .id = 1, .rect = geometry.RectF.init(0, 0, 4, 4), .fill = .{ .color = Color.rgb8(255, 0, 0) } });
+    try builder.pushClip(.{ .id = 2, .rect = geometry.RectF.init(0, 0, 2, 2), .presentation_layer = .immediate });
+    try builder.fillRoundedRect(.{ .id = 3, .rect = geometry.RectF.init(0, 0, 2, 2), .radius = Radius.all(1), .fill = .{ .color = Color.rgb8(0, 0, 255) } });
+    try builder.popClip();
+
+    var render_commands: [2]RenderCommand = undefined;
+    const plan = try builder.displayList().renderPlan(&render_commands);
+    try std.testing.expectEqual(canvas.PresentationLayer.retained, plan.commands[0].presentation_layer);
+    try std.testing.expectEqual(canvas.PresentationLayer.immediate, plan.commands[1].presentation_layer);
+    const pass = CanvasRenderPass{ .full_repaint = true, .surface_size = geometry.SizeF.init(4, 4), .commands = plan.commands };
+    try std.testing.expect(pass.hasPresentationLayer(.retained));
+    try std.testing.expect(pass.hasPresentationLayer(.immediate));
+    try std.testing.expect(pass.presentationLayerFingerprint(.retained) != pass.presentationLayerFingerprint(.immediate));
+
+    var gpu_commands: [2]CanvasGpuCommand = undefined;
+    const packet = try pass.gpuPacketForLayer(.immediate, &gpu_commands);
+    try std.testing.expectEqual(@as(usize, 1), packet.commandCount());
+    try std.testing.expectEqual(CanvasGpuCommandKind.fill_rounded_rect_solid, packet.commands[0].kind);
+
+    var pixels: [4 * 4 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(4, 4, &pixels);
+    try surface.renderPassLayer(pass, Color.rgba8(0, 0, 0, 0), .retained);
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, surface.pixelRgba8(1, 1));
+}

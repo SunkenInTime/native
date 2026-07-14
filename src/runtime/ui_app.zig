@@ -2869,6 +2869,34 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             else
                 self.effectiveTokens().colors.background;
             var packet_attempted = false;
+            if (services.gpu_surface_hybrid_layers and runtime.canvasViewHasHybridLayers(frame_event.window_id, canvas_label)) {
+                packet_attempted = true;
+                self.ensurePixelBuffers(frame_event.size, frame_event.scale_factor) catch return;
+                const hybrid_presented = blk: {
+                    _ = runtime.presentNextCanvasHybridPacket(
+                        frame_event.window_id,
+                        canvas_label,
+                        .{
+                            .frame_index = frame_event.frame_index,
+                            .timestamp_ns = frame_event.timestamp_ns,
+                            .surface_size = frame_event.size,
+                            .scale = frame_event.scale_factor,
+                            .full_repaint = frame_event.canvas_frame_full_repaint or installing,
+                        },
+                        runtime.canvasFrameScratchStorage(),
+                        clear_color,
+                        &self.gpu_commands,
+                        &self.packet_bytes,
+                        self.pixel_buffer,
+                        self.pixel_scratch,
+                    ) catch |err| switch (err) {
+                        error.UnsupportedService => break :blk false,
+                        else => return err,
+                    };
+                    break :blk true;
+                };
+                if (hybrid_presented) return;
+            }
             if (services.present_gpu_surface_packet_fn != null or services.present_gpu_surface_packet_binary_fn != null) {
                 packet_attempted = true;
                 const packet_presented = blk: {

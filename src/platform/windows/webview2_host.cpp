@@ -6080,7 +6080,10 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
     const char *label, size_t label_len, double surface_width, double surface_height,
     double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a,
     int requires_render, size_t command_count, size_t unsupported_command_count,
-    int representable, const uint8_t *packet, size_t packet_len) {
+    int representable, const uint8_t *packet, size_t packet_len,
+    uint64_t retained_generation, size_t retained_width, size_t retained_height,
+    const float *retained_dirty_rects, size_t retained_dirty_rect_count,
+    const uint8_t *retained_rgba8, size_t retained_rgba8_len) {
     if (!host || label_len == 0 || !packet || packet_len == 0 || !requires_render ||
         !representable || unsupported_command_count != 0 || command_count == 0) return 0;
     auto found = host->native_views.find(nativeViewKey(window_id, slice(label, label_len)));
@@ -6088,7 +6091,9 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
         !found->second.gpu_presenter) return 0;
     NativeView &view = found->second;
     if (!nativeSdkSharedRendererClientPresent(view.gpu_presenter, surface_width, surface_height,
-        scale, clear_r, clear_g, clear_b, clear_a, packet, packet_len)) {
+        scale, clear_r, clear_g, clear_b, clear_a, packet, packet_len,
+        retained_generation, retained_width, retained_height, retained_dirty_rects,
+        retained_dirty_rect_count, retained_rgba8, retained_rgba8_len)) {
         view.gpu_backend = 3;
         auto owner = host->windows.find(window_id);
         if (owner != host->windows.end() && owner->second.transparent) {

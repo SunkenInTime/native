@@ -400,6 +400,14 @@ pub const CanvasGpuPacketPlanner = struct {
     }
 
     pub fn build(self: *CanvasGpuPacketPlanner, pass: canvas.CanvasRenderPass) Error!CanvasGpuPacket {
+        return self.buildOptionalLayer(pass, null);
+    }
+
+    pub fn buildLayer(self: *CanvasGpuPacketPlanner, pass: canvas.CanvasRenderPass, layer: canvas.PresentationLayer) Error!CanvasGpuPacket {
+        return self.buildOptionalLayer(pass, layer);
+    }
+
+    fn buildOptionalLayer(self: *CanvasGpuPacketPlanner, pass: canvas.CanvasRenderPass, layer: ?canvas.PresentationLayer) Error!CanvasGpuPacket {
         self.reset();
         if (!pass.requiresRender()) {
             return .{
@@ -411,8 +419,12 @@ pub const CanvasGpuPacketPlanner = struct {
             };
         }
 
-        const scissor_bounds = pass.scissorBounds();
+        // A layer-filtered packet is a complete canvas snapshot. The hybrid
+        // renderer retains it independently from CPU pixels, so sending only
+        // the frame scissor subset would evict unchanged canvas commands.
+        const scissor_bounds = if (layer == null) pass.scissorBounds() else null;
         for (pass.commands, 0..) |command, index| {
+            if (layer) |wanted| if (command.presentation_layer != wanted) continue;
             if (scissor_bounds) |scissor| {
                 if (!renderCommandIntersectsDirtyBounds(command, scissor)) continue;
             }
@@ -422,10 +434,10 @@ pub const CanvasGpuPacketPlanner = struct {
         return .{
             .frame_index = pass.frame_index,
             .timestamp_ns = pass.timestamp_ns,
-            .load_action = pass.loadAction(),
+            .load_action = if (layer == null) pass.loadAction() else .clear,
             .surface_size = pass.surface_size,
             .scale = pass.scale,
-            .scissor = pass.scissorBounds(),
+            .scissor = scissor_bounds,
             .images = pass.images,
             .image_actions = pass.image_actions,
             .commands = self.commands[0..self.len],
