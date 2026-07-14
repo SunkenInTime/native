@@ -3202,6 +3202,21 @@ test "hybrid presentation keeps retained pixels below immediate packet commands"
     try std.testing.expect(pass.hasPresentationLayer(.immediate));
     try std.testing.expect(pass.presentationLayerFingerprint(.retained) != pass.presentationLayerFingerprint(.immediate));
 
+    var changed_storage: [8]CanvasCommand = undefined;
+    var changed = Builder.init(&changed_storage);
+    try changed.fillRect(.{ .id = 1, .rect = geometry.RectF.init(0, 0, 4, 4), .fill = .{ .color = Color.rgb8(255, 0, 0) } });
+    try changed.pushClip(.{ .id = 2, .rect = geometry.RectF.init(0, 0, 2, 2), .presentation_layer = .immediate });
+    try changed.fillRoundedRect(.{ .id = 3, .rect = geometry.RectF.init(0, 0, 2, 2), .radius = Radius.all(1), .fill = .{ .color = Color.rgb8(0, 255, 0) } });
+    try changed.popClip();
+    try std.testing.expectEqual(
+        builder.displayList().presentationLayerSourceFingerprint(.retained),
+        changed.displayList().presentationLayerSourceFingerprint(.retained),
+    );
+    try std.testing.expect(
+        builder.displayList().presentationLayerSourceFingerprint(.immediate) !=
+            changed.displayList().presentationLayerSourceFingerprint(.immediate),
+    );
+
     var gpu_commands: [2]CanvasGpuCommand = undefined;
     const packet = try pass.gpuPacketForLayer(.immediate, &gpu_commands);
     try std.testing.expectEqual(@as(usize, 1), packet.commandCount());

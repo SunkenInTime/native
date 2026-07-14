@@ -206,10 +206,17 @@ pub const RuntimeView = struct {
     /// independent of canvas commands, so a 60 fps island cannot trigger a
     /// reraster or shared-memory upload of static chrome/text.
     hybrid_retained_valid: bool = false,
+    hybrid_retained_source_fingerprint: u64 = 0,
     hybrid_retained_fingerprint: u64 = 0,
     hybrid_retained_generation: u64 = 0,
     hybrid_retained_surface_size: geometry.SizeF = geometry.SizeF.init(0, 0),
     hybrid_retained_scale: f32 = 1,
+    /// Layer-filtered immediate list rebuilt with the owned display list.
+    /// Hybrid frame ticks plan this cache directly, so static retained
+    /// commands are not even walked by the 60 Hz presentation path.
+    hybrid_immediate_commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined,
+    hybrid_immediate_command_count: usize = 0,
+    hybrid_immediate_valid: bool = false,
     /// Patch telemetry surfaced on the automation snapshot view line
     /// (present_mode= / present_patch_*= / present_retained_commands=).
     gpu_present_packet_mode: platform.GpuPresentPacketMode = .none,
@@ -549,6 +556,7 @@ pub const RuntimeView = struct {
 
     const CanvasFrameMethods = view_canvas.RuntimeViewCanvasFrame(RuntimeView);
     pub const canvasDisplayList = CanvasFrameMethods.canvasDisplayList;
+    pub const hybridImmediateDisplayList = CanvasFrameMethods.hybridImmediateDisplayList;
     pub const validateCanvasWidgetDisplayListChrome = CanvasFrameMethods.validateCanvasWidgetDisplayListChrome;
     pub const canvasFrameResourceCache = CanvasFrameMethods.canvasFrameResourceCache;
     pub const canvasFramePathGeometryCache = CanvasFrameMethods.canvasFramePathGeometryCache;

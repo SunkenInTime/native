@@ -2809,13 +2809,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     self.applyWebPanes(runtime, frame_event.window_id, layout);
                 } else |_| {}
             }
-            try self.presentFrame(runtime, frame_event, self.options.canvas_label, installing);
-            if (installing) return;
-            const on_frame = self.options.on_frame orelse return;
-            const gpu_frame = runtime.gpuSurfaceFrame(frame_event.window_id, self.options.canvas_label) catch return;
-            if (on_frame(&self.model, gpu_frame)) |msg| {
-                try self.dispatch(runtime, frame_event.window_id, msg);
+            if (!installing) {
+                // Completion-clock callbacks mutate first, then this same
+                // scheduler event presents the resulting generation. The
+                // hybrid clean gate makes provider/no-op callbacks free; this
+                // ordering gives max-rate canvas exactly one present per
+                // completion instead of presenting stale content first.
+                if (self.options.on_frame) |on_frame| {
+                    if (runtime.gpuSurfaceFrame(frame_event.window_id, self.options.canvas_label)) |gpu_frame| {
+                        if (on_frame(&self.model, gpu_frame)) |msg| {
+                            try self.dispatch(runtime, frame_event.window_id, msg);
+                        }
+                    } else |_| {}
+                }
             }
+            try self.presentFrame(runtime, frame_event, self.options.canvas_label, installing);
         }
 
         /// A presented frame for one of the declared secondary windows:
@@ -2873,7 +2881,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 packet_attempted = true;
                 self.ensurePixelBuffers(frame_event.size, frame_event.scale_factor) catch return;
                 const hybrid_presented = blk: {
-                    _ = runtime.presentNextCanvasHybridPacket(
+                    const packet = runtime.presentNextCanvasHybridPacket(
                         frame_event.window_id,
                         canvas_label,
                         .{
@@ -2893,6 +2901,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         error.UnsupportedService => break :blk false,
                         else => return err,
                     };
+                    // A clean completion event is handled successfully but
+                    // produces no packet. Returning here preserves the
+                    // surface's last contents and keeps the frame loop honest.
+                    if (packet == null) break :blk true;
                     break :blk true;
                 };
                 if (hybrid_presented) return;

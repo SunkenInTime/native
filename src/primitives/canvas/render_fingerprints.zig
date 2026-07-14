@@ -219,6 +219,14 @@ fn resourceHashCanvasCommand(hash: u64, command: anytype) u64 {
     return next;
 }
 
+/// Content fingerprint for one source display-list command. This is the
+/// pre-planning counterpart to `renderCommandFingerprint`: it covers slice
+/// contents rather than their addresses, so a view-owned builder may compare
+/// an aliased publish without preserving the old command storage.
+pub fn canvasCommandFingerprint(command: anytype) u64 {
+    return resourceHashCanvasCommand(resourceHashTag("canvas_command"), command);
+}
+
 fn resourceHashFill(hash: u64, fill: Fill) u64 {
     return switch (fill) {
         .color => |color| resourceHashColor(resourceHashBytes(hash, "color"), color),

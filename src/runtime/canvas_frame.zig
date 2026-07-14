@@ -39,6 +39,7 @@ const runtime_view = @import("view.zig");
 
 const CanvasPresentationResult = runtime_api.CanvasPresentationResult;
 const max_canvas_diff_changes_per_view = canvas_limits.max_canvas_diff_changes_per_view;
+const max_canvas_commands_per_view = canvas_limits.max_canvas_commands_per_view;
 const max_canvas_render_animations_per_view = canvas_limits.max_canvas_render_animations_per_view;
 const max_canvas_text_layouts_per_view = canvas_limits.max_canvas_text_layouts_per_view;
 const max_canvas_text_layout_lines_per_view = canvas_limits.max_canvas_text_layout_lines_per_view;
@@ -47,6 +48,8 @@ threadlocal var canvas_frame_text_layout_plans_scratch: [max_canvas_text_layouts
 threadlocal var canvas_frame_text_layout_lines_scratch: [max_canvas_text_layout_lines_per_view]canvas.TextLine = undefined;
 threadlocal var canvas_frame_text_layout_cache_entries_scratch: [max_canvas_text_layouts_per_view]canvas.TextLayoutCacheEntry = undefined;
 threadlocal var canvas_frame_text_layout_cache_actions_scratch: [max_canvas_text_layouts_per_view * 2]canvas.TextLayoutCacheAction = undefined;
+threadlocal var canvas_frame_immediate_commands_scratch: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
+threadlocal var canvas_frame_retained_commands_scratch: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
 
 /// One entry of the frame's CURRENT keyed command list — the full draw
 /// order the retained packet protocol works on (never the scissor
@@ -293,31 +296,72 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             packet_bytes_buffer: []u8,
             pixels: []u8,
             scratch: []u8,
-        ) anyerror!canvas.CanvasGpuPacket {
+        ) anyerror!?canvas.CanvasGpuPacket {
             const services = self.options.platform.services;
             if (!services.gpu_surface_hybrid_layers or services.present_gpu_surface_packet_binary_fn == null) return error.UnsupportedService;
-            const canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
-            var pass = canvas_frame.renderPass();
-            if (!pass.hasPresentationLayer(.retained) or !pass.hasPresentationLayer(.immediate)) return error.UnsupportedService;
-            var packet = try pass.gpuPacketForLayer(.immediate, output);
-            packet.scale = canvas_frame.scale;
-            packet.images = &.{};
-            packet.image_actions = &.{};
-            if (!packet.fullyRepresentable() or packet.commandCount() == 0) return error.UnsupportedService;
-
             const view_index = runtimeFindViewIndex(self, window_id, label) orelse return error.UnsupportedViewKind;
             const view = &self.views[view_index];
-            const pixel_size = try canvasFramePixelSize(canvas_frame);
+            var requested_surface = options.surface_size;
+            if (requested_surface.isEmpty()) requested_surface = if (view.gpu_size.isEmpty()) view.frame.size() else view.gpu_size;
+            const surface_unchanged = sizesEqual(view.presented_canvas_surface_size, requested_surface) and
+                view.presented_canvas_scale == options.scale;
+            if (!options.full_repaint and view.presented_canvas_valid and
+                view.presented_canvas_revision == view.canvas_revision and surface_unchanged)
+            {
+                // Present completions emit a second surface event. The normal
+                // full-scene path rejects that clean revision in
+                // planCanvasFrameForView; the hybrid fast path must enforce
+                // the same gate before its layer-specific planning or every
+                // requested frame is rendered twice.
+                return null;
+            }
+            const display_list = view.canvasDisplayList();
+            if (!display_list.hasPresentationLayer(.retained) or !display_list.hasPresentationLayer(.immediate)) return error.UnsupportedService;
+
+            var frame_options = options;
+            if (frame_options.surface_size.isEmpty()) {
+                frame_options.surface_size = if (view.gpu_size.isEmpty()) view.frame.size() else view.gpu_size;
+            }
+            if (frame_options.image_resources.len == 0) frame_options.image_resources = self.registeredCanvasImages();
+            if (frame_options.font_resources.len == 0) frame_options.font_resources = self.registeredCanvasFonts();
+            if (canvasFrameBudgetIsUnset(frame_options.budget)) frame_options.budget = view.canvas_frame_budget;
+            frame_options.full_repaint = true;
+
+            // Planning starts from the layer-filtered command stream. The
+            // previous implementation filtered the completed render pass,
+            // which still paid retained text/resource/layout planning on
+            // every animation frame even though those pixels never changed.
+            const immediate_list = view.hybridImmediateDisplayList() orelse
+                try display_list.copyPresentationLayer(.immediate, &canvas_frame_immediate_commands_scratch);
+            const plan_begin = self.frame_profile.begin();
+            const immediate_frame = try immediate_list.framePlan(null, frame_options, storage);
+            self.frame_profile.end(.plan, plan_begin);
+            var immediate_pass = immediate_frame.renderPass();
+            const encode_begin = self.frame_profile.begin();
+            var packet = try immediate_pass.gpuPacket(output);
+            packet.scale = immediate_frame.scale;
+            packet.images = &.{};
+            packet.image_actions = &.{};
+            // An empty immediate layer is a valid hybrid frame: the renderer
+            // still composites the cached retained texture and clears stale
+            // canvas pixels. Treating it as unsupported disconnected quiet
+            // audio visualizers from the shared renderer on every trough.
+            if (!packet.fullyRepresentable()) return error.UnsupportedService;
+
+            const pixel_size = try canvasFramePixelSize(immediate_frame);
             if (pixels.len < pixel_size.byte_len) return error.InvalidGpuSurfacePixels;
-            const fingerprint = pass.presentationLayerFingerprint(.retained);
             const resized = !view.hybrid_retained_valid or
-                !sizesEqual(view.hybrid_retained_surface_size, canvas_frame.surface_size) or
-                view.hybrid_retained_scale != canvas_frame.scale;
-            const retained_changed = resized or fingerprint != view.hybrid_retained_fingerprint;
-            var dirty_one: [1]geometry.RectF = undefined;
-            var retained_dirty: []const geometry.RectF = &.{};
+                !sizesEqual(view.hybrid_retained_surface_size, immediate_frame.surface_size) or
+                view.hybrid_retained_scale != immediate_frame.scale;
+            const retained_changed = !view.hybrid_retained_valid or resized;
+            const retained_dirty: []const geometry.RectF = &.{};
             var retained_generation: u64 = 0;
+            var retained_fingerprint = view.hybrid_retained_fingerprint;
             if (retained_changed) {
+                const retained_list = try display_list.copyPresentationLayer(.retained, &canvas_frame_retained_commands_scratch);
+                const retained_frame = try retained_list.framePlan(null, frame_options, storage);
+                var retained_pass = retained_frame.renderPass();
+                retained_fingerprint = retained_pass.presentationLayerFingerprint(.retained);
                 var surface = if (scratch.len >= pixel_size.byte_len)
                     try canvas.ReferenceRenderSurface.initWithScratch(pixel_size.width, pixel_size.height, pixels, scratch)
                 else
@@ -329,24 +373,16 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 // layer-only surface can restore pixels from the immediate
                 // canvas. The infrequent retained reraster is the cache here;
                 // keep its pixel source deterministic and layer-local.
-                surface = surface.withImages(canvas_frame.image_resources).withFonts(canvas_frame.font_resources);
-                if (resized) {
-                    pass.full_repaint = true;
-                    pass.dirty_bounds = null;
-                }
-                try surface.renderPassLayer(pass, clear_color, .retained);
-                if (!resized) {
-                    retained_dirty = canvas_frame.dirtyRects();
-                    if (retained_dirty.len == 0) if (canvas_frame.dirty_bounds) |bounds| {
-                        dirty_one[0] = bounds;
-                        retained_dirty = &dirty_one;
-                    };
-                }
+                surface = surface.withImages(retained_frame.image_resources).withFonts(retained_frame.font_resources);
+                retained_pass.full_repaint = true;
+                retained_pass.dirty_bounds = null;
+                try surface.renderPass(retained_pass, clear_color);
                 retained_generation = if (view.hybrid_retained_generation == std.math.maxInt(u64)) 1 else view.hybrid_retained_generation + 1;
             }
 
             var writer = std.Io.Writer.fixed(packet_bytes_buffer[0..@min(packet_bytes_buffer.len, platform.max_gpu_surface_packet_binary_bytes)]);
             try packet.writeBinary(&writer);
+            self.frame_profile.end(.encode, encode_begin);
             const base = platform.GpuSurfacePacket{
                 .window_id = window_id,
                 .label = label,
@@ -366,18 +402,28 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 .retained_dirty_rects = retained_dirty,
                 .retained_rgba8 = if (retained_changed) pixels[0..pixel_size.byte_len] else "",
             };
+            const present_begin = self.frame_profile.begin();
             services.presentGpuSurfacePacketBinary(base) catch |err| {
+                self.frame_profile.end(.present, present_begin);
                 view.hybrid_retained_valid = false;
                 return err;
             };
+            self.frame_profile.end(.present, present_begin);
             if (retained_changed) {
                 view.hybrid_retained_valid = true;
-                view.hybrid_retained_fingerprint = fingerprint;
+                view.hybrid_retained_fingerprint = retained_fingerprint;
                 view.hybrid_retained_generation = retained_generation;
-                view.hybrid_retained_surface_size = canvas_frame.surface_size;
-                view.hybrid_retained_scale = canvas_frame.scale;
+                view.hybrid_retained_surface_size = immediate_frame.surface_size;
+                view.hybrid_retained_scale = immediate_frame.scale;
             }
-            view.recordCanvasFramePresentationComplete(canvas_frame);
+            try view.copyPresentedCanvasSummary(display_list, immediate_frame.surface_size, immediate_frame.scale);
+            var presented_frame = immediate_frame;
+            // The layer-filtered plan is internally a full plan, but that is
+            // not a request for the completion event to repaint the surface.
+            // Persisting `full_repaint=true` here bypassed the clean-revision
+            // gate above and recreated the old double-present loop.
+            presented_frame.full_repaint = false;
+            view.recordCanvasFrame(presented_frame);
             view.gpu_present_path = .packet;
             view.gpu_present_packet_mode = .full;
             view.canvas_packet_baseline_valid = false;
