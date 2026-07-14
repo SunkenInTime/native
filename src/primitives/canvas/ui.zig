@@ -1132,6 +1132,17 @@ pub fn Ui(comptime Msg: type) type {
             return self.el(.panel, options, children);
         }
 
+        /// A retained layout leaf whose contents are an immediate command
+        /// batch in local coordinates. It deliberately reuses the neutral
+        /// stack layout kind instead of adding a document-schema widget kind:
+        /// the commands are paint data, while layout, identity, clipping, and
+        /// damage remain the ordinary builder contracts.
+        pub fn immediateCanvas(self: *Self, options: ElementOptions, commands: []const canvas.ImmediateCanvasCommand) Node {
+            var node = self.el(.stack, options, .{});
+            node.widget.immediate_commands = commands;
+            return node;
+        }
+
         pub fn scroll(self: *Self, options: ElementOptions, children: anytype) Node {
             return self.el(.scroll_view, options, children);
         }
