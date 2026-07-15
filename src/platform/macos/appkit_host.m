@@ -3411,7 +3411,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 }
 
 - (BOOL)isOpaque {
-    return YES;
+    return self.gpuAlphaMode != 2;
 }
 
 - (void)viewDidMoveToWindow {
@@ -6753,9 +6753,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     window.ignoresMouseEvents = clickThrough;
     switch (windowLayer) {
         case 1:
-            // One level below Finder's desktop icons: above wallpaper,
-            // below ordinary application windows and desktop items.
-            window.level = CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) - 1;
+            // One level above the wallpaper: below ordinary application
+            // windows and Finder's desktop items, without crossing the
+            // desktop-icon compositing boundary that flattens transparent
+            // window backing against white.
+            window.level = CGWindowLevelForKey(kCGDesktopWindowLevelKey) + 1;
             break;
         case 2:
             window.level = NSFloatingWindowLevel;
@@ -7392,6 +7394,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         surface.requestedGpuBackend = gpuBackend == 3 ? 3 : 1;
         surface.gpuBackend = surface.requestedGpuBackend;
         surface.gpuAlphaMode = alphaMode == 2 ? 2 : 1;
+        surface.metalLayer.opaque = surface.gpuAlphaMode != 2;
         [surface configureWithHost:self windowId:windowId label:label];
     }
     self.nativeViews[key] = view;
