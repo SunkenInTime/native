@@ -3862,6 +3862,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 }
 
 - (BOOL)ensureCanvasCompositor {
+    /* Composite mode still presents its retained render target through the
+     * ordinary canvas presenter. Initializing only the compositor pipelines
+     * leaves renderFrame with no presenter pipeline/sampler, so it clears the
+     * CAMetalDrawable but never draws the retained texture. */
+    if (![self ensureCanvasPresenter]) return NO;
     if (self.canvasCompositeBlendPipeline && self.canvasCompositeOpaquePipeline && self.canvasCompositeFlatTexture) return YES;
     if (!self.device || !self.commandQueue) return NO;
     /* Shared-storage render targets (needed for cheap readback and the
@@ -5692,7 +5697,9 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:descriptor];
     const BOOL canvasTextureMatchesDrawable = self.canvasTextureWidth == drawable.texture.width &&
         self.canvasTextureHeight == drawable.texture.height;
-    if (self.hasCanvasTexture && canvasTextureMatchesDrawable && self.canvasTexture && self.canvasRenderPipeline && self.canvasSampler) {
+    const BOOL presenterTextured = self.hasCanvasTexture && canvasTextureMatchesDrawable &&
+        self.canvasTexture && self.canvasRenderPipeline && self.canvasSampler;
+    if (presenterTextured) {
         [encoder setRenderPipelineState:self.canvasRenderPipeline];
         [encoder setFragmentTexture:self.canvasTexture atIndex:0];
         [encoder setFragmentSamplerState:self.canvasSampler atIndex:0];
@@ -5729,7 +5736,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     }
     if (bakeoffTrace) {
         fprintf(stderr, "native-sdk: renderer-bakeoff stage=command_encode path=presenter textured=%d verify_readback=%d us=%llu\n",
-                self.hasCanvasTexture && canvasTextureMatchesDrawable ? 1 : 0,
+                presenterTextured ? 1 : 0,
                 shouldSample ? 1 : 0,
                 (unsigned long long)((NativeSdkTimestampNanoseconds() - encodeBeginNs) / 1000));
     }
