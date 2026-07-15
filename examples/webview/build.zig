@@ -192,6 +192,7 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
                 const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
                 app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/appkit_host.m"), .flags = flags });
+                app_mod.addCSourceFile(.{ .file = embeddedMetalLibrary(b, native_sdk_path), .flags = &.{"-std=c11"} });
                 app_mod.linkFramework("WebKit", .{});
             },
             .chromium => {
@@ -305,6 +306,27 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         app_mod.linkSystemLibrary("winhttp", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
     }
+}
+
+// This example owns its build graph instead of using build/app.zig, so it
+// must carry the production AppKit host's embedded metallib too. Keeping the
+// same symbol name makes the standalone link exercise the exact host contract
+// used by generated applications.
+fn embeddedMetalLibrary(b: *std.Build, native_sdk_path: []const u8) std.Build.LazyPath {
+    const compile = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal", "-c" });
+    compile.addFileArg(nativeSdkPath(b, native_sdk_path, "src/platform/macos/canvas_shaders.metal"));
+    compile.addArg("-o");
+    const air = compile.addOutputFileArg("native_sdk_canvas.air");
+    compile.addArg("-mmacosx-version-min=11.0");
+
+    const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metallib" });
+    link.addFileArg(air);
+    link.addArg("-o");
+    const library = link.addOutputFileArg("native_sdk_canvas.metallib");
+
+    const embed = b.addSystemCommand(&.{ "/usr/bin/xxd", "-i", "-n", "native_sdk_metal_library" });
+    embed.addFileArg(library);
+    return embed.addOutputFileArg("native_sdk_canvas_metallib.c");
 }
 
 /// The vendored WebView2Loader.dll for the target architecture, relative
