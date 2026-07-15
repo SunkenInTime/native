@@ -25,7 +25,9 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // publishes flush after this event's present (below).
                 self.views[index].gpu_canvas_frame_requested = false;
                 const first_frame_latency_was_recorded = self.views[index].gpu_first_frame_latency_recorded;
-                if (!sizesEqual(self.views[index].gpu_size, frame_event.size) or
+                const backend_changed = self.views[index].gpu_backend != frame_event.backend;
+                if (backend_changed or
+                    !sizesEqual(self.views[index].gpu_size, frame_event.size) or
                     self.views[index].gpu_scale_factor != frame_event.scale_factor or
                     !std.meta.eql(self.views[index].gpu_physical_size, frame_event.physical_size) or
                     self.views[index].gpu_geometry_generation != frame_event.geometry_generation)
@@ -34,6 +36,12 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     self.views[index].hybrid_retained_valid = false;
                     self.views[index].canvas_packet_baseline_valid = false;
                 }
+                // Demotion and recovery are render-boundary changes even when
+                // the display list itself is perfectly clean. Force exactly
+                // one full present on the newly reported backend: software
+                // must receive real fallback pixels, and a Metal recovery
+                // probe must submit a packet before it can claim success.
+                if (backend_changed) self.invalidateFor(.state, self.views[index].frame);
                 self.views[index].gpu_size = frame_event.size;
                 self.views[index].gpu_scale_factor = frame_event.scale_factor;
                 self.views[index].gpu_physical_size = frame_event.physical_size;

@@ -26,6 +26,12 @@
 
 @class NativeSdkAppKitHost;
 
+/* Generated at build time from canvas_shaders.metal: the executable carries
+ * one precompiled library and the host never invokes the runtime Metal source
+ * compiler or depends on a bundle-relative resource path. */
+extern unsigned char native_sdk_metal_library[];
+extern unsigned int native_sdk_metal_library_len;
+
 static const NSUInteger NativeSdkMaxChildWebViews = 16;
 static const NSUInteger NativeSdkMaxNativeViews = 32;
 static const NSInteger NativeSdkBridgeFrameKeepaliveFrames = 600;
@@ -453,7 +459,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) NSRect destination;
 @property(nonatomic, assign) NSUInteger byteCount;
 @property(nonatomic, assign) uint64_t lastUseTick;
-/* GPU composite mode (NATIVE_SDK_GPU_COMPOSITE=1): the same premultiplied
+/* The production GPU composite path keeps the same premultiplied
  * raster bytes as a texture, plus the device-pixel destination, so the
  * composite pass draws the entry as one textured quad instead of a CPU
  * blit. Uploaded at fill time; released with the entry, so cache eviction
@@ -475,6 +481,127 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
     if (_image) CGImageRelease(_image);
     _image = NULL;
 }
+@end
+
+/* Process-lifetime immutable Metal state. Weaver normally owns one surface
+ * per crash-isolated Widget process, while general Native SDK apps may own
+ * several; both shapes pay for exactly one device, queue, shader library,
+ * pipeline set, sampler, and flat-quad texture. Surface-sized mutable targets
+ * remain per view. */
+@interface NativeSdkMetalProcessResources : NSObject
+@property(nonatomic, strong) id<MTLDevice> device;
+@property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
+@property(nonatomic, strong) id<MTLLibrary> library;
+@property(nonatomic, strong) id<MTLRenderPipelineState> presenterPipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> compositeBlendPipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> compositeOpaquePipeline;
+@property(nonatomic, strong) id<MTLSamplerState> sampler;
+@property(nonatomic, strong) id<MTLTexture> flatTexture;
++ (instancetype)sharedResources;
+- (BOOL)ensureImmutableResources;
+@end
+
+@implementation NativeSdkMetalProcessResources
+
++ (instancetype)sharedResources {
+    static NativeSdkMetalProcessResources *resources;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        resources = [[NativeSdkMetalProcessResources alloc] init];
+        resources.device = MTLCreateSystemDefaultDevice();
+        resources.commandQueue = [resources.device newCommandQueue];
+        resources.commandQueue.label = @"native-sdk process renderer";
+    });
+    return resources;
+}
+
+- (BOOL)ensureImmutableResources {
+    @synchronized (self) {
+        if (self.library && self.presenterPipeline && self.compositeBlendPipeline &&
+            self.compositeOpaquePipeline && self.sampler && self.flatTexture) return YES;
+        if (!self.device || !self.commandQueue || native_sdk_metal_library_len == 0) return NO;
+
+        const BOOL trace = NativeSdkRendererBakeoffTraceEnabled();
+        const uint64_t beginNs = trace ? NativeSdkTimestampNanoseconds() : 0;
+        dispatch_data_t bytes = dispatch_data_create(native_sdk_metal_library,
+                                                      native_sdk_metal_library_len,
+                                                      dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                                                      ^{});
+        NSError *error = nil;
+        id<MTLLibrary> library = [self.device newLibraryWithData:bytes error:&error];
+        if (!library) {
+            fprintf(stderr, "native-sdk: metal renderer unavailable stage=metallib error=%s\n",
+                    error.localizedDescription.UTF8String ?: "unknown");
+            return NO;
+        }
+        id<MTLFunction> canvasVertex = [library newFunctionWithName:@"native_sdk_canvas_vertex"];
+        id<MTLFunction> canvasFragment = [library newFunctionWithName:@"native_sdk_canvas_fragment"];
+        id<MTLFunction> compositeVertex = [library newFunctionWithName:@"native_sdk_composite_vertex"];
+        id<MTLFunction> compositeFragment = [library newFunctionWithName:@"native_sdk_composite_fragment"];
+        if (!canvasVertex || !canvasFragment || !compositeVertex || !compositeFragment) return NO;
+
+        MTLRenderPipelineDescriptor *presenter = [[MTLRenderPipelineDescriptor alloc] init];
+        presenter.label = @"native-sdk canvas presenter";
+        presenter.vertexFunction = canvasVertex;
+        presenter.fragmentFunction = canvasFragment;
+        presenter.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        id<MTLRenderPipelineState> presenterPipeline = [self.device newRenderPipelineStateWithDescriptor:presenter error:&error];
+        if (!presenterPipeline) return NO;
+
+        MTLRenderPipelineDescriptor *blend = [[MTLRenderPipelineDescriptor alloc] init];
+        blend.label = @"native-sdk composite blend";
+        blend.vertexFunction = compositeVertex;
+        blend.fragmentFunction = compositeFragment;
+        blend.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        blend.colorAttachments[0].blendingEnabled = YES;
+        blend.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        blend.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+        blend.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        blend.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+        blend.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        blend.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        id<MTLRenderPipelineState> blendPipeline = [self.device newRenderPipelineStateWithDescriptor:blend error:&error];
+        if (!blendPipeline) return NO;
+
+        MTLRenderPipelineDescriptor *opaque = [[MTLRenderPipelineDescriptor alloc] init];
+        opaque.label = @"native-sdk composite copy";
+        opaque.vertexFunction = compositeVertex;
+        opaque.fragmentFunction = compositeFragment;
+        opaque.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        id<MTLRenderPipelineState> opaquePipeline = [self.device newRenderPipelineStateWithDescriptor:opaque error:&error];
+        if (!opaquePipeline) return NO;
+
+        MTLSamplerDescriptor *samplerDescriptor = [[MTLSamplerDescriptor alloc] init];
+        samplerDescriptor.minFilter = MTLSamplerMinMagFilterNearest;
+        samplerDescriptor.magFilter = MTLSamplerMinMagFilterNearest;
+        samplerDescriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
+        samplerDescriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
+        samplerDescriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        id<MTLSamplerState> sampler = [self.device newSamplerStateWithDescriptor:samplerDescriptor];
+        if (!sampler) return NO;
+
+        MTLTextureDescriptor *flatDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];
+        flatDescriptor.usage = MTLTextureUsageShaderRead;
+        flatDescriptor.storageMode = MTLStorageModeShared;
+        id<MTLTexture> flatTexture = [self.device newTextureWithDescriptor:flatDescriptor];
+        if (!flatTexture) return NO;
+        const uint8_t transparent[4] = {0, 0, 0, 0};
+        [flatTexture replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:transparent bytesPerRow:4];
+
+        self.library = library;
+        self.presenterPipeline = presenterPipeline;
+        self.compositeBlendPipeline = blendPipeline;
+        self.compositeOpaquePipeline = opaquePipeline;
+        self.sampler = sampler;
+        self.flatTexture = flatTexture;
+        if (trace) {
+            fprintf(stderr, "native-sdk: renderer-bakeoff stage=shader_load source=embedded-metallib pipelines=3 scope=process us=%llu\n",
+                    (unsigned long long)((NativeSdkTimestampNanoseconds() - beginNs) / 1000));
+        }
+        return YES;
+    }
+}
+
 @end
 
 @interface NativeSdkWidgetAccessibilityElement : NSAccessibilityElement
@@ -499,7 +626,10 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint64_t windowId;
 @property(nonatomic, strong) NSString *surfaceLabel;
 @property(nonatomic, assign) NSInteger gpuBackend;
+@property(nonatomic, assign) NSInteger requestedGpuBackend;
 @property(nonatomic, assign) NSInteger gpuAlphaMode;
+@property(nonatomic, assign) NSUInteger rendererDemotionCount;
+@property(nonatomic, assign) uint64_t rendererRetryAfterNs;
 @property(nonatomic, assign) NSUInteger frameIndex;
 /* Whether this surface has completed at least one REAL present. Gates the
  * occluded short-circuit: until the first present lands, occluded frames
@@ -618,7 +748,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSMutableData *canvasVerifyPixels;
 @property(nonatomic, assign) uint64_t canvasVerifyCheckCount;
 @property(nonatomic, assign) uint64_t canvasVerifyMismatchCount;
-/* GPU composite mode (NATIVE_SDK_GPU_COMPOSITE=1) state: two pipeline
+/* Production GPU composite state: two pipeline
  * variants (source-over blend for command rasters, blend-off copy for
  * clears / opaque native quads / blur output), a 1x1 texture bound on
  * flat draws, and validity tracking for the render-target canvas
@@ -636,6 +766,13 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * use, so only capacity matters; allocating per frame measurably taxed
  * the steady-state pulse. Wiped with the raster cache. */
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, id<MTLTexture>> *canvasCompositeScratchTextures;
+@property(nonatomic, assign) NSUInteger canvasCompositeScratchTextureBytes;
+@property(nonatomic, strong) NSMutableData *canvasCompositeScratchPixels;
+/* Backdrop blur is the only production path that deliberately reads the
+ * retained Metal target. Keep one surface-owned buffer, grown only to the
+ * largest drawable seen, instead of allocating a full-surface buffer for
+ * every blur command. The drawable size is the natural hard bound. */
+@property(nonatomic, strong) NSMutableData *canvasCompositeBlurPixels;
 @property(nonatomic, assign) NSUInteger canvasCompositePresentCount;
 @property(nonatomic, assign) NSUInteger canvasTraceQuadCount;
 @property(nonatomic, assign) NSUInteger canvasTraceBindCount;
@@ -699,6 +836,9 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)recordCanvasRetainedStateForPacket:(NSDictionary *)packet commands:(NSArray *)commands patchLoadAction:(BOOL)patchLoadAction clearLoadAction:(BOOL)clearLoadAction;
 - (void)updateWidgetAccessibilityWithNodes:(const native_sdk_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
 - (void)stopDisplayTimer;
+- (void)noteRendererPacketSuccess;
+- (void)noteRendererPixelFallback;
+- (void)armRendererRetryIfDue;
 - (void)requestRetainedCanvasFrame;
 - (void)noteGpuSurfaceInputActivity;
 - (void)rescheduleParkedFrameEventEmission;
@@ -2550,22 +2690,43 @@ static BOOL NativeSdkPacketDrawCommandBody(NSDictionary *command, NSString *kind
 enum {
     NativeSdkPacketRasterCacheMaxEntryBytes = 4 * 1024 * 1024,
     NativeSdkPacketRasterCacheMaxBytes = 64 * 1024 * 1024,
+    NativeSdkCompositeScratchMaxEntryBytes = 8 * 1024 * 1024,
+    NativeSdkCompositeScratchMaxBytes = 32 * 1024 * 1024,
+    NativeSdkCompositeScratchMaxTextures = 16,
 };
 
-/* GPU composite mode (prototype, default OFF): packet presents composite
+/* Production GPU composite mode: packet presents composite
  * on the GPU — cached command rasters become textures drawn as quads by a
  * render command encoder targeting the canvas texture — instead of CPU
- * blits into the retained backing plus a texture upload. The CG path
- * stays byte-for-byte untouched while this is unset. */
+ * blits into the retained backing plus a texture upload. The measured
+ * architecture is the default; `NATIVE_SDK_GPU_COMPOSITE=0` keeps the
+ * retained CPU hybrid available only as a diagnostic comparison seam. */
 static BOOL NativeSdkGpuCompositeEnabled(void) {
-    static BOOL enabled;
+    static BOOL enabled = YES;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         const char *value = getenv("NATIVE_SDK_GPU_COMPOSITE");
-        enabled = value && value[0] != 0 && strcmp(value, "0") != 0;
+        if (value && strcmp(value, "0") == 0) enabled = NO;
     });
     return enabled;
 }
+
+#if defined(NATIVE_SDK_AUTOMATION)
+/* Deterministic device-loss stand-in for the recovery gate. Two refused
+ * attempts cover the binary packet and its same-frame JSON retry, forcing
+ * the real pixel fallback; the next changed frame exercises promotion. */
+static BOOL NativeSdkAutomationRefuseCompositePresent(void) {
+    static NSUInteger remaining;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *value = getenv("NATIVE_SDK_AUTOMATION_METAL_FAILURES");
+        if (value) remaining = (NSUInteger)strtoul(value, NULL, 10);
+    });
+    if (remaining == 0) return NO;
+    remaining -= 1;
+    return YES;
+}
+#endif
 
 /* A command is raster-cacheable when its painted output is a pure
  * function of the command itself: no backdrop reads (blur samples the
@@ -3172,12 +3333,13 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 
     const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
     const uint64_t resourceBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
-    _device = MTLCreateSystemDefaultDevice();
+    NativeSdkMetalProcessResources *resources = [NativeSdkMetalProcessResources sharedResources];
+    _device = resources.device;
     if (!_device) return self;
 
-    _commandQueue = [_device newCommandQueue];
+    _commandQueue = resources.commandQueue;
     if (bakeoffTrace) {
-        fprintf(stderr, "native-sdk: renderer-bakeoff stage=resource_init device=process-default queue=per-view us=%llu\n",
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=resource_init device=process queue=process us=%llu\n",
                 (unsigned long long)((NativeSdkTimestampNanoseconds() - resourceBeginNs) / 1000));
     }
     _metalLayer = [CAMetalLayer layer];
@@ -3596,7 +3758,8 @@ static const char *NativeSdkGpuShotDir(void) {
 }
 
 /* ---------------------------------------------------------------------------
- * GPU composite pass (NATIVE_SDK_GPU_COMPOSITE=1, prototype).
+ * Production GPU composite pass. NATIVE_SDK_GPU_COMPOSITE=0 is a diagnostic
+ * override used to compare the retained CPU reference path.
  *
  * Packet presents encode a real render pass targeting the canvas texture
  * instead of CPU-blitting into the retained backing and re-uploading:
@@ -3704,79 +3867,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     /* Shared-storage render targets (needed for cheap readback and the
      * blur sandwich) require unified memory. */
     if (![self.device hasUnifiedMemory]) return NO;
-    const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
-    const uint64_t compileBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
-
-    static NSString *shaderSource =
-        @"#include <metal_stdlib>\n"
-        @"using namespace metal;\n"
-        @"struct NativeSdkCompositeUniforms {\n"
-        @"  float2 viewport; float2 rect_origin; float2 rect_size; float2 tex_origin;\n"
-        @"  float4 color; uint textured; uint3 pad;\n"
-        @"};\n"
-        @"struct NativeSdkCompositeVertexOut { float4 position [[position]]; };\n"
-        @"vertex NativeSdkCompositeVertexOut native_sdk_composite_vertex(uint vertex_id [[vertex_id]], constant NativeSdkCompositeUniforms &u [[buffer(0)]]) {\n"
-        @"  float2 corner = float2(float(vertex_id & 1u), float(vertex_id >> 1u));\n"
-        @"  float2 px = u.rect_origin + corner * u.rect_size;\n"
-        @"  NativeSdkCompositeVertexOut out;\n"
-        @"  out.position = float4(px.x / u.viewport.x * 2.0 - 1.0, 1.0 - px.y / u.viewport.y * 2.0, 0.0, 1.0);\n"
-        @"  return out;\n"
-        @"}\n"
-        @"fragment float4 native_sdk_composite_fragment(NativeSdkCompositeVertexOut in [[stage_in]], constant NativeSdkCompositeUniforms &u [[buffer(0)]], texture2d<float, access::read> quad_texture [[texture(0)]]) {\n"
-        @"  if (u.textured == 0u) return u.color;\n"
-        @"  int2 pixel = int2(in.position.xy);\n"
-        @"  int2 texel = pixel - int2(u.rect_origin) + int2(u.tex_origin);\n"
-        @"  texel = clamp(texel, int2(0), int2(int(quad_texture.get_width()) - 1, int(quad_texture.get_height()) - 1));\n"
-        @"  return quad_texture.read(uint2(texel));\n"
-        @"}\n";
-
-    NSError *libraryError = nil;
-    id<MTLLibrary> library = [self.device newLibraryWithSource:shaderSource options:nil error:&libraryError];
-    if (!library) return NO;
-    id<MTLFunction> vertexFunction = [library newFunctionWithName:@"native_sdk_composite_vertex"];
-    id<MTLFunction> fragmentFunction = [library newFunctionWithName:@"native_sdk_composite_fragment"];
-    if (!vertexFunction || !fragmentFunction) return NO;
-
-    MTLRenderPipelineDescriptor *blendDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
-    blendDescriptor.label = @"native-sdk composite blend";
-    blendDescriptor.vertexFunction = vertexFunction;
-    blendDescriptor.fragmentFunction = fragmentFunction;
-    blendDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    blendDescriptor.colorAttachments[0].blendingEnabled = YES;
-    blendDescriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
-    blendDescriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
-    blendDescriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
-    blendDescriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
-    blendDescriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-    blendDescriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-    NSError *pipelineError = nil;
-    id<MTLRenderPipelineState> blendPipeline = [self.device newRenderPipelineStateWithDescriptor:blendDescriptor error:&pipelineError];
-    if (!blendPipeline) return NO;
-
-    MTLRenderPipelineDescriptor *opaqueDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
-    opaqueDescriptor.label = @"native-sdk composite copy";
-    opaqueDescriptor.vertexFunction = vertexFunction;
-    opaqueDescriptor.fragmentFunction = fragmentFunction;
-    opaqueDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    opaqueDescriptor.colorAttachments[0].blendingEnabled = NO;
-    id<MTLRenderPipelineState> opaquePipeline = [self.device newRenderPipelineStateWithDescriptor:opaqueDescriptor error:&pipelineError];
-    if (!opaquePipeline) return NO;
-
-    MTLTextureDescriptor *flatDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];
-    flatDescriptor.usage = MTLTextureUsageShaderRead;
-    flatDescriptor.storageMode = MTLStorageModeShared;
-    id<MTLTexture> flatTexture = [self.device newTextureWithDescriptor:flatDescriptor];
-    if (!flatTexture) return NO;
-    const uint8_t flatPixel[4] = {0, 0, 0, 0};
-    [flatTexture replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:flatPixel bytesPerRow:4];
-
-    self.canvasCompositeBlendPipeline = blendPipeline;
-    self.canvasCompositeOpaquePipeline = opaquePipeline;
-    self.canvasCompositeFlatTexture = flatTexture;
-    if (bakeoffTrace) {
-        fprintf(stderr, "native-sdk: renderer-bakeoff stage=shader_compile path=composite source=runtime pipelines=2 us=%llu\n",
-                (unsigned long long)((NativeSdkTimestampNanoseconds() - compileBeginNs) / 1000));
-    }
+    NativeSdkMetalProcessResources *resources = [NativeSdkMetalProcessResources sharedResources];
+    if (![resources ensureImmutableResources]) return NO;
+    self.canvasCompositeBlendPipeline = resources.compositeBlendPipeline;
+    self.canvasCompositeOpaquePipeline = resources.compositeOpaquePipeline;
+    self.canvasCompositeFlatTexture = resources.flatTexture;
     return YES;
 }
 
@@ -3801,8 +3896,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     NSUInteger rasterWidth = (NSUInteger)(maxX - minX);
     NSUInteger rasterHeight = (NSUInteger)(maxY - minY);
     if (rasterWidth == 0 || rasterHeight == 0) return nil;
-    NSMutableData *data = [NSMutableData dataWithLength:rasterWidth * rasterHeight * 4];
+    const NSUInteger rasterBytes = rasterWidth * rasterHeight * 4;
+    if (rasterBytes > NativeSdkCompositeScratchMaxEntryBytes) return nil;
+    if (!self.canvasCompositeScratchPixels || self.canvasCompositeScratchPixels.length < rasterBytes) {
+        self.canvasCompositeScratchPixels = [NSMutableData dataWithLength:rasterBytes];
+    }
+    NSMutableData *data = self.canvasCompositeScratchPixels;
     if (!data) return nil;
+    memset(data.mutableBytes, 0, rasterBytes);
     CGContextRef bitmap = CGBitmapContextCreate(data.mutableBytes, rasterWidth, rasterHeight, 8, rasterWidth * 4, self.canvasColorSpace, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
     if (!bitmap) return nil;
     CGContextSetAllowsAntialiasing(bitmap, true);
@@ -3829,14 +3930,21 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
          * extent keeps hitting the same pooled texture. */
         NSUInteger capacityWidth = MIN((NSUInteger)8192, (rasterWidth + 63) / 64 * 64);
         NSUInteger capacityHeight = MIN((NSUInteger)8192, (rasterHeight + 63) / 64 * 64);
+        const NSUInteger capacityBytes = capacityWidth * capacityHeight * 4;
+        if (capacityBytes > NativeSdkCompositeScratchMaxEntryBytes) return nil;
+        if (self.canvasCompositeScratchTextures.count >= NativeSdkCompositeScratchMaxTextures ||
+            self.canvasCompositeScratchTextureBytes + capacityBytes > NativeSdkCompositeScratchMaxBytes) {
+            [self.canvasCompositeScratchTextures removeAllObjects];
+            self.canvasCompositeScratchTextureBytes = 0;
+        }
         MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:capacityWidth height:capacityHeight mipmapped:NO];
         descriptor.usage = MTLTextureUsageShaderRead;
         descriptor.storageMode = MTLStorageModeShared;
         texture = [self.device newTextureWithDescriptor:descriptor];
         if (!texture) return nil;
         if (poolKey) {
-            if (self.canvasCompositeScratchTextures.count >= 64) [self.canvasCompositeScratchTextures removeAllObjects];
             self.canvasCompositeScratchTextures[poolKey] = texture;
+            self.canvasCompositeScratchTextureBytes += capacityBytes;
         }
     }
     [texture replaceRegion:MTLRegionMake2D(0, 0, rasterWidth, rasterHeight) mipmapLevel:0 withBytes:data.bytes bytesPerRow:rasterWidth * 4];
@@ -4120,7 +4228,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             [commandBuffer waitUntilCompleted];
             mutated = YES;
             NSDictionary *command = NativeSdkPacketDictionary(commands[op->commandIndex]);
-            NSMutableData *readback = [NSMutableData dataWithLength:pixelWidth * pixelHeight * 4];
+            const NSUInteger readbackBytes = pixelWidth * pixelHeight * 4;
+            if (!self.canvasCompositeBlurPixels || self.canvasCompositeBlurPixels.length < readbackBytes) {
+                self.canvasCompositeBlurPixels = [NSMutableData dataWithLength:readbackBytes];
+            }
+            NSMutableData *readback = self.canvasCompositeBlurPixels;
             CGContextRef bitmap = readback ? CGBitmapContextCreate(readback.mutableBytes, pixelWidth, pixelHeight, 8, pixelWidth * 4, self.canvasColorSpace, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big) : NULL;
             id<MTLTexture> blurTexture = nil;
             if (bitmap) {
@@ -4221,6 +4333,9 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
  * a missing/resized/invalid target refuses (0) so the engine resyncs
  * with a full present. */
 - (NSInteger)presentCompositePacketWithCommands:(NSArray *)commands keys:(NSArray *)keys pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight clearColor:(NSColor *)clearColor loadAction:(NSString *)loadAction fullSurfacePass:(BOOL)fullSurfacePass hasScissor:(BOOL)hasScissor scissorRect:(NSRect)scissorRect dirtyRects:(NSArray<NSValue *> *)dirtyRects directRetainedDirtyUpdate:(BOOL)directRetainedDirtyUpdate {
+#if defined(NATIVE_SDK_AUTOMATION)
+    if (NativeSdkAutomationRefuseCompositePresent()) return 0;
+#endif
     const BOOL needNewTexture = !self.canvasTexture || !self.canvasTextureRenderable ||
         self.canvasTextureWidth != pixelWidth || self.canvasTextureHeight != pixelHeight;
     if (!fullSurfacePass && (needNewTexture || !self.canvasCompositeContentValid)) return 0;
@@ -4404,6 +4519,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [self.canvasCommandRasterCache removeAllObjects];
     self.canvasCommandRasterCacheBytes = 0;
     [self.canvasCompositeScratchTextures removeAllObjects];
+    self.canvasCompositeScratchTextureBytes = 0;
 }
 
 - (void)rasterCacheRemoveKey:(NSNumber *)key {
@@ -4953,8 +5069,9 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                 (unsigned long long)((NativeSdkTimestampNanoseconds() - retainedPlanBeginNs) / 1000));
     }
     [self rasterCacheEnsureScale:normalizedScale pixelWidth:pixelWidth pixelHeight:pixelHeight];
-    if (NativeSdkGpuCompositeEnabled() && [self ensureCanvasCompositor]) {
-        /* GPU composite path (prototype, env-gated): the frame is drawn
+    if (NativeSdkGpuCompositeEnabled()) {
+        if (![self ensureCanvasCompositor]) return 0;
+        /* Production GPU composite path: the frame is drawn
          * by a render command encoder into the canvas texture; the CPU
          * retained backing is not touched. Shares the retained-state
          * bookkeeping below via the same helper. */
@@ -4969,7 +5086,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         NSInteger compositeResult = [self presentCompositePacketWithCommands:commands keys:compositeKeys pixelWidth:pixelWidth pixelHeight:pixelHeight scale:normalizedScale surfaceWidth:surfaceWidth surfaceHeight:surfaceHeight clearColor:compositeClearColor loadAction:loadAction fullSurfacePass:fullSurfacePass hasScissor:hasScissor scissorRect:scissorRect dirtyRects:dirtyRects directRetainedDirtyUpdate:directRetainedDirtyUpdate];
         if (compositeResult != 1) {
             if (patchLoadAction) self.hasCanvasRetainedState = NO;
-            return compositeResult;
+            /* A device/encoder failure is a refused packet, not a missing
+             * view. The runtime paints the CPU reference in this same frame
+             * and the backend state schedules bounded recovery. */
+            return 0;
         }
         [self recordCanvasRetainedStateForPacket:packet commands:commands patchLoadAction:patchLoadAction clearLoadAction:clearLoadAction];
         return 1;
@@ -5098,58 +5218,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (BOOL)ensureCanvasPresenter {
     if (self.canvasRenderPipeline && self.canvasSampler) return YES;
     if (!self.device || !self.metalLayer) return NO;
-    const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
-    const uint64_t compileBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
-
-    static NSString *shaderSource =
-        @"#include <metal_stdlib>\n"
-        @"using namespace metal;\n"
-        @"struct NativeSdkCanvasVertexOut { float4 position [[position]]; float2 uv; };\n"
-        @"vertex NativeSdkCanvasVertexOut native_sdk_canvas_vertex(uint vertex_id [[vertex_id]]) {\n"
-        @"  constexpr float2 positions[4] = { float2(-1.0, -1.0), float2(1.0, -1.0), float2(-1.0, 1.0), float2(1.0, 1.0) };\n"
-        @"  constexpr float2 uvs[4] = { float2(0.0, 1.0), float2(1.0, 1.0), float2(0.0, 0.0), float2(1.0, 0.0) };\n"
-        @"  NativeSdkCanvasVertexOut out;\n"
-        @"  out.position = float4(positions[vertex_id], 0.0, 1.0);\n"
-        @"  out.uv = uvs[vertex_id];\n"
-        @"  return out;\n"
-        @"}\n"
-        @"fragment float4 native_sdk_canvas_fragment(NativeSdkCanvasVertexOut in [[stage_in]], texture2d<float> canvas_texture [[texture(0)]], sampler texture_sampler [[sampler(0)]]) {\n"
-        @"  return canvas_texture.sample(texture_sampler, in.uv);\n"
-        @"}\n";
-
-    NSError *libraryError = nil;
-    id<MTLLibrary> library = [self.device newLibraryWithSource:shaderSource options:nil error:&libraryError];
-    if (!library) return NO;
-    id<MTLFunction> vertexFunction = [library newFunctionWithName:@"native_sdk_canvas_vertex"];
-    id<MTLFunction> fragmentFunction = [library newFunctionWithName:@"native_sdk_canvas_fragment"];
-    if (!vertexFunction || !fragmentFunction) return NO;
-
-    MTLRenderPipelineDescriptor *pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
-    pipelineDescriptor.label = @"native-sdk canvas presenter";
-    pipelineDescriptor.vertexFunction = vertexFunction;
-    pipelineDescriptor.fragmentFunction = fragmentFunction;
-    pipelineDescriptor.colorAttachments[0].pixelFormat = self.metalLayer.pixelFormat;
-
-    NSError *pipelineError = nil;
-    id<MTLRenderPipelineState> pipeline = [self.device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&pipelineError];
-    if (!pipeline) return NO;
-
-    // The canvas texture is already rasterized at backing scale; present it without filtering.
-    MTLSamplerDescriptor *samplerDescriptor = [[MTLSamplerDescriptor alloc] init];
-    samplerDescriptor.minFilter = MTLSamplerMinMagFilterNearest;
-    samplerDescriptor.magFilter = MTLSamplerMinMagFilterNearest;
-    samplerDescriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
-    samplerDescriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
-    samplerDescriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
-    id<MTLSamplerState> sampler = [self.device newSamplerStateWithDescriptor:samplerDescriptor];
-    if (!sampler) return NO;
-
-    self.canvasRenderPipeline = pipeline;
-    self.canvasSampler = sampler;
-    if (bakeoffTrace) {
-        fprintf(stderr, "native-sdk: renderer-bakeoff stage=shader_compile path=presenter source=runtime pipelines=1 us=%llu\n",
-                (unsigned long long)((NativeSdkTimestampNanoseconds() - compileBeginNs) / 1000));
-    }
+    NativeSdkMetalProcessResources *resources = [NativeSdkMetalProcessResources sharedResources];
+    if (![resources ensureImmutableResources]) return NO;
+    self.canvasRenderPipeline = resources.presenterPipeline;
+    self.canvasSampler = resources.sampler;
     return YES;
 }
 
@@ -5256,6 +5328,53 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (void)stopDisplayTimer {
     [self.displayTimer invalidate];
     self.displayTimer = nil;
+}
+
+- (void)noteRendererPacketSuccess {
+    if (self.requestedGpuBackend == 3) return;
+    if (self.gpuBackend != 1 || self.rendererDemotionCount > 0) {
+        fprintf(stderr, "native-sdk: renderer backend=metal-composite reason=packet-success recoveries=%lu\n",
+                (unsigned long)self.rendererDemotionCount);
+    }
+    self.gpuBackend = 1;
+    self.rendererDemotionCount = 0;
+    self.rendererRetryAfterNs = 0;
+}
+
+- (void)noteRendererPixelFallback {
+    if (self.requestedGpuBackend == 3 || self.gpuBackend == 3) return;
+    self.rendererDemotionCount += 1;
+    const NSUInteger failure = self.rendererDemotionCount;
+    const uint64_t delayNs = failure == 1 ? NativeSdkNanosecondsPerSecond :
+        (failure == 2 ? 5 * NativeSdkNanosecondsPerSecond : 30 * NativeSdkNanosecondsPerSecond);
+    self.gpuBackend = 3;
+    self.rendererRetryAfterNs = NativeSdkTimestampNanoseconds() + delayNs;
+    fprintf(stderr, "native-sdk: renderer backend=software reason=packet-fallback retry_ms=%llu failures=%lu\n",
+            (unsigned long long)(delayNs / 1000000ull), (unsigned long)failure);
+    /* A clean static Widget otherwise has no reason to request another
+     * frame, so it would remain demoted forever. Arm exactly one wakeup at
+     * this failure's backoff deadline; stale wakeups become no-ops after a
+     * success or a later failure, and the recovery frame parks again. */
+    __weak NativeSdkMetalSurfaceView *weakSelf = self;
+    const uint64_t expectedRetryNs = self.rendererRetryAfterNs;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delayNs), dispatch_get_main_queue(), ^{
+        NativeSdkMetalSurfaceView *strongSelf = weakSelf;
+        if (!strongSelf || ![strongSelf isAvailable]) return;
+        if (strongSelf.gpuBackend != 3 || strongSelf.rendererRetryAfterNs != expectedRetryNs) return;
+        [strongSelf requestRetainedCanvasFrame];
+    });
+}
+
+- (void)armRendererRetryIfDue {
+    if (self.requestedGpuBackend == 3 || self.gpuBackend != 3 || self.rendererRetryAfterNs == 0) return;
+    if (NativeSdkTimestampNanoseconds() < self.rendererRetryAfterNs) return;
+    /* Report Metal for exactly the next engine turn so it attempts a fresh
+     * full binary packet. Success confirms promotion; a pixel fallback
+     * immediately demotes again with 1/5/30-second bounded backoff. */
+    self.gpuBackend = 1;
+    self.rendererRetryAfterNs = 0;
+    fprintf(stderr, "native-sdk: renderer backend=metal-composite reason=recovery-probe failures=%lu\n",
+            (unsigned long)self.rendererDemotionCount);
 }
 
 - (void)requestRetainedCanvasFrame {
@@ -5468,6 +5587,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     // heartbeat unless another input lands.
     self.inputDrivenFramePending = NO;
     [self updateDrawableSize];
+    [self armRendererRetryIfDue];
     [self advanceRetainedFramePacingClock];
     const NSUInteger requestedFrameIndex = self.frameIndex;
     self.frameIndex += 1;
@@ -5580,7 +5700,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     }
     [encoder endEncoding];
 
+#if defined(NATIVE_SDK_AUTOMATION)
     const BOOL shouldSample = !self.verifiedNonblankFrame;
+#else
+    /* Production establishes nonblank state from the successfully retained
+     * canvas itself. The 1x1 drawable readback exists only in automation,
+     * where it is an explicit correctness verdict rather than product cost. */
+    const BOOL shouldSample = NO;
+#endif
     if (shouldSample && !self.sampleBuffer) {
         self.sampleBuffer = [self.device newBufferWithLength:256 options:MTLResourceStorageModeShared];
     }
@@ -5626,6 +5753,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         dispatch_async(dispatch_get_main_queue(), ^{
             NativeSdkMetalSurfaceView *strongSelf = weakSelf;
             if (!strongSelf) return;
+            if (completedBuffer.status != MTLCommandBufferStatusCompleted) {
+                strongSelf.canvasCompositeContentValid = NO;
+                strongSelf.hasCanvasRetainedState = NO;
+                [strongSelf noteRendererPixelFallback];
+            }
             if (nonblank) {
                 strongSelf.verifiedNonblankFrame = YES;
                 strongSelf.lastSampleColor = sampleColor;
@@ -7250,7 +7382,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [parentView addSubview:view positioned:NSWindowAbove relativeTo:nil];
     if ([view isKindOfClass:[NativeSdkMetalSurfaceView class]]) {
         NativeSdkMetalSurfaceView *surface = (NativeSdkMetalSurfaceView *)view;
-        surface.gpuBackend = gpuBackend == 3 ? 3 : 1;
+        surface.requestedGpuBackend = gpuBackend == 3 ? 3 : 1;
+        surface.gpuBackend = surface.requestedGpuBackend;
         surface.gpuAlphaMode = alphaMode == 2 ? 2 : 1;
         [surface configureWithHost:self windowId:windowId label:label];
     }
@@ -7345,7 +7478,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
      * so the invalidation lives here at the raw entry, not inside it.) */
     surface.hasCanvasRetainedState = NO;
     const BOOL presented = [surface presentPixelsWithWidth:width height:height scale:scale hasDirtyRect:hasDirtyRect dirtyX:dirtyX dirtyY:dirtyY dirtyWidth:dirtyWidth dirtyHeight:dirtyHeight dirtyRects:nil rgba8:rgba8 byteLength:byteLength];
-    if (presented) [self showDeferredWindowIfPending:windowId reason:"first-present"];
+    if (presented) {
+        [surface noteRendererPixelFallback];
+        [self showDeferredWindowIfPending:windowId reason:"first-present"];
+    }
     return presented;
 }
 
@@ -7353,8 +7489,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     NSString *key = [self nativeViewKeyForWindow:windowId label:label];
     NSView *view = self.nativeViews[key];
     if (![view isKindOfClass:[NativeSdkMetalSurfaceView class]]) return -1;
-    const NSInteger result = [(NativeSdkMetalSurfaceView *)view presentGpuPacketWithSurfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA requiresRender:requiresRender commandCount:commandCount unsupportedCommandCount:unsupportedCommandCount representable:representable json:json byteLength:byteLength];
+    NativeSdkMetalSurfaceView *surface = (NativeSdkMetalSurfaceView *)view;
+    const NSInteger result = [surface presentGpuPacketWithSurfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA requiresRender:requiresRender commandCount:commandCount unsupportedCommandCount:unsupportedCommandCount representable:representable json:json byteLength:byteLength];
     if (result == 1) {
+        [surface noteRendererPacketSuccess];
         [self applyWindowClearColor:windowId red:clearR green:clearG blue:clearB alpha:clearA];
         [self showDeferredWindowIfPending:windowId reason:"first-present"];
     }
@@ -7370,8 +7508,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         firstPacketLapDone = YES;
         NativeSdkLaunchLap("first_packet_present_begin");
     }
-    const NSInteger result = [(NativeSdkMetalSurfaceView *)view presentGpuPacketBinaryWithSurfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA requiresRender:requiresRender commandCount:commandCount unsupportedCommandCount:unsupportedCommandCount representable:representable packet:packet byteLength:byteLength];
+    NativeSdkMetalSurfaceView *surface = (NativeSdkMetalSurfaceView *)view;
+    const NSInteger result = [surface presentGpuPacketBinaryWithSurfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA requiresRender:requiresRender commandCount:commandCount unsupportedCommandCount:unsupportedCommandCount representable:representable packet:packet byteLength:byteLength];
     if (result == 1) {
+        [surface noteRendererPacketSuccess];
         [self applyWindowClearColor:windowId red:clearR green:clearG blue:clearB alpha:clearA];
         [self showDeferredWindowIfPending:windowId reason:"first-present"];
     }

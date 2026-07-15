@@ -641,6 +641,17 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self requestRetainedCanvasFrame];" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "canvasTextureMatchesDrawable" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-production-metal-lifetime", "Verify AppKit ships the measured process-lifetime Metal architecture", &.{
+        .{ .path = "build/app.zig", .pattern = "embeddedMetalLibrary(b, dep)" },
+        .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "native_sdk_composite_fragment" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "newLibraryWithData:bytes error:&error" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkMetalProcessResources sharedResources" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkCompositeScratchMaxBytes = 32 * 1024 * 1024" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "renderer backend=software reason=packet-fallback" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "failure == 2 ? 5 * NativeSdkNanosecondsPerSecond : 30 * NativeSdkNanosecondsPerSecond" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "strongSelf.rendererRetryAfterNs != expectedRetryNs" },
+        .{ .path = "src/runtime/gpu_surface_events.zig", .pattern = "if (backend_changed) self.invalidateFor(.state" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-transforms", "Verify AppKit GPU packet presenter applies command transforms", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketApplyTransform(command[@\"transform\"])" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[affine setTransformStruct:transform]" },

@@ -1,0 +1,1 @@
+improvement: **Lean macOS Metal renderer**: AppKit now loads an embedded precompiled metallib, shares immutable Metal state for the process lifetime, composites retained binary packets by default, bounds reusable scratch resources, parks clean or occluded surfaces, and visibly demotes to the software reference with bounded recovery probes.

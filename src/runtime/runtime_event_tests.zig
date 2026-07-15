@@ -931,6 +931,47 @@ test "gpu surface nonblank transition invalidates the runtime" {
         .nonblank = true,
     } });
     try std.testing.expect(!harness.runtime.invalidated);
+
+    // A backend transition is different: even with unchanged pixels it must
+    // invalidate every retained baseline and request one full render. That
+    // gives demotion real software pixels and lets a clean static recovery
+    // probe submit the Metal packet that confirms promotion.
+    harness.runtime.views[0].presented_canvas_valid = true;
+    harness.runtime.views[0].hybrid_retained_valid = true;
+    harness.runtime.views[0].canvas_packet_baseline_valid = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+        .scale_factor = 1,
+        .backend = .software,
+        .frame_index = 4,
+        .timestamp_ns = 64,
+        .nonblank = true,
+    } });
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expect(!harness.runtime.views[0].presented_canvas_valid);
+    try std.testing.expect(!harness.runtime.views[0].hybrid_retained_valid);
+    try std.testing.expect(!harness.runtime.views[0].canvas_packet_baseline_valid);
+    try std.testing.expectEqual(platform.GpuSurfaceBackend.software, harness.runtime.views[0].gpu_backend);
+
+    harness.runtime.invalidated = false;
+    harness.runtime.views[0].presented_canvas_valid = true;
+    harness.runtime.views[0].hybrid_retained_valid = true;
+    harness.runtime.views[0].canvas_packet_baseline_valid = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+        .scale_factor = 1,
+        .backend = .metal,
+        .frame_index = 5,
+        .timestamp_ns = 80,
+        .nonblank = true,
+    } });
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expect(!harness.runtime.views[0].canvas_packet_baseline_valid);
+    try std.testing.expectEqual(platform.GpuSurfaceBackend.metal, harness.runtime.views[0].gpu_backend);
 }
 
 test "a handler error degrades: dispatch continues, the error ring records it, snapshots publish it" {
