@@ -513,6 +513,32 @@ pub const WindowShowMode = enum {
     on_first_present,
 };
 
+/// Keep a window attached to one corner of the primary display's visible
+/// frame. The offset and window size are logical points on every platform;
+/// each host performs its native coordinate conversion exactly once.
+pub const PrimaryDisplayAnchorCorner = enum {
+    top_left,
+    top_right,
+    bottom_left,
+    bottom_right,
+};
+
+pub const PrimaryDisplayAnchor = struct {
+    corner: PrimaryDisplayAnchorCorner,
+    offset: geometry.PointF = geometry.PointF.init(0, 0),
+
+    pub fn resolve(self: PrimaryDisplayAnchor, visible_frame: geometry.RectF, size: geometry.SizeF) geometry.RectF {
+        const right = self.corner == .top_right or self.corner == .bottom_right;
+        const bottom = self.corner == .bottom_left or self.corner == .bottom_right;
+        return geometry.RectF.init(
+            if (right) visible_frame.x + visible_frame.width - self.offset.x - size.width else visible_frame.x + self.offset.x,
+            if (bottom) visible_frame.y + visible_frame.height - self.offset.y - size.height else visible_frame.y + self.offset.y,
+            size.width,
+            size.height,
+        );
+    }
+};
+
 pub const WindowOptions = struct {
     id: WindowId = 1,
     label: []const u8 = "main",
@@ -527,6 +553,11 @@ pub const WindowOptions = struct {
     click_through: bool = false,
     no_activate: bool = false,
     show: WindowShowMode = .immediate,
+    /// Optional placement against the primary display's visible frame.
+    /// This is deliberately not a monitor selector: hosts enumerate every
+    /// display for topology changes, then resolve this one stable contract
+    /// against whichever display the OS currently declares primary.
+    primary_display_anchor: ?PrimaryDisplayAnchor = null,
     /// Content min-size floor the WINDOW enforces (macOS
     /// `contentMinSize`): the user cannot resize below it, so declared
     /// layout floors stop clamping/clipping panes instead of stopping

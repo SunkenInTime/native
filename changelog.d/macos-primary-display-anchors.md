@@ -1,0 +1,1 @@
+feature: **macOS primary-display window anchors**: system-engine apps can attach a window to any corner of the primary display's visible frame in logical points, and the AppKit host preserves that placement across display, Space, and wake changes.

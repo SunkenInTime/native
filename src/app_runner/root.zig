@@ -46,6 +46,7 @@ pub const RunOptions = struct {
     icon_path: []const u8 = "assets/icon.png",
     default_frame: native_sdk.geometry.RectF = native_sdk.geometry.RectF.init(0, 0, 1100, 760),
     restore_state: bool = true,
+    primary_display_anchor: ?native_sdk.PrimaryDisplayAnchor = null,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     js_window_api: bool = false,
@@ -101,6 +102,8 @@ pub const RunOptions = struct {
             info.main_window.min_width = manifestShellStartupMinSize("min_width");
             info.main_window.min_height = manifestShellStartupMinSize("min_height");
         }
+        info.main_window.primary_display_anchor = self.primary_display_anchor;
+        if (windows.len > 0) buffers.restored_windows[0].primary_display_anchor = self.primary_display_anchor;
         return info;
     }
 

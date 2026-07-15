@@ -127,7 +127,27 @@ const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
 
-extern fn native_sdk_appkit_create(app_name: [*]const u8, app_name_len: usize, display_name: [*]const u8, display_name_len: usize, version: [*]const u8, version_len: usize, about_description: [*]const u8, about_description_len: usize, has_web_content: c_int, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, show_policy: c_int) ?*AppKitHost;
+export fn native_sdk_macos_resolve_primary_display_anchor(corner: c_int, offset_x: f64, offset_y: f64, visible_x: f64, visible_y: f64, visible_width: f64, visible_height: f64, window_width: f64, window_height: f64, out_x: *f64, out_y: *f64) c_int {
+    const anchor_corner: platform_mod.PrimaryDisplayAnchorCorner = switch (corner) {
+        1 => .top_left,
+        2 => .top_right,
+        3 => .bottom_left,
+        4 => .bottom_right,
+        else => return 0,
+    };
+    const frame = (platform_mod.PrimaryDisplayAnchor{
+        .corner = anchor_corner,
+        .offset = geometry.PointF.init(@floatCast(offset_x), @floatCast(offset_y)),
+    }).resolve(
+        geometry.RectF.init(@floatCast(visible_x), @floatCast(visible_y), @floatCast(visible_width), @floatCast(visible_height)),
+        geometry.SizeF.init(@floatCast(window_width), @floatCast(window_height)),
+    );
+    out_x.* = frame.x;
+    out_y.* = frame.y;
+    return 1;
+}
+
+extern fn native_sdk_appkit_create(app_name: [*]const u8, app_name_len: usize, display_name: [*]const u8, display_name_len: usize, version: [*]const u8, version_len: usize, about_description: [*]const u8, about_description_len: usize, has_web_content: c_int, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, primary_anchor_corner: c_int, primary_anchor_offset_x: f64, primary_anchor_offset_y: f64, show_policy: c_int) ?*AppKitHost;
 extern fn native_sdk_appkit_destroy(host: *AppKitHost) void;
 extern fn native_sdk_appkit_set_dock_icon_rgba(host: *AppKitHost, pixels: [*]const u8, width: usize, height: usize) void;
 extern fn native_sdk_appkit_set_dock_icon_file(host: *AppKitHost, path: [*]const u8, path_len: usize) void;
@@ -144,7 +164,7 @@ extern fn native_sdk_appkit_set_security_policy(host: *AppKitHost, allowed_origi
 extern fn native_sdk_appkit_set_menus(host: *AppKitHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
 extern fn native_sdk_appkit_set_shortcuts(host: *AppKitHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
 extern fn native_sdk_appkit_request_frame(host: *AppKitHost) void;
-extern fn native_sdk_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, show_policy: c_int) c_int;
+extern fn native_sdk_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, primary_anchor_corner: c_int, primary_anchor_offset_x: f64, primary_anchor_offset_y: f64, show_policy: c_int) c_int;
 extern fn native_sdk_appkit_set_window_content_min_size(host: *AppKitHost, window_id: u64, min_width: f64, min_height: f64) c_int;
 extern fn native_sdk_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
@@ -537,7 +557,9 @@ pub const MacPlatform = struct {
         // the classic load byte-for-byte.
         const dock_icon = planDockIcon(app_info.icon_path);
         const icon_path = if (dock_icon == .host_file) app_info.icon_path else "";
-        const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), if (window_options.transparent) 1 else 0, windowLayerInt(window_options.layer), if (window_options.click_through) 1 else 0, if (window_options.no_activate) 1 else 0, showModeInt(window_options.show)) orelse return error.CreateFailed;
+        if (!validPrimaryDisplayAnchor(window_options.primary_display_anchor)) return error.CreateFailed;
+        const primary_anchor = primaryDisplayAnchorAbi(window_options.primary_display_anchor);
+        const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), if (window_options.transparent) 1 else 0, windowLayerInt(window_options.layer), if (window_options.click_through) 1 else 0, if (window_options.no_activate) 1 else 0, primary_anchor.corner, primary_anchor.offset_x, primary_anchor.offset_y, showModeInt(window_options.show)) orelse return error.CreateFailed;
         switch (dock_icon) {
             .host_file => {},
             .masked_render => spawnDevDockIconRender(host, app_info.icon_path),
@@ -1050,6 +1072,32 @@ fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
     };
 }
 
+const PrimaryDisplayAnchorAbi = struct {
+    corner: c_int = 0,
+    offset_x: f64 = 0,
+    offset_y: f64 = 0,
+};
+
+fn primaryDisplayAnchorAbi(value: ?platform_mod.PrimaryDisplayAnchor) PrimaryDisplayAnchorAbi {
+    const anchor = value orelse return .{};
+    return .{
+        .corner = switch (anchor.corner) {
+            .top_left => 1,
+            .top_right => 2,
+            .bottom_left => 3,
+            .bottom_right => 4,
+        },
+        .offset_x = anchor.offset.x,
+        .offset_y = anchor.offset.y,
+    };
+}
+
+fn validPrimaryDisplayAnchor(value: ?platform_mod.PrimaryDisplayAnchor) bool {
+    const anchor = value orelse return true;
+    return std.math.isFinite(anchor.offset.x) and std.math.isFinite(anchor.offset.y) and
+        anchor.offset.x >= 0 and anchor.offset.y >= 0;
+}
+
 /// Apply a declared content min-size floor to a created window
 /// (AppKit `contentMinSize`). Zero/negative/non-finite floors are the
 /// "no floor" sentinel and skip the call — the window keeps AppKit's
@@ -1065,7 +1113,9 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (native_sdk_appkit_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), if (options.transparent) 1 else 0, windowLayerInt(options.layer), if (options.click_through) 1 else 0, if (options.no_activate) 1 else 0, showModeInt(options.show)) == 0) return error.CreateFailed;
+    if (!validPrimaryDisplayAnchor(options.primary_display_anchor)) return error.CreateFailed;
+    const primary_anchor = primaryDisplayAnchorAbi(options.primary_display_anchor);
+    if (native_sdk_appkit_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), if (options.transparent) 1 else 0, windowLayerInt(options.layer), if (options.click_through) 1 else 0, if (options.no_activate) 1 else 0, primary_anchor.corner, primary_anchor.offset_x, primary_anchor.offset_y, showModeInt(options.show)) == 0) return error.CreateFailed;
     applyWindowContentMinSize(self.host, options.id, options.min_width, options.min_height);
     return .{
         .id = options.id,
@@ -2307,4 +2357,34 @@ test "mac gpu backend ABI reports the actual renderer contract" {
     try std.testing.expectEqual(@as(c_int, 1), gpuAlphaModeInt(.@"opaque"));
     try std.testing.expectEqual(@as(c_int, 2), gpuAlphaModeInt(.premultiplied));
     try std.testing.expectEqual(platform_mod.GpuSurfaceAlphaMode.premultiplied, gpuAlphaModeFromInt(2));
+}
+
+test "primary display anchors preserve visible-frame origins in logical points" {
+    const visible = geometry.RectF.init(-1728, -900, 1512, 860);
+    const size = geometry.SizeF.init(240, 110);
+    const offset = geometry.PointF.init(24, 18);
+    const cases = [_]struct {
+        corner: platform_mod.PrimaryDisplayAnchorCorner,
+        expected: geometry.RectF,
+    }{
+        .{ .corner = .top_left, .expected = geometry.RectF.init(-1704, -882, 240, 110) },
+        .{ .corner = .top_right, .expected = geometry.RectF.init(-480, -882, 240, 110) },
+        .{ .corner = .bottom_left, .expected = geometry.RectF.init(-1704, -168, 240, 110) },
+        .{ .corner = .bottom_right, .expected = geometry.RectF.init(-480, -168, 240, 110) },
+    };
+    for (cases) |case| {
+        const frame = (platform_mod.PrimaryDisplayAnchor{ .corner = case.corner, .offset = offset }).resolve(visible, size);
+        try std.testing.expectEqualDeep(case.expected, frame);
+    }
+}
+
+test "mac primary anchor ABI maps every corner and rejects no anchor" {
+    var x: f64 = 0;
+    var y: f64 = 0;
+    try std.testing.expectEqual(@as(c_int, 1), native_sdk_macos_resolve_primary_display_anchor(4, 24, 18, -1728, -900, 1512, 860, 240, 110, &x, &y));
+    try std.testing.expectEqual(@as(f64, -480), x);
+    try std.testing.expectEqual(@as(f64, -168), y);
+    try std.testing.expectEqual(@as(c_int, 0), native_sdk_macos_resolve_primary_display_anchor(0, 0, 0, 0, 0, 100, 100, 10, 10, &x, &y));
+    try std.testing.expect(validPrimaryDisplayAnchor(.{ .corner = .top_left, .offset = geometry.PointF.init(0, 0) }));
+    try std.testing.expect(!validPrimaryDisplayAnchor(.{ .corner = .top_left, .offset = geometry.PointF.init(-1, 0) }));
 }
