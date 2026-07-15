@@ -8411,6 +8411,12 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 - (void)adoptDockIcon:(NSImage *)icon {
     if (!icon) return;
     self.appIcon = icon;
+    /* Accessory processes have no Dock/app-switcher tile. Keeping the image
+     * available for the About panel is cheap; asking NSApplication to adopt
+     * it is not — AppKit materializes large cached bitmap representations for
+     * an icon it can never display. The Zig-side plan avoids producing these
+     * icons in the first place; this guard also covers explicit host calls. */
+    if (NSApp.activationPolicy == NSApplicationActivationPolicyAccessory) return;
     [NSApp setApplicationIconImage:icon];
 }
 

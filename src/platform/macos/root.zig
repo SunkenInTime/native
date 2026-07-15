@@ -385,6 +385,9 @@ const default_icon_png = @embedFile("../../tooling/default_icon.png");
 
 /// How the startup Dock icon resolves for this process.
 const DockIconPlan = enum {
+    /// Accessory processes have no Dock or app-switcher tile. Do not render,
+    /// decode, retain, or hand AppKit an icon it can never display.
+    none,
     /// The host loads the configured icon file itself (the classic
     /// path; also every bundled run, where the .app's own icon must
     /// never be overridden).
@@ -397,7 +400,8 @@ const DockIconPlan = enum {
     embedded_default,
 };
 
-fn planDockIcon(path: []const u8) DockIconPlan {
+fn planDockIcon(path: []const u8, no_activate: bool) DockIconPlan {
+    if (no_activate) return .none;
     if (iconFileExists(path)) {
         return if (devDockIconNeedsMask(path)) .masked_render else .host_file;
     }
@@ -555,12 +559,13 @@ pub const MacPlatform = struct {
         // the pixels instead. Prebuilt .icns paths that exist — and
         // every bundled run, whose icon comes from the bundle — keep
         // the classic load byte-for-byte.
-        const dock_icon = planDockIcon(app_info.icon_path);
+        const dock_icon = planDockIcon(app_info.icon_path, window_options.no_activate);
         const icon_path = if (dock_icon == .host_file) app_info.icon_path else "";
         if (!validPrimaryDisplayAnchor(window_options.primary_display_anchor)) return error.CreateFailed;
         const primary_anchor = primaryDisplayAnchorAbi(window_options.primary_display_anchor);
         const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), if (window_options.transparent) 1 else 0, windowLayerInt(window_options.layer), if (window_options.click_through) 1 else 0, if (window_options.no_activate) 1 else 0, primary_anchor.corner, primary_anchor.offset_x, primary_anchor.offset_y, showModeInt(window_options.show)) orelse return error.CreateFailed;
         switch (dock_icon) {
+            .none => {},
             .host_file => {},
             .masked_render => spawnDevDockIconRender(host, app_info.icon_path),
             .embedded_default => spawnDefaultDockIconRender(host),
@@ -2181,8 +2186,8 @@ test "mac dock icon plan uses the embedded default only without a file" {
     // build exercises the real probes.
     if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
     // Missing file, unbundled test binary: the embedded default.
-    try std.testing.expectEqual(DockIconPlan.embedded_default, planDockIcon("assets/does-not-exist.icns"));
-    try std.testing.expectEqual(DockIconPlan.embedded_default, planDockIcon(""));
+    try std.testing.expectEqual(DockIconPlan.embedded_default, planDockIcon("assets/does-not-exist.icns", false));
+    try std.testing.expectEqual(DockIconPlan.embedded_default, planDockIcon("", false));
     // A real file keeps the classic host load (or the Debug masked
     // render for raw sources) — an app's own icon always wins.
     var tmp = std.testing.tmpDir(.{});
@@ -2191,7 +2196,12 @@ test "mac dock icon plan uses the embedded default only without a file" {
     var path_buffer: [256]u8 = undefined;
     // tmpDir lives under .zig-cache/tmp/ relative to the test cwd.
     const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/icon.icns", .{tmp.sub_path[0..]});
-    try std.testing.expectEqual(DockIconPlan.host_file, planDockIcon(path));
+    try std.testing.expectEqual(DockIconPlan.host_file, planDockIcon(path, false));
+}
+
+test "mac accessory process never plans a dock icon" {
+    try std.testing.expectEqual(DockIconPlan.none, planDockIcon("", true));
+    try std.testing.expectEqual(DockIconPlan.none, planDockIcon("assets/icon.icns", true));
 }
 
 test "mac widget accessibility maps retained action flags" {
