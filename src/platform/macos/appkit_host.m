@@ -459,11 +459,11 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) NSRect destination;
 @property(nonatomic, assign) NSUInteger byteCount;
 @property(nonatomic, assign) uint64_t lastUseTick;
-/* The production GPU composite path keeps the same premultiplied
- * raster bytes as a texture, plus the device-pixel destination, so the
- * composite pass draws the entry as one textured quad instead of a CPU
- * blit. Uploaded at fill time; released with the entry, so cache eviction
- * keeps CPU raster and GPU texture in sync by construction. */
+/* The production GPU composite path keeps the premultiplied raster as a
+ * texture, plus the device-pixel destination, so the composite pass draws
+ * the entry as one textured quad instead of a CPU blit. Production skips
+ * the redundant CGImage; the diagnostic GPU-vs-CPU comparator retains both
+ * representations. */
 @property(nonatomic, strong) id<MTLTexture> texture;
 @property(nonatomic, assign) NSUInteger pixelX;
 @property(nonatomic, assign) NSUInteger pixelY;
@@ -821,8 +821,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)rasterCacheRemoveKey:(NSNumber *)key;
 - (void)rasterCacheEnsureScale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight;
 - (void)rasterCacheStoreEntry:(NativeSdkPacketCommandRaster *)entry forKey:(NSNumber *)key;
-- (NativeSdkPacketCommandRaster *)rasterCacheFillForCommand:(NSDictionary *)command kind:(NSString *)kind key:(NSNumber *)key scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight;
-- (NativeSdkPacketCommandRaster *)rasterCacheBuildEntryForCommand:(NSDictionary *)command kind:(NSString *)kind scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight;
+- (NativeSdkPacketCommandRaster *)rasterCacheFillForCommand:(NSDictionary *)command kind:(NSString *)kind key:(NSNumber *)key scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight retainCpuImage:(BOOL)retainCpuImage;
+- (NativeSdkPacketCommandRaster *)rasterCacheBuildEntryForCommand:(NSDictionary *)command kind:(NSString *)kind scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight retainCpuImage:(BOOL)retainCpuImage;
 - (BOOL)drawPacketCommand:(NSDictionary *)command key:(NSNumber *)key context:(CGContextRef)context scale:(CGFloat)scale hasClip:(BOOL)hasClip clipRect:(NSRect)clipRect pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight;
 - (NSInteger)drawPacketCommands:(NSArray *)commands keys:(NSArray *)keys pixels:(NSMutableData *)pixels pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight clearColor:(NSColor *)clearColor fullSurfacePass:(BOOL)fullSurfacePass hasScissor:(BOOL)hasScissor scissorRect:(NSRect)scissorRect dirtyRects:(NSArray<NSValue *> *)dirtyRects;
 - (void)verifyIncrementalBackingWithCommands:(NSArray *)commands keys:(NSArray *)keys pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight clearColor:(NSColor *)clearColor scissorRect:(NSRect)scissorRect;
@@ -4134,7 +4134,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             BOOL filled = NO;
             if (!entry) {
                 const uint64_t fillBegin = NativeSdkTimestampNanoseconds();
-                entry = [self rasterCacheFillForCommand:command kind:kind key:key scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight];
+                entry = [self rasterCacheFillForCommand:command kind:kind key:key scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight retainCpuImage:NativeSdkGpuCompareEnabled()];
                 filled = entry != nil;
                 if (filled) self.canvasTraceCacheFillNs += NativeSdkTimestampNanoseconds() - fillBegin;
             }
@@ -4143,7 +4143,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                  * refresh it so the quad has a texture. */
                 [self rasterCacheRemoveKey:key];
                 const uint64_t fillBegin = NativeSdkTimestampNanoseconds();
-                entry = [self rasterCacheFillForCommand:command kind:kind key:key scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight];
+                entry = [self rasterCacheFillForCommand:command kind:kind key:key scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight retainCpuImage:NativeSdkGpuCompareEnabled()];
                 filled = entry != nil;
                 if (filled) self.canvasTraceCacheFillNs += NativeSdkTimestampNanoseconds() - fillBegin;
             }
@@ -4575,8 +4575,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
  * of the surface draw — flip, backing scale, then a whole-pixel
  * translation — so glyph and path coverage land on the same subpixel
  * grid and the blit composites the same bytes a direct draw would. */
-- (NativeSdkPacketCommandRaster *)rasterCacheFillForCommand:(NSDictionary *)command kind:(NSString *)kind key:(NSNumber *)key scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight {
-    NativeSdkPacketCommandRaster *entry = [self rasterCacheBuildEntryForCommand:command kind:kind scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight];
+- (NativeSdkPacketCommandRaster *)rasterCacheFillForCommand:(NSDictionary *)command kind:(NSString *)kind key:(NSNumber *)key scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight retainCpuImage:(BOOL)retainCpuImage {
+    NativeSdkPacketCommandRaster *entry = [self rasterCacheBuildEntryForCommand:command kind:kind scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight retainCpuImage:retainCpuImage];
     if (entry) [self rasterCacheStoreEntry:entry forKey:key];
     return entry;
 }
@@ -4590,7 +4590,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
  * That makes this safe to run CONCURRENTLY for independent commands —
  * the full-pass prepass fans misses out across cores; stores stay
  * serialized on the calling thread. */
-- (NativeSdkPacketCommandRaster *)rasterCacheBuildEntryForCommand:(NSDictionary *)command kind:(NSString *)kind scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight {
+- (NativeSdkPacketCommandRaster *)rasterCacheBuildEntryForCommand:(NSDictionary *)command kind:(NSString *)kind scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight retainCpuImage:(BOOL)retainCpuImage {
     NSRect bounds = CGRectStandardize(NativeSdkPacketRect(command[@"bounds"]));
     /* A command clip bounds the visible output: the raster extent is
      * bounds∩clip (scrolled content with mostly-offscreen bounds must
@@ -4636,16 +4636,16 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     }
     BOOL ok = NativeSdkPacketDrawCommandBody(command, kind, opacity, bitmap, scale, hasCommandClip, commandClip, self.canvasImageCache);
     [NSGraphicsContext restoreGraphicsState];
-    CGImageRef cgImage = ok ? CGBitmapContextCreateImage(bitmap) : NULL;
+    CGImageRef cgImage = ok && retainCpuImage ? CGBitmapContextCreateImage(bitmap) : NULL;
     CGContextRelease(bitmap);
-    if (!cgImage) return nil;
+    if (!ok || (retainCpuImage && !cgImage)) return nil;
     NSRect destination = NSMakeRect(minX / scale, minY / scale, (maxX - minX) / scale, (maxY - minY) / scale);
     NativeSdkPacketCommandRaster *entry = [[NativeSdkPacketCommandRaster alloc] init];
     entry.command = command;
-    entry.image = cgImage;
+    if (cgImage) entry.image = cgImage;
     entry.destination = destination;
     entry.byteCount = byteCount;
-    CGImageRelease(cgImage);
+    if (cgImage) CGImageRelease(cgImage);
     entry.pixelX = (NSUInteger)minX;
     entry.pixelY = (NSUInteger)minY;
     entry.pixelWidth = rasterWidth;
@@ -4663,6 +4663,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             entry.texture = texture;
         }
     }
+    if (!entry.image && !entry.texture) return nil;
     return entry;
 }
 
@@ -4688,7 +4689,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         }
         BOOL filled = NO;
         if (!entry) {
-            entry = [self rasterCacheFillForCommand:command kind:kind key:key scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight];
+            entry = [self rasterCacheFillForCommand:command kind:kind key:key scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight retainCpuImage:YES];
             filled = entry != nil;
         }
         if (entry) {
@@ -4815,7 +4816,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             void **built = calloc(missCount, sizeof(void *));
             if (built) {
                 dispatch_apply(missCount, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^(size_t missIndex) {
-                    NativeSdkPacketCommandRaster *entry = [self rasterCacheBuildEntryForCommand:missCommands[missIndex] kind:missKinds[missIndex] scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight];
+                    NativeSdkPacketCommandRaster *entry = [self rasterCacheBuildEntryForCommand:missCommands[missIndex] kind:missKinds[missIndex] scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight retainCpuImage:YES];
                     if (entry) built[missIndex] = (void *)CFBridgingRetain(entry);
                 });
                 for (NSUInteger missIndex = 0; missIndex < missCount; missIndex += 1) {

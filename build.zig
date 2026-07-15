@@ -647,6 +647,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "newLibraryWithData:bytes error:&error" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkMetalProcessResources sharedResources" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkCompositeScratchMaxBytes = 32 * 1024 * 1024" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CGImageRef cgImage = ok && retainCpuImage ? CGBitmapContextCreateImage(bitmap) : NULL" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "renderer backend=software reason=packet-fallback" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "failure == 2 ? 5 * NativeSdkNanosecondsPerSecond : 30 * NativeSdkNanosecondsPerSecond" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "strongSelf.rendererRetryAfterNs != expectedRetryNs" },
