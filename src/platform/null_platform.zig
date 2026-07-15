@@ -15,6 +15,7 @@ const WebViewAssetSource = types.WebViewAssetSource;
 const WebViewSource = types.WebViewSource;
 const WindowId = types.WindowId;
 const WindowTitlebarStyle = types.WindowTitlebarStyle;
+const WindowLayer = types.WindowLayer;
 const ViewId = types.ViewId;
 const max_windows = types.max_windows;
 const max_window_label_bytes = types.max_window_label_bytes;
@@ -260,6 +261,11 @@ pub const NullPlatform = struct {
     /// like `windows` — same seam-regression purpose as
     /// `window_resizable` (the startup create used to hardcode it).
     window_titlebar: [max_windows]WindowTitlebarStyle = [_]WindowTitlebarStyle{.standard} ** max_windows,
+    /// Widget window contract captured at the platform create seam.
+    window_transparent: [max_windows]bool = [_]bool{false} ** max_windows,
+    window_layer: [max_windows]WindowLayer = [_]WindowLayer{.normal} ** max_windows,
+    window_click_through: [max_windows]bool = [_]bool{false} ** max_windows,
+    window_no_activate: [max_windows]bool = [_]bool{false} ** max_windows,
     /// Minimize calls per window (`minimize_window_fn`), indexed like
     /// `windows`: the observable seam for app-drawn minimize controls —
     /// the null platform has no Dock to genie into, so the count IS the
@@ -795,6 +801,10 @@ pub const NullPlatform = struct {
         self.windows[self.window_count] = info;
         self.window_resizable[self.window_count] = options.resizable;
         self.window_titlebar[self.window_count] = options.titlebar;
+        self.window_transparent[self.window_count] = options.transparent;
+        self.window_layer[self.window_count] = options.layer;
+        self.window_click_through[self.window_count] = options.click_through;
+        self.window_no_activate[self.window_count] = options.no_activate;
         self.window_show[self.window_count] = options.show;
         self.window_min_width[self.window_count] = options.min_width;
         self.window_min_height[self.window_count] = options.min_height;
@@ -1909,8 +1919,17 @@ pub const NullPlatform = struct {
         while (cursor + 1 < self.window_count) : (cursor += 1) {
             self.windows[cursor] = self.windows[cursor + 1];
             self.window_resizable[cursor] = self.window_resizable[cursor + 1];
+            self.window_titlebar[cursor] = self.window_titlebar[cursor + 1];
+            self.window_transparent[cursor] = self.window_transparent[cursor + 1];
+            self.window_layer[cursor] = self.window_layer[cursor + 1];
+            self.window_click_through[cursor] = self.window_click_through[cursor + 1];
+            self.window_no_activate[cursor] = self.window_no_activate[cursor + 1];
+            self.window_show[cursor] = self.window_show[cursor + 1];
             self.window_min_width[cursor] = self.window_min_width[cursor + 1];
             self.window_min_height[cursor] = self.window_min_height[cursor + 1];
+            self.window_visible[cursor] = self.window_visible[cursor + 1];
+            self.window_first_present_seq[cursor] = self.window_first_present_seq[cursor + 1];
+            self.window_shown_seq[cursor] = self.window_shown_seq[cursor + 1];
             self.window_minimize_count[cursor] = self.window_minimize_count[cursor + 1];
             self.window_occluded[cursor] = self.window_occluded[cursor + 1];
         }

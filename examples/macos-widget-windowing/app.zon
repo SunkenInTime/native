@@ -1,0 +1,20 @@
+.{
+    .id = "dev.native_sdk.macos_widget_windowing",
+    .name = "macos-widget-windowing",
+    .display_name = "macOS Widget Windowing",
+    .version = "0.1.0",
+    .platforms = .{ "macos" },
+    .permissions = .{ "view" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{
+            .{ .label = "bottom-input", .title = "Bottom interactive", .x = 40, .y = 80, .width = 280, .height = 160, .resizable = false, .restore_state = true, .titlebar = "chromeless", .transparent = true, .layer = "bottom", .click_through = false, .no_activate = true, .views = .{ .{ .label = "canvas", .kind = "gpu_surface", .fill = true, .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "premultiplied", .gpu_color_space = "srgb", .gpu_vsync = true } } },
+            .{ .label = "bottom-pass", .title = "Bottom pass-through", .x = 40, .y = 300, .width = 280, .height = 160, .resizable = false, .restore_state = true, .titlebar = "chromeless", .transparent = true, .layer = "bottom", .click_through = true, .no_activate = true, .views = .{ .{ .label = "canvas", .kind = "gpu_surface", .fill = true, .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "premultiplied", .gpu_color_space = "srgb", .gpu_vsync = true } } },
+            .{ .label = "normal-input", .title = "Normal interactive", .x = 370, .y = 80, .width = 280, .height = 160, .resizable = false, .restore_state = true, .titlebar = "chromeless", .transparent = true, .layer = "normal", .click_through = false, .no_activate = true, .views = .{ .{ .label = "canvas", .kind = "gpu_surface", .fill = true, .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "premultiplied", .gpu_color_space = "srgb", .gpu_vsync = true } } },
+            .{ .label = "normal-pass", .title = "Normal pass-through", .x = 370, .y = 300, .width = 280, .height = 160, .resizable = false, .restore_state = true, .titlebar = "chromeless", .transparent = true, .layer = "normal", .click_through = true, .no_activate = true, .views = .{ .{ .label = "canvas", .kind = "gpu_surface", .fill = true, .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "premultiplied", .gpu_color_space = "srgb", .gpu_vsync = true } } },
+            .{ .label = "topmost-input", .title = "Topmost interactive", .x = 700, .y = 80, .width = 280, .height = 160, .resizable = false, .restore_state = true, .titlebar = "chromeless", .transparent = true, .layer = "topmost", .click_through = false, .no_activate = true, .views = .{ .{ .label = "canvas", .kind = "gpu_surface", .fill = true, .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "premultiplied", .gpu_color_space = "srgb", .gpu_vsync = true } } },
+            .{ .label = "topmost-pass", .title = "Topmost pass-through", .x = 700, .y = 300, .width = 280, .height = 160, .resizable = false, .restore_state = true, .titlebar = "chromeless", .transparent = true, .layer = "topmost", .click_through = true, .no_activate = true, .views = .{ .{ .label = "canvas", .kind = "gpu_surface", .fill = true, .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "premultiplied", .gpu_color_space = "srgb", .gpu_vsync = true } } },
+        },
+    },
+    .web_engine = "system",
+}

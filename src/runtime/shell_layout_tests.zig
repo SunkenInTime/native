@@ -604,6 +604,65 @@ test "shell window titlebar style reaches the platform create seam" {
     }
 }
 
+test "shell widget window policy reaches the platform create seam" {
+    if (comptime platform.max_windows < 3 or platform.max_webviews < 2) return error.SkipZigTest;
+
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "shell-widget-policy", .source = platform.WebViewSource.html("<h1>Host</h1>") };
+        }
+    };
+
+    const shell_views = [_]app_manifest.ShellView{
+        .{ .label = "content", .kind = .webview, .url = "zero://app/content.html", .fill = true },
+    };
+    const widget_window: app_manifest.ShellWindow = .{
+        .label = "widget",
+        .title = "Widget",
+        .width = 320,
+        .height = 240,
+        .transparent = true,
+        .layer = .bottom,
+        .click_through = true,
+        .no_activate = true,
+        .views = &shell_views,
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    const widget = try harness.runtime.createShellWindow(widget_window, platform.WebViewSource.html("<h1>Widget</h1>"));
+    var found = false;
+    for (harness.null_platform.windows[0..harness.null_platform.window_count], 0..) |info, index| {
+        if (info.id != widget.id) continue;
+        found = true;
+        try std.testing.expect(harness.null_platform.window_transparent[index]);
+        try std.testing.expectEqual(platform.WindowLayer.bottom, harness.null_platform.window_layer[index]);
+        try std.testing.expect(harness.null_platform.window_click_through[index]);
+        try std.testing.expect(harness.null_platform.window_no_activate[index]);
+    }
+    try std.testing.expect(found);
+
+    // Default declarations stay ordinary application windows.
+    const ordinary_window: app_manifest.ShellWindow = .{
+        .label = "ordinary",
+        .title = "Ordinary",
+        .width = 640,
+        .height = 480,
+        .views = &shell_views,
+    };
+    const ordinary = try harness.runtime.createShellWindow(ordinary_window, platform.WebViewSource.html("<h1>Ordinary</h1>"));
+    for (harness.null_platform.windows[0..harness.null_platform.window_count], 0..) |info, index| {
+        if (info.id != ordinary.id) continue;
+        try std.testing.expect(!harness.null_platform.window_transparent[index]);
+        try std.testing.expectEqual(platform.WindowLayer.normal, harness.null_platform.window_layer[index]);
+        try std.testing.expect(!harness.null_platform.window_click_through[index]);
+        try std.testing.expect(!harness.null_platform.window_no_activate[index]);
+    }
+}
+
 test "canvas shell windows present before they become visible" {
     if (comptime platform.max_windows < 3) return error.SkipZigTest;
 
