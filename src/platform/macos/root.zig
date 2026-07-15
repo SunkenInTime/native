@@ -73,6 +73,8 @@ const AppKitEvent = extern struct {
     frame_interval_ns: u64,
     nonblank: c_int,
     sample_color: u32,
+    gpu_backend: c_int,
+    alpha_mode: c_int,
     input_kind: c_int,
     button: c_int,
     delta_x: f64,
@@ -149,7 +151,7 @@ extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_in
 extern fn native_sdk_appkit_minimize_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_start_window_drag(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_window_chrome_insets(host: *AppKitHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
-extern fn native_sdk_appkit_create_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
+extern fn native_sdk_appkit_create_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, gpu_backend: c_int, alpha_mode: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_appkit_update_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_accessibility_label: c_int, accessibility_label: [*]const u8, accessibility_label_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_appkit_set_view_frame(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_appkit_set_view_visible(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, visible: c_int) c_int;
@@ -812,10 +814,10 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .packet_decode_ns = event.packet_decode_ns,
             .packet_draw_ns = event.packet_draw_ns,
             .occluded = event.occluded != 0,
-            .backend = .metal,
+            .backend = gpuBackendFromInt(event.gpu_backend),
             .pixel_format = .bgra8_unorm,
             .present_mode = .timer,
-            .alpha_mode = .@"opaque",
+            .alpha_mode = gpuAlphaModeFromInt(event.alpha_mode),
             .color_space = .srgb,
             .vsync = true,
             .status = .ready,
@@ -1136,6 +1138,8 @@ fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!
         options.label.ptr,
         options.label.len,
         viewKindInt(options.kind),
+        gpuBackendInt(options.gpu_surface.backend),
+        gpuAlphaModeInt(options.gpu_surface.alpha_mode),
         parent.ptr,
         parent.len,
         frame.x,
@@ -1154,6 +1158,28 @@ fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!
         options.command.ptr,
         options.command.len,
     ) == 0) return error.CreateFailed;
+}
+
+fn gpuBackendFromInt(value: c_int) platform_mod.GpuSurfaceBackend {
+    return if (value == 3) .software else .metal;
+}
+
+fn gpuBackendInt(backend: platform_mod.GpuSurfaceBackend) c_int {
+    return switch (backend) {
+        .software => 3,
+        else => 1,
+    };
+}
+
+fn gpuAlphaModeFromInt(value: c_int) platform_mod.GpuSurfaceAlphaMode {
+    return if (value == 2) .premultiplied else .@"opaque";
+}
+
+fn gpuAlphaModeInt(mode: platform_mod.GpuSurfaceAlphaMode) c_int {
+    return switch (mode) {
+        .premultiplied => 2,
+        else => 1,
+    };
 }
 
 fn updateView(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, patch: platform_mod.ViewPatch) anyerror!void {
@@ -2271,4 +2297,14 @@ test "mac window layers map to the AppKit ABI" {
     try std.testing.expectEqual(@as(c_int, 0), windowLayerInt(.normal));
     try std.testing.expectEqual(@as(c_int, 1), windowLayerInt(.bottom));
     try std.testing.expectEqual(@as(c_int, 2), windowLayerInt(.topmost));
+}
+
+test "mac gpu backend ABI reports the actual renderer contract" {
+    try std.testing.expectEqual(@as(c_int, 1), gpuBackendInt(.metal));
+    try std.testing.expectEqual(@as(c_int, 3), gpuBackendInt(.software));
+    try std.testing.expectEqual(platform_mod.GpuSurfaceBackend.metal, gpuBackendFromInt(1));
+    try std.testing.expectEqual(platform_mod.GpuSurfaceBackend.software, gpuBackendFromInt(3));
+    try std.testing.expectEqual(@as(c_int, 1), gpuAlphaModeInt(.@"opaque"));
+    try std.testing.expectEqual(@as(c_int, 2), gpuAlphaModeInt(.premultiplied));
+    try std.testing.expectEqual(platform_mod.GpuSurfaceAlphaMode.premultiplied, gpuAlphaModeFromInt(2));
 }

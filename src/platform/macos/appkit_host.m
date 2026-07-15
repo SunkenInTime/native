@@ -438,6 +438,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) NativeSdkAppKitHost *host;
 @property(nonatomic, assign) uint64_t windowId;
 @property(nonatomic, strong) NSString *surfaceLabel;
+@property(nonatomic, assign) NSInteger gpuBackend;
+@property(nonatomic, assign) NSInteger gpuAlphaMode;
 @property(nonatomic, assign) NSUInteger frameIndex;
 /* Whether this surface has completed at least one REAL present. Gates the
  * occluded short-circuit: until the first present lands, occluded frames
@@ -843,7 +845,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)applySegmentedControl:(NSSegmentedControl *)control text:(NSString *)text;
 - (void)configureNativeView:(NSView *)view command:(NSString *)command key:(NSString *)key;
 - (void)emitNativeCommandForSender:(id)sender;
-- (BOOL)createNativeViewInWindow:(uint64_t)windowId label:(NSString *)label kind:(NSInteger)kind parent:(NSString *)parent x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer visible:(BOOL)visible enabled:(BOOL)enabled role:(NSString *)role accessibilityLabel:(NSString *)accessibilityLabel text:(NSString *)text command:(NSString *)command;
+- (BOOL)createNativeViewInWindow:(uint64_t)windowId label:(NSString *)label kind:(NSInteger)kind gpuBackend:(NSInteger)gpuBackend alphaMode:(NSInteger)alphaMode parent:(NSString *)parent x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer visible:(BOOL)visible enabled:(BOOL)enabled role:(NSString *)role accessibilityLabel:(NSString *)accessibilityLabel text:(NSString *)text command:(NSString *)command;
 - (BOOL)updateNativeViewInWindow:(uint64_t)windowId label:(NSString *)label hasFrame:(BOOL)hasFrame x:(double)x y:(double)y width:(double)width height:(double)height hasLayer:(BOOL)hasLayer layer:(NSInteger)layer hasVisible:(BOOL)hasVisible visible:(BOOL)visible hasEnabled:(BOOL)hasEnabled enabled:(BOOL)enabled hasRole:(BOOL)hasRole role:(NSString *)role hasAccessibilityLabel:(BOOL)hasAccessibilityLabel accessibilityLabel:(NSString *)accessibilityLabel hasText:(BOOL)hasText text:(NSString *)text hasCommand:(BOOL)hasCommand command:(NSString *)command;
 - (BOOL)setNativeViewFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height;
 - (BOOL)setNativeViewVisibleInWindow:(uint64_t)windowId label:(NSString *)label visible:(BOOL)visible;
@@ -5622,6 +5624,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         .frame_interval_ns = NativeSdkRetainedFrameIntervalNanoseconds(self.window.screen ?: NSScreen.mainScreen),
         .nonblank = nonblank ? 1 : 0,
         .sample_color = sampleColor,
+        .gpu_backend = self.gpuBackend,
+        .alpha_mode = self.gpuAlphaMode,
         .packet_decode_ns = packetDecodeNs,
         .packet_draw_ns = packetDrawNs,
         .occluded = occluded ? 1 : 0,
@@ -7042,7 +7046,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     }];
 }
 
-- (BOOL)createNativeViewInWindow:(uint64_t)windowId label:(NSString *)label kind:(NSInteger)kind parent:(NSString *)parent x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer visible:(BOOL)visible enabled:(BOOL)enabled role:(NSString *)role accessibilityLabel:(NSString *)accessibilityLabel text:(NSString *)text command:(NSString *)command {
+- (BOOL)createNativeViewInWindow:(uint64_t)windowId label:(NSString *)label kind:(NSInteger)kind gpuBackend:(NSInteger)gpuBackend alphaMode:(NSInteger)alphaMode parent:(NSString *)parent x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer visible:(BOOL)visible enabled:(BOOL)enabled role:(NSString *)role accessibilityLabel:(NSString *)accessibilityLabel text:(NSString *)text command:(NSString *)command {
     if (label.length == 0 || x < 0 || y < 0 || width < 0 || height < 0) return NO;
     if (self.nativeViews.count >= NativeSdkMaxNativeViews) return NO;
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
@@ -7066,7 +7070,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
     [parentView addSubview:view positioned:NSWindowAbove relativeTo:nil];
     if ([view isKindOfClass:[NativeSdkMetalSurfaceView class]]) {
-        [(NativeSdkMetalSurfaceView *)view configureWithHost:self windowId:windowId label:label];
+        NativeSdkMetalSurfaceView *surface = (NativeSdkMetalSurfaceView *)view;
+        surface.gpuBackend = gpuBackend == 3 ? 3 : 1;
+        surface.gpuAlphaMode = alphaMode == 2 ? 2 : 1;
+        [surface configureWithHost:self windowId:windowId label:label];
     }
     self.nativeViews[key] = view;
     if (text.length > 0) {
@@ -10030,7 +10037,7 @@ int native_sdk_appkit_window_chrome_insets(native_sdk_appkit_host_t *host, uint6
     return [object chromeInsetsForWindowId:window_id top:top left:left bottom:bottom right:right buttonsX:buttons_x buttonsY:buttons_y buttonsWidth:buttons_width buttonsHeight:buttons_height] ? 1 : 0;
 }
 
-int native_sdk_appkit_create_view(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len) {
+int native_sdk_appkit_create_view(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int kind, int gpu_backend, int alpha_mode, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     NSString *parentString = parent ? [[NSString alloc] initWithBytes:parent length:parent_len encoding:NSUTF8StringEncoding] : @"";
@@ -10038,7 +10045,7 @@ int native_sdk_appkit_create_view(native_sdk_appkit_host_t *host, uint64_t windo
     NSString *accessibilityLabelString = accessibility_label ? [[NSString alloc] initWithBytes:accessibility_label length:accessibility_label_len encoding:NSUTF8StringEncoding] : @"";
     NSString *textString = text ? [[NSString alloc] initWithBytes:text length:text_len encoding:NSUTF8StringEncoding] : @"";
     NSString *commandString = command ? [[NSString alloc] initWithBytes:command length:command_len encoding:NSUTF8StringEncoding] : @"";
-    return [object createNativeViewInWindow:window_id label:labelString ?: @"" kind:kind parent:parentString ?: @"" x:x y:y width:width height:height layer:layer visible:(visible != 0) enabled:(enabled != 0) role:roleString ?: @"" accessibilityLabel:accessibilityLabelString ?: @"" text:textString ?: @"" command:commandString ?: @""] ? 1 : 0;
+    return [object createNativeViewInWindow:window_id label:labelString ?: @"" kind:kind gpuBackend:gpu_backend alphaMode:alpha_mode parent:parentString ?: @"" x:x y:y width:width height:height layer:layer visible:(visible != 0) enabled:(enabled != 0) role:roleString ?: @"" accessibilityLabel:accessibilityLabelString ?: @"" text:textString ?: @"" command:commandString ?: @""] ? 1 : 0;
 }
 
 int native_sdk_appkit_update_view(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int has_frame, double x, double y, double width, double height, int has_layer, int layer, int has_visible, int visible, int has_enabled, int enabled, int has_role, const char *role, size_t role_len, int has_accessibility_label, const char *accessibility_label, size_t accessibility_label_len, int has_text, const char *text, size_t text_len, int has_command, const char *command, size_t command_len) {

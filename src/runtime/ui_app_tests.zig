@@ -110,6 +110,10 @@ test "ui app owns install, dispatch, and rebuild end to end" {
     } });
     try std.testing.expect(app_state.installed);
     try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 0"));
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_present_count);
+    try std.testing.expectEqual(zero_platform.GpuSurfaceBackend.metal, harness.runtime.views[0].gpu_backend);
+    try std.testing.expectEqual(zero_platform.GpuPresentPath.packet, harness.runtime.views[0].gpu_present_path);
 
     // Automation clicks flow through typed dispatch into update + rebuild.
     const increment_id = findWidgetIdByText(app_state.tree.?, .button, "Increment").?;
@@ -130,6 +134,46 @@ test "ui app owns install, dispatch, and rebuild end to end" {
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "counter.reset", .window_id = 1 } });
     try std.testing.expectEqual(@as(u32, 0), app_state.model.count);
     try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 0"));
+}
+
+test "ui app honors a declared software backend when packet services exist" {
+    const software_views = [_]app_manifest.ShellView{
+        .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .software },
+    };
+    const software_windows = [_]app_manifest.ShellWindow{.{
+        .label = "main",
+        .title = "Software Counter",
+        .width = 400,
+        .height = 300,
+        .views = &software_views,
+    }};
+    const software_scene: app_manifest.ShellConfig = .{ .windows = &software_windows };
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    var options = counterOptions();
+    options.scene = software_scene;
+    const app_state = try CounterApp.create(std.heap.page_allocator, options);
+    defer app_state.destroy();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+        .backend = .software,
+    } });
+
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_packet_present_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
+    const info = harness.runtime.views[0].info();
+    try std.testing.expectEqual(zero_platform.GpuSurfaceBackend.software, info.gpu_backend);
+    try std.testing.expectEqual(zero_platform.GpuPresentPath.pixels, info.gpu_present_path);
 }
 
 // -------------------------------------- context-menu fallback fixture
