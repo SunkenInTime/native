@@ -30,8 +30,11 @@ struct NativeSdkCompositeUniforms {
     float2 rect_origin;
     float2 rect_size;
     float2 tex_origin;
+    float2 shape_origin;
+    float2 shape_size;
     float4 color;
-    uint textured;
+    float4 corner_radius;
+    uint primitive;
     uint3 pad;
 };
 
@@ -53,7 +56,18 @@ fragment float4 native_sdk_composite_fragment(
     NativeSdkCompositeVertexOut in [[stage_in]],
     constant NativeSdkCompositeUniforms &uniforms [[buffer(0)]],
     texture2d<float, access::read> quad_texture [[texture(0)]]) {
-    if (uniforms.textured == 0u) return uniforms.color;
+    if (uniforms.primitive == 0u) return uniforms.color;
+    if (uniforms.primitive == 2u) {
+        float2 half_extent = uniforms.shape_size * 0.5;
+        float2 local = in.position.xy - (uniforms.shape_origin + half_extent);
+        float radius = local.x < 0.0
+            ? (local.y < 0.0 ? uniforms.corner_radius.x : uniforms.corner_radius.w)
+            : (local.y < 0.0 ? uniforms.corner_radius.y : uniforms.corner_radius.z);
+        float2 q = abs(local) - half_extent + radius;
+        float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+        float coverage = clamp(0.5 - distance, 0.0, 1.0);
+        return uniforms.color * coverage;
+    }
     int2 pixel = int2(in.position.xy);
     int2 texel = pixel - int2(uniforms.rect_origin) + int2(uniforms.tex_origin);
     texel = clamp(texel, int2(0),

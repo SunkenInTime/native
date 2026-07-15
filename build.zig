@@ -644,7 +644,12 @@ pub fn build(b: *std.Build) void {
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-production-metal-lifetime", "Verify AppKit ships the measured process-lifetime Metal architecture", &.{
         .{ .path = "build/app.zig", .pattern = "embeddedMetalLibrary(b, dep)" },
         .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "native_sdk_composite_fragment" },
+        .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "float coverage = clamp(0.5 - distance, 0.0, 1.0)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "newLibraryWithData:bytes error:&error" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[kind isEqualToString:@\"fill_rounded_rect_solid\"] && !command[@\"transform\"]" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkCompositeEncodeRoundedRect" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkCompositeNeedsCpuReadableTarget" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "needsCpuReadableTarget ? MTLStorageModeShared : MTLStorageModePrivate" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkMetalProcessResources sharedResources" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkCompositeScratchMaxBytes = 32 * 1024 * 1024" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CGImageRef cgImage = ok && retainCpuImage ? CGBitmapContextCreateImage(bitmap) : NULL" },
