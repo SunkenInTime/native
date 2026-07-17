@@ -260,7 +260,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         .name = app_options.name,
         .root_module = app_mod,
     });
-    linkPlatform(b, dep, target, app_mod, exe, selected_platform, web_engine, web_layer, cef_dir, cef_auto_install);
+    linkPlatform(b, dep, target, app_mod, exe, selected_platform, web_engine, web_layer, cef_dir, cef_auto_install, automation_enabled);
     const install = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install.step);
 
@@ -507,13 +507,15 @@ fn externalModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.R
 // Reproduced with a 10-line `zig cc` program against both the 14.5 and
 // 26.0 SDKs. Release builds never hit it (no UBSan), which is why only
 // Debug-built examples (standardOptimizeOption default) crashed.
-fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, web_layer: bool, cef_dir: []const u8, cef_auto_install: bool) void {
+fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, web_layer: bool, cef_dir: []const u8, cef_auto_install: bool, automation_enabled: bool) void {
     if (platform == .macos) {
         switch (web_engine) {
             .system => {
                 const sdk_include = if (b.sysroot) |sysroot| b.fmt("-I{s}/usr/include", .{sysroot}) else "";
-                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
+                const automation_define = if (automation_enabled) "-DNATIVE_SDK_AUTOMATION=1" else "-DNATIVE_SDK_PRODUCTION=1";
+                const flags: []const []const u8 = if (b.sysroot) |sysroot| &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", automation_define, "-mmacosx-version-min=11.0", "-isysroot", sysroot, sdk_include } else &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", automation_define, "-mmacosx-version-min=11.0" };
                 app_mod.addCSourceFile(.{ .file = dep.path("src/platform/macos/appkit_host.m"), .flags = flags });
+                app_mod.addCSourceFile(.{ .file = embeddedMetalLibrary(b, dep), .flags = &.{"-std=c11"} });
                 app_mod.linkFramework("WebKit", .{});
             },
             .chromium => {
@@ -659,6 +661,27 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkSystemLibrary("dcomp", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
     }
+}
+
+/// Compile the checked-in Metal source once at build time, then turn the
+/// metallib into a tiny C object whose bytes are linked into the executable.
+/// The AppKit host loads those bytes with `newLibraryWithData`; no runtime
+/// shader compiler, bundle-resource lookup, or writable install path exists.
+fn embeddedMetalLibrary(b: *std.Build, dep: *std.Build.Dependency) std.Build.LazyPath {
+    const compile = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal", "-c" });
+    compile.addFileArg(dep.path("src/platform/macos/canvas_shaders.metal"));
+    compile.addArg("-o");
+    const air = compile.addOutputFileArg("native_sdk_canvas.air");
+    compile.addArg("-mmacosx-version-min=11.0");
+
+    const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metallib" });
+    link.addFileArg(air);
+    link.addArg("-o");
+    const library = link.addOutputFileArg("native_sdk_canvas.metallib");
+
+    const embed = b.addSystemCommand(&.{ "/usr/bin/xxd", "-i", "-n", "native_sdk_metal_library" });
+    embed.addFileArg(library);
+    return embed.addOutputFileArg("native_sdk_canvas_metallib.c");
 }
 
 /// The vendored WebView2Loader.dll for the target architecture, relative
