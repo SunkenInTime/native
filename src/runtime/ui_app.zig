@@ -2856,19 +2856,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             try self.presentFrame(runtime, frame_event, slot.canvasLabel(), installing);
         }
 
-        /// Present the planned canvas frame: GPU packet when the platform
-        /// has a packet presenter (macOS/Metal — unchanged), otherwise the
-        /// CPU reference-rendered pixel path (`presentGpuSurfacePixels`,
-        /// e.g. Linux/GTK). A platform whose packet presenter exists but
-        /// reports `UnsupportedService` at present time also falls back to
-        /// pixels; that attempt forces a full repaint because the failed
-        /// packet plan already recorded the frame's presented summary.
+        /// Present the planned canvas frame: a declared software backend uses
+        /// the CPU reference renderer even on a host that also has a packet
+        /// presenter. Otherwise prefer the packet path and fall back to pixels
+        /// when the platform has no packet service or rejects the attempt.
         fn presentFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent, canvas_label: []const u8, installing: bool) anyerror!void {
             // The installing frame must paint unconditionally: on software
             // platforms with no window-manager-driven resizes, nothing else
             // invalidates before the first present, and the surface would
             // stay blank until the first input arrives.
             const services = runtime.options.platform.services;
+            const software_backend = frame_event.backend == .software;
             // Premultiplied surfaces are composited by their host; the
             // untouched window must stay transparent so rounded widget
             // chrome does not reveal an opaque rectangular clear behind it.
@@ -2877,7 +2875,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             else
                 self.effectiveTokens().colors.background;
             var packet_attempted = false;
-            if (services.gpu_surface_hybrid_layers and runtime.canvasViewHasHybridLayers(frame_event.window_id, canvas_label)) {
+            if (!software_backend and services.gpu_surface_hybrid_layers and runtime.canvasViewHasHybridLayers(frame_event.window_id, canvas_label)) {
                 packet_attempted = true;
                 self.ensurePixelBuffers(frame_event.size, frame_event.scale_factor) catch return;
                 const hybrid_presented = blk: {
@@ -2913,7 +2911,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // channel. Retrying the full mixed display list is both
             // redundant and invalid for retained text; go straight to the
             // full-repaint pixel fallback so renderer loss visibly demotes.
-            if (!packet_attempted and (services.present_gpu_surface_packet_fn != null or services.present_gpu_surface_packet_binary_fn != null)) {
+            if (!software_backend and !packet_attempted and (services.present_gpu_surface_packet_fn != null or services.present_gpu_surface_packet_binary_fn != null)) {
                 packet_attempted = true;
                 const packet_presented = blk: {
                     _ = runtime.presentNextCanvasGpuPacketWithScale(
