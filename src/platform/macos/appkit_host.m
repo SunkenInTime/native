@@ -89,6 +89,7 @@ static BOOL NativeSdkShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventM
 static NSEventModifierFlags NativeSdkMenuModifierFlags(uint32_t modifiers);
 static uint32_t NativeSdkModifierFlagsForEvent(NSEvent *event);
 static uint64_t NativeSdkTimestampNanoseconds(void);
+static BOOL NativeSdkRendererBakeoffTraceEnabled(void);
 static uint64_t NativeSdkRetainedFrameIntervalNanoseconds(NSScreen *screen);
 static NSAccessibilityRole NativeSdkAccessibilityRoleForNativeViewKind(NSInteger kind);
 static NSAccessibilityRole NativeSdkAccessibilityRoleForWidgetRole(NSInteger role);
@@ -185,6 +186,20 @@ static BOOL NativeSdkAppKitHighContrastEnabled(void) {
 
 static uint64_t NativeSdkTimestampNanoseconds(void) {
     return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1000000000.0);
+}
+
+/* PR-06 measurement trace. Disabled production runs pay only a cached bool
+ * branch; every expensive timestamp and stderr write stays behind it. Keep
+ * this separate from correctness/automation traces so the bakeoff can prove
+ * those readbacks and comparisons disappear from production cost. */
+static BOOL NativeSdkRendererBakeoffTraceEnabled(void) {
+    static BOOL enabled;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *value = getenv("NATIVE_SDK_RENDERER_BAKEOFF_TRACE");
+        enabled = value && value[0] != 0 && strcmp(value, "0") != 0;
+    });
+    return enabled;
 }
 
 static uint64_t NativeSdkRetainedFrameIntervalNanoseconds(NSScreen *screen) {
@@ -3155,10 +3170,16 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     self = [super initWithFrame:frameRect];
     if (!self) return nil;
 
+    const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
+    const uint64_t resourceBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
     _device = MTLCreateSystemDefaultDevice();
     if (!_device) return self;
 
     _commandQueue = [_device newCommandQueue];
+    if (bakeoffTrace) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=resource_init device=process-default queue=per-view us=%llu\n",
+                (unsigned long long)((NativeSdkTimestampNanoseconds() - resourceBeginNs) / 1000));
+    }
     _metalLayer = [CAMetalLayer layer];
     _metalLayer.device = _device;
     _metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -3326,6 +3347,8 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (![self isAvailable] || !rgba8 || width == 0 || height == 0) return NO;
     if (byteLength != width * height * 4) return NO;
     if (![self ensureCanvasPresenter]) return NO;
+    const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
+    const uint64_t uploadBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
 
     BOOL textureChanged = NO;
     if (!self.canvasTexture || self.canvasTextureWidth != width || self.canvasTextureHeight != height) {
@@ -3344,6 +3367,10 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         self.canvasTextureWidth = width;
         self.canvasTextureHeight = height;
         textureChanged = YES;
+        if (bakeoffTrace) {
+            fprintf(stderr, "native-sdk: renderer-bakeoff stage=texture_allocate path=pixel bytes=%lu storage=shared reused=0\n",
+                    (unsigned long)byteLength);
+        }
     }
     if (!self.canvasTexture) return NO;
     /* Foreign bytes move the texture past any composited baseline; the
@@ -3420,6 +3447,14 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         }
     }
     self.hasCanvasTexture = YES;
+    if (bakeoffTrace) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=texture_upload path=pixel bytes=%lu rects=%lu full=%d texture_reused=%d us=%llu\n",
+                (unsigned long)byteLength,
+                (unsigned long)uploadRectCount,
+                uploadFullTexture ? 1 : 0,
+                textureChanged ? 0 : 1,
+                (unsigned long long)((NativeSdkTimestampNanoseconds() - uploadBeginNs) / 1000));
+    }
     (void)scale;
     [self stopDisplayTimer];
     [self renderFrame];
@@ -3428,7 +3463,10 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 
 - (NSInteger)presentGpuPacketWithSurfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable json:(const uint8_t *)json byteLength:(NSUInteger)byteLength {
     if (![self isAvailable]) return -1;
-    if (!requiresRender) return 1;
+    if (!requiresRender) {
+        if (NativeSdkRendererBakeoffTraceEnabled()) fprintf(stderr, "native-sdk: renderer-bakeoff stage=static_clean_fast_path encoding=json\n");
+        return 1;
+    }
     if (!representable || unsupportedCommandCount != 0 || !json || byteLength == 0 || surfaceWidth <= 0 || surfaceHeight <= 0) return 0;
 
     const uint64_t decodeBeginNs = NativeSdkTimestampNanoseconds();
@@ -3438,6 +3476,11 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     NSDictionary *packet = NativeSdkPacketDictionary(packetObject);
     if (!packet || jsonError) return 0;
     const uint64_t drawBeginNs = NativeSdkTimestampNanoseconds();
+    if (NativeSdkRendererBakeoffTraceEnabled()) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=packet_decode encoding=json bytes=%lu commands=%lu us=%llu\n",
+                (unsigned long)byteLength, (unsigned long)commandCount,
+                (unsigned long long)((drawBeginNs - decodeBeginNs) / 1000));
+    }
     const NSInteger result = [self presentGpuPacketObject:packet surfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA commandCount:commandCount];
     if (result == 1) {
         self.lastPacketDecodeNs = drawBeginNs - decodeBeginNs;
@@ -3451,13 +3494,21 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
  * encodings can never draw differently. */
 - (NSInteger)presentGpuPacketBinaryWithSurfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable packet:(const uint8_t *)packet byteLength:(NSUInteger)byteLength {
     if (![self isAvailable]) return -1;
-    if (!requiresRender) return 1;
+    if (!requiresRender) {
+        if (NativeSdkRendererBakeoffTraceEnabled()) fprintf(stderr, "native-sdk: renderer-bakeoff stage=static_clean_fast_path encoding=binary\n");
+        return 1;
+    }
     if (!representable || unsupportedCommandCount != 0 || !packet || byteLength == 0 || surfaceWidth <= 0 || surfaceHeight <= 0) return 0;
 
     const uint64_t decodeBeginNs = NativeSdkTimestampNanoseconds();
     NSDictionary *decoded = NativeSdkPacketDictionaryFromBinary(packet, byteLength);
     if (!decoded) return 0;
     const uint64_t drawBeginNs = NativeSdkTimestampNanoseconds();
+    if (NativeSdkRendererBakeoffTraceEnabled()) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=packet_decode encoding=binary bytes=%lu commands=%lu us=%llu\n",
+                (unsigned long)byteLength, (unsigned long)commandCount,
+                (unsigned long long)((drawBeginNs - decodeBeginNs) / 1000));
+    }
     const NSInteger result = [self presentGpuPacketObject:decoded surfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA commandCount:commandCount];
     if (result == 1) {
         self.lastPacketDecodeNs = drawBeginNs - decodeBeginNs;
@@ -3653,6 +3704,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     /* Shared-storage render targets (needed for cheap readback and the
      * blur sandwich) require unified memory. */
     if (![self.device hasUnifiedMemory]) return NO;
+    const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
+    const uint64_t compileBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
 
     static NSString *shaderSource =
         @"#include <metal_stdlib>\n"
@@ -3720,6 +3773,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     self.canvasCompositeBlendPipeline = blendPipeline;
     self.canvasCompositeOpaquePipeline = opaquePipeline;
     self.canvasCompositeFlatTexture = flatTexture;
+    if (bakeoffTrace) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=shader_compile path=composite source=runtime pipelines=2 us=%llu\n",
+                (unsigned long long)((NativeSdkTimestampNanoseconds() - compileBeginNs) / 1000));
+    }
     return YES;
 }
 
@@ -3766,6 +3823,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         id<MTLTexture> pooled = self.canvasCompositeScratchTextures[poolKey];
         if (pooled && pooled.width >= rasterWidth && pooled.height >= rasterHeight) texture = pooled;
     }
+    const BOOL reusedTexture = texture != nil;
     if (!texture) {
         /* Round capacity up so an animated command's wobbling padded
          * extent keeps hitting the same pooled texture. */
@@ -3782,6 +3840,12 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         }
     }
     [texture replaceRegion:MTLRegionMake2D(0, 0, rasterWidth, rasterHeight) mipmapLevel:0 withBytes:data.bytes bytesPerRow:rasterWidth * 4];
+    if (NativeSdkRendererBakeoffTraceEnabled()) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=texture_upload path=composite-scratch bytes=%lu pooled=%d pool_entries=%lu\n",
+                (unsigned long)(rasterWidth * rasterHeight * 4),
+                reusedTexture ? 1 : 0,
+                (unsigned long)self.canvasCompositeScratchTextures.count);
+    }
     if (outRegion) *outRegion = MTLRegionMake2D((NSUInteger)minX, (NSUInteger)minY, rasterWidth, rasterHeight);
     return texture;
 }
@@ -4012,6 +4076,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         clearComponents[2] = (float)(b * a);
         clearComponents[3] = (float)a;
     }
+    const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
+    const uint64_t encodeBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
     id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
     if (!commandBuffer) return -1;
     MTLRenderPassDescriptor *descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -4136,6 +4202,13 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         return -1;
     }
     [commandBuffer commit];
+    if (bakeoffTrace) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=command_encode path=composite commands=%lu quads=%lu binds=%lu us=%llu\n",
+                (unsigned long)commands.count,
+                (unsigned long)self.canvasTraceQuadCount,
+                (unsigned long)self.canvasTraceBindCount,
+                (unsigned long long)((NativeSdkTimestampNanoseconds() - encodeBeginNs) / 1000));
+    }
     self.canvasCompositeLastCommandBuffer = commandBuffer;
     if (waitUntilCompleted) [commandBuffer waitUntilCompleted];
     (void)opTextures;
@@ -4163,6 +4236,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         self.canvasTextureRenderable = YES;
         self.canvasCompositeContentValid = NO;
         self.canvasCompositeVerifyTexture = nil;
+        if (NativeSdkRendererBakeoffTraceEnabled()) {
+            fprintf(stderr, "native-sdk: renderer-bakeoff stage=texture_allocate path=composite bytes=%lu storage=shared reused=0\n",
+                    (unsigned long)(pixelWidth * pixelHeight * 4));
+        }
     }
     const uint64_t traceDrawBeginNs = NativeSdkTimestampNanoseconds();
     NSInteger result = [self compositePacketCommands:commands keys:keys target:self.canvasTexture pixelWidth:pixelWidth pixelHeight:pixelHeight scale:scale clearColor:clearColor fullSurfacePass:fullSurfacePass hasScissor:hasScissor scissorRect:scissorRect dirtyRects:dirtyRects waitUntilCompleted:NO];
@@ -4740,6 +4817,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
 - (NSInteger)presentGpuPacketObject:(NSDictionary *)packet surfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA commandCount:(NSUInteger)commandCount {
     if (!packet) return 0;
+    const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
+    const uint64_t retainedPlanBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
     CGFloat normalizedScale = scale > 0 ? scale : 1;
     NSUInteger pixelWidth = (NSUInteger)ceil(surfaceWidth * normalizedScale);
     NSUInteger pixelHeight = (NSUInteger)ceil(surfaceHeight * normalizedScale);
@@ -4865,6 +4944,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     BOOL fullSurfacePass = clearLoadAction || (patchLoadAction && !hasScissor);
     NSUInteger byteLengthRequired = pixelWidth * pixelHeight * 4;
     BOOL directRetainedDirtyUpdate = (retainedLoadAction || patchLoadAction) && hasScissor;
+    if (bakeoffTrace) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=retained_plan action=%s commands=%lu images=%lu dirty_rects=%lu us=%llu\n",
+                loadAction.UTF8String,
+                (unsigned long)commands.count,
+                (unsigned long)images.count,
+                (unsigned long)dirtyRects.count,
+                (unsigned long long)((NativeSdkTimestampNanoseconds() - retainedPlanBeginNs) / 1000));
+    }
     [self rasterCacheEnsureScale:normalizedScale pixelWidth:pixelWidth pixelHeight:pixelHeight];
     if (NativeSdkGpuCompositeEnabled() && [self ensureCanvasCompositor]) {
         /* GPU composite path (prototype, env-gated): the frame is drawn
@@ -5011,6 +5098,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (BOOL)ensureCanvasPresenter {
     if (self.canvasRenderPipeline && self.canvasSampler) return YES;
     if (!self.device || !self.metalLayer) return NO;
+    const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
+    const uint64_t compileBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
 
     static NSString *shaderSource =
         @"#include <metal_stdlib>\n"
@@ -5057,6 +5146,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
     self.canvasRenderPipeline = pipeline;
     self.canvasSampler = sampler;
+    if (bakeoffTrace) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=shader_compile path=presenter source=runtime pipelines=1 us=%llu\n",
+                (unsigned long long)((NativeSdkTimestampNanoseconds() - compileBeginNs) / 1000));
+    }
     return YES;
 }
 
@@ -5386,6 +5479,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (void)renderFrame {
     if (![self isAvailable] || self.hidden || self.bounds.size.width <= 0 || self.bounds.size.height <= 0) return;
     [self updateDrawableSize];
+    const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
 
     /* Occluded (or minimized, or hidden-app) windows never touch the
      * drawable pool: complete the frame logically from retained state
@@ -5424,12 +5518,18 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         return;
     }
 
-    const uint64_t vendBeginNs = NativeSdkGpuFrameTraceEnabled() ? NativeSdkTimestampNanoseconds() : 0;
+    const BOOL traceDrawable = NativeSdkGpuFrameTraceEnabled() || bakeoffTrace;
+    const uint64_t vendBeginNs = traceDrawable ? NativeSdkTimestampNanoseconds() : 0;
     id<CAMetalDrawable> drawable = [self.metalLayer nextDrawable];
     if (NativeSdkGpuFrameTraceEnabled()) {
         fprintf(stderr, "native-sdk: gpu frame-trace path=%s frame=%lu vend_us=%llu\n",
                 drawable ? "present" : "nil-drawable",
                 (unsigned long)self.frameIndex,
+                (unsigned long long)((NativeSdkTimestampNanoseconds() - vendBeginNs) / 1000));
+    }
+    if (bakeoffTrace) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=drawable_wait result=%s us=%llu\n",
+                drawable ? "drawable" : "nil",
                 (unsigned long long)((NativeSdkTimestampNanoseconds() - vendBeginNs) / 1000));
     }
     if (!drawable) {
@@ -5460,6 +5560,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     const double green = self.hasCanvasTexture ? 0.973 : 0.18 + 0.10 * sin((phase + 0.33) * 6.283185307179586);
     const double blue = self.hasCanvasTexture ? 0.988 : 0.34 + 0.16 * sin((phase + 0.66) * 6.283185307179586);
 
+    const uint64_t encodeBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
     MTLRenderPassDescriptor *descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
     descriptor.colorAttachments[0].texture = drawable.texture;
     descriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -5499,10 +5600,22 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
      destinationBytesPerImage:256];
         [blit endEncoding];
     }
+    if (bakeoffTrace) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=command_encode path=presenter textured=%d verify_readback=%d us=%llu\n",
+                self.hasCanvasTexture && canvasTextureMatchesDrawable ? 1 : 0,
+                shouldSample ? 1 : 0,
+                (unsigned long long)((NativeSdkTimestampNanoseconds() - encodeBeginNs) / 1000));
+    }
 
+    const uint64_t gpuBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
     __weak NativeSdkMetalSurfaceView *weakSelf = self;
     [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
         (void)completedBuffer;
+        if (bakeoffTrace) {
+            fprintf(stderr, "native-sdk: renderer-bakeoff stage=gpu_completion status=%ld us=%llu\n",
+                    (long)completedBuffer.status,
+                    (unsigned long long)((NativeSdkTimestampNanoseconds() - gpuBeginNs) / 1000));
+        }
         uint32_t sampleColor = 0;
         BOOL nonblank = NO;
         if (sampleBuffer && completedBuffer.status == MTLCommandBufferStatusCompleted) {
@@ -7356,6 +7469,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (!self.canvasImageStore) self.canvasImageStore = [[NSMutableDictionary alloc] init];
     NSString *key = [NSString stringWithFormat:@"%llu", (unsigned long long)imageId];
     self.canvasImageStore[key] = image;
+    if (NativeSdkRendererBakeoffTraceEnabled()) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=image_upload bytes=%lu store_entries=%lu\n",
+                (unsigned long)byteLength,
+                (unsigned long)self.canvasImageStore.count);
+    }
     return YES;
 }
 
@@ -8422,7 +8540,14 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 
 - (void)emitEvent:(native_sdk_appkit_event_t)event {
     if (self.callback) {
+        const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
+        const uint64_t dispatchBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
         self.callback(self.context, &event);
+        if (bakeoffTrace) {
+            fprintf(stderr, "native-sdk: renderer-bakeoff stage=app_loop_dispatch event=%d us=%llu\n",
+                    event.kind,
+                    (unsigned long long)((NativeSdkTimestampNanoseconds() - dispatchBeginNs) / 1000));
+        }
     }
 }
 

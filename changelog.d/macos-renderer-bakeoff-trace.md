@@ -1,0 +1,1 @@
+improvement: **macOS renderer measurement seam**: an opt-in trace attributes binary packet decode, retained planning, texture work, Metal command encoding, drawable waits, GPU completion, and app-loop dispatch without adding production readbacks or polling.
