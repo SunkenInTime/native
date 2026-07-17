@@ -10,6 +10,10 @@ extern "C" {
 
 typedef struct native_sdk_appkit_host native_sdk_appkit_host_t;
 
+/* Pure top-left logical-points anchor resolver implemented by the Zig
+ * platform seam and shared with AppKit's screen-coordinate boundary. */
+int native_sdk_macos_resolve_primary_display_anchor(int corner, double offset_x, double offset_y, double visible_x, double visible_y, double visible_width, double visible_height, double window_width, double window_height, double *out_x, double *out_y);
+
 typedef enum {
     NATIVE_SDK_APPKIT_EVENT_START = 0,
     NATIVE_SDK_APPKIT_EVENT_FRAME = 1,
@@ -321,7 +325,7 @@ typedef void (*native_sdk_appkit_bridge_callback_t)(void *context, uint64_t wind
 // non-empty. has_web_content declares whether the app hosts a webview;
 // web-only default menu items (Reload, Toggle Web Inspector, Undo/Redo)
 // exist only when it is set.
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int show_policy);
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int primary_anchor_corner, double primary_anchor_offset_x, double primary_anchor_offset_y, int show_policy);
 void native_sdk_appkit_destroy(native_sdk_appkit_host_t *host);
 // Adopt pre-rendered straight-alpha RGBA8 pixels as the Dock icon (and
 // the About panel copy). The pixels are copied before return, so the
@@ -347,7 +351,7 @@ void native_sdk_appkit_emit_window_event(native_sdk_appkit_host_t *host, uint64_
 void native_sdk_appkit_set_security_policy(native_sdk_appkit_host_t *host, const char *allowed_origins, size_t allowed_origins_len, const char *external_urls, size_t external_urls_len, int external_action);
 void native_sdk_appkit_set_menus(native_sdk_appkit_host_t *host, const char *const *menu_titles, const size_t *menu_title_lens, size_t menu_count, const uint32_t *item_menu_indices, const char *const *item_labels, const size_t *item_label_lens, const char *const *item_commands, const size_t *item_command_lens, const char *const *item_keys, const size_t *item_key_lens, const uint32_t *item_modifiers, const int *item_separators, const int *item_enabled, const int *item_checked, size_t item_count);
 void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count);
-int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int show_policy);
+int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int primary_anchor_corner, double primary_anchor_offset_x, double primary_anchor_offset_y, int show_policy);
 // Content min-size floor for a created window (NSWindow contentMinSize):
 // the user's resize stops at the floor. Values <= 0 leave that axis at
 // AppKit's default minimum. Returns 0 when the window id is unknown.

@@ -100,6 +100,51 @@ static int NativeSdkAppKitColorSchemeForAppearance(NSAppearance *appearance);
 static BOOL NativeSdkAppKitReduceMotionEnabled(void);
 static BOOL NativeSdkAppKitHighContrastEnabled(void);
 
+/// AppKit's global coordinates use the primary display's bottom-left as the
+/// origin. Native SDK window coordinates use its top-left, matching every
+/// other host. These two helpers are the one conversion boundary.
+static NSScreen *NativeSdkPrimaryScreen(void) {
+    return NSScreen.screens.firstObject;
+}
+
+static NSRect NativeSdkTopLeftRectFromAppKit(NSRect frame, NSScreen *primary) {
+    if (!primary) return frame;
+    return NSMakeRect(frame.origin.x,
+                      NSMaxY(primary.frame) - NSMaxY(frame),
+                      frame.size.width,
+                      frame.size.height);
+}
+
+static NSRect NativeSdkAppKitRectFromTopLeft(NSRect frame, NSScreen *primary) {
+    if (!primary) return frame;
+    return NSMakeRect(frame.origin.x,
+                      NSMaxY(primary.frame) - NSMaxY(frame),
+                      frame.size.width,
+                      frame.size.height);
+}
+
+static NSRect NativeSdkPrimaryAnchoredFrame(NSInteger corner, double offsetX, double offsetY, NSSize size) {
+    NSScreen *primary = NativeSdkPrimaryScreen();
+    if (!primary || corner < 1 || corner > 4) return NSMakeRect(0, 0, size.width, size.height);
+    NSRect visible = NativeSdkTopLeftRectFromAppKit(primary.visibleFrame, primary);
+    double x = 0;
+    double y = 0;
+    if (!native_sdk_macos_resolve_primary_display_anchor((int)corner,
+                                                          offsetX,
+                                                          offsetY,
+                                                          visible.origin.x,
+                                                          visible.origin.y,
+                                                          visible.size.width,
+                                                          visible.size.height,
+                                                          size.width,
+                                                          size.height,
+                                                          &x,
+                                                          &y)) {
+        return NSMakeRect(0, 0, size.width, size.height);
+    }
+    return NativeSdkAppKitRectFromTopLeft(NSMakeRect(x, y, size.width, size.height), primary);
+}
+
 static size_t NativeSdkOverflowSize(size_t buffer_len) {
     return buffer_len == SIZE_MAX ? SIZE_MAX : buffer_len + 1;
 }
@@ -694,6 +739,10 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkBridgeScriptHandler *> *bridgeScriptHandlers;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NativeSdkAssetSchemeHandler *> *assetSchemeHandlers;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *windowLabels;
+/// Primary-display anchor contracts keyed by window id. The host reapplies
+/// these after topology, Space, and wake changes; developers never select a
+/// monitor through the SDK.
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSDictionary<NSString *, NSNumber *> *> *windowPrimaryAnchors;
 /// Window ids whose AppKit show/focus path must never activate the app.
 @property(nonatomic, strong) NSMutableSet<NSNumber *> *nonactivatingWindows;
 /// Present-before-show bookkeeping: windows created with the deferred
@@ -809,6 +858,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) BOOL didShutdown;
 @property(nonatomic, assign) BOOL observesApplicationActivation;
 @property(nonatomic, assign) BOOL observesAppearanceChanges;
+@property(nonatomic, assign) BOOL observesDesktopChanges;
 @property(nonatomic, assign) NSInteger bridgeFrameKeepalive;
 @property(nonatomic, strong) id shortcutEventMonitor;
 @property(nonatomic, strong) id willTerminateObserver;
@@ -824,8 +874,8 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 /// loop. AppKit activates the process while starting that loop even for
 /// accessory apps; the first loop turn hands activation back explicitly.
 @property(nonatomic, strong) NSRunningApplication *previousActiveApplication;
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle transparent:(BOOL)transparent windowLayer:(int)windowLayer clickThrough:(BOOL)clickThrough noActivate:(BOOL)noActivate showPolicy:(int)showPolicy;
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle transparent:(BOOL)transparent windowLayer:(int)windowLayer clickThrough:(BOOL)clickThrough noActivate:(BOOL)noActivate showPolicy:(int)showPolicy makeMain:(BOOL)makeMain;
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle transparent:(BOOL)transparent windowLayer:(int)windowLayer clickThrough:(BOOL)clickThrough noActivate:(BOOL)noActivate primaryAnchorCorner:(int)primaryAnchorCorner primaryAnchorOffsetX:(double)primaryAnchorOffsetX primaryAnchorOffsetY:(double)primaryAnchorOffsetY showPolicy:(int)showPolicy;
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle transparent:(BOOL)transparent windowLayer:(int)windowLayer clickThrough:(BOOL)clickThrough noActivate:(BOOL)noActivate primaryAnchorCorner:(int)primaryAnchorCorner primaryAnchorOffsetX:(double)primaryAnchorOffsetX primaryAnchorOffsetY:(double)primaryAnchorOffsetY showPolicy:(int)showPolicy makeMain:(BOOL)makeMain;
 - (void)orderWindowFront:(NSWindow *)window windowId:(uint64_t)windowId makeKey:(BOOL)makeKey;
 - (void)showDeferredWindowIfPending:(uint64_t)windowId reason:(const char *)reason;
 - (void)applyWindowClearColor:(uint64_t)windowId red:(uint8_t)red green:(uint8_t)green blue:(uint8_t)blue alpha:(uint8_t)alpha;
@@ -899,6 +949,10 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)applicationDidResignActive:(NSNotification *)notification;
 - (void)startAppearanceObservers;
 - (void)stopAppearanceObservers;
+- (void)startDesktopObservers;
+- (void)stopDesktopObservers;
+- (void)desktopEnvironmentDidChange:(NSNotification *)notification;
+- (void)reapplyPrimaryDisplayAnchors:(NSString *)reason;
 - (void)emitAppearanceChanged;
 - (void)emitResize;
 - (void)emitResizeForWindowId:(uint64_t)windowId;
@@ -1087,6 +1141,8 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     [self.host.bridgeScriptHandlers removeObjectForKey:key];
     [self.host.assetSchemeHandlers removeObjectForKey:key];
     [self.host.windowLabels removeObjectForKey:key];
+    [self.host.windowPrimaryAnchors removeObjectForKey:key];
+    if (self.host.windowPrimaryAnchors.count == 0) [self.host stopDesktopObservers];
     [self.host.nonactivatingWindows removeObject:key];
     [self.host.deferredShowWindows removeObjectForKey:key];
     [self.host.windowClearColors removeObjectForKey:key];
@@ -6303,7 +6359,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
 @implementation NativeSdkAppKitHost
 
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle transparent:(BOOL)transparent windowLayer:(int)windowLayer clickThrough:(BOOL)clickThrough noActivate:(BOOL)noActivate showPolicy:(int)showPolicy {
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle transparent:(BOOL)transparent windowLayer:(int)windowLayer clickThrough:(BOOL)clickThrough noActivate:(BOOL)noActivate primaryAnchorCorner:(int)primaryAnchorCorner primaryAnchorOffsetX:(double)primaryAnchorOffsetX primaryAnchorOffsetY:(double)primaryAnchorOffsetY showPolicy:(int)showPolicy {
     self = [super init];
     if (!self) {
         return nil;
@@ -6335,6 +6391,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     self.bridgeScriptHandlers = [[NSMutableDictionary alloc] init];
     self.assetSchemeHandlers = [[NSMutableDictionary alloc] init];
     self.windowLabels = [[NSMutableDictionary alloc] init];
+    self.windowPrimaryAnchors = [[NSMutableDictionary alloc] init];
     self.nonactivatingWindows = [[NSMutableSet alloc] init];
     self.deferredShowWindows = [[NSMutableDictionary alloc] init];
     self.windowClearColors = [[NSMutableDictionary alloc] init];
@@ -6353,23 +6410,23 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [self configureApplication];
     NativeSdkLaunchLap("app_configured");
 
-    [self createWindowWithId:1 title:(windowTitle.length > 0 ? windowTitle : self.appName) label:self.windowLabel x:x y:y width:width height:height restoreFrame:restoreFrame resizable:resizable titlebarStyle:titlebarStyle transparent:transparent windowLayer:windowLayer clickThrough:clickThrough noActivate:noActivate showPolicy:showPolicy makeMain:YES];
+    [self createWindowWithId:1 title:(windowTitle.length > 0 ? windowTitle : self.appName) label:self.windowLabel x:x y:y width:width height:height restoreFrame:restoreFrame resizable:resizable titlebarStyle:titlebarStyle transparent:transparent windowLayer:windowLayer clickThrough:clickThrough noActivate:noActivate primaryAnchorCorner:primaryAnchorCorner primaryAnchorOffsetX:primaryAnchorOffsetX primaryAnchorOffsetY:primaryAnchorOffsetY showPolicy:showPolicy makeMain:YES];
     self.didShutdown = NO;
     self.observesApplicationActivation = NO;
 
     return self;
 }
 
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle transparent:(BOOL)transparent windowLayer:(int)windowLayer clickThrough:(BOOL)clickThrough noActivate:(BOOL)noActivate showPolicy:(int)showPolicy makeMain:(BOOL)makeMain {
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle transparent:(BOOL)transparent windowLayer:(int)windowLayer clickThrough:(BOOL)clickThrough noActivate:(BOOL)noActivate primaryAnchorCorner:(int)primaryAnchorCorner primaryAnchorOffsetX:(double)primaryAnchorOffsetX primaryAnchorOffsetY:(double)primaryAnchorOffsetY showPolicy:(int)showPolicy makeMain:(BOOL)makeMain {
     NSNumber *key = @(windowId);
     if (self.windows[key]) {
         return NO;
     }
 
-    NSRect rect = restoreFrame ? NSMakeRect(x, y, width, height) : NSMakeRect(0, 0, width, height);
-    if (restoreFrame) {
-        rect = constrainFrame(rect);
-    }
+    const BOOL primaryAnchored = primaryAnchorCorner >= 1 && primaryAnchorCorner <= 4;
+    NSRect rect = primaryAnchored
+        ? NativeSdkPrimaryAnchoredFrame(primaryAnchorCorner, primaryAnchorOffsetX, primaryAnchorOffsetY, NSMakeSize(width, height))
+        : (restoreFrame ? constrainFrame(NativeSdkAppKitRectFromTopLeft(NSMakeRect(x, y, width, height), NativeSdkPrimaryScreen())) : NSMakeRect(0, 0, width, height));
     NSWindowStyleMask styleMask = NSWindowStyleMaskTitled |
                                   NSWindowStyleMaskClosable |
                                   NSWindowStyleMaskMiniaturizable;
@@ -6491,7 +6548,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         window.toolbarStyle = NSWindowToolbarStyleUnified;
         window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
     }
-    if (!restoreFrame) {
+    if (!restoreFrame && !primaryAnchored) {
         [window center];
     }
     if (makeMain) NativeSdkLaunchLap("window_chrome_ready");
@@ -6523,6 +6580,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
     self.windows[key] = window;
     self.delegates[key] = delegate;
+    if (primaryAnchored) {
+        self.windowPrimaryAnchors[key] = @{
+            @"corner": @(primaryAnchorCorner),
+            @"offset_x": @(primaryAnchorOffsetX),
+            @"offset_y": @(primaryAnchorOffsetY),
+        };
+        if (self.callback) [self startDesktopObservers];
+    }
     self.windowLabels[key] = label.length > 0 ? label : @"main";
     if (noActivate) {
         [self.nonactivatingWindows addObject:key];
@@ -6611,6 +6676,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         self.audioSpectrumFft = NULL;
     }
     [self stopAppearanceObservers];
+    [self stopDesktopObservers];
     if (self.shortcutEventMonitor) {
         [NSEvent removeMonitor:self.shortcutEventMonitor];
         self.shortcutEventMonitor = nil;
@@ -7738,7 +7804,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 }
 
 static NSRect constrainFrame(NSRect frame) {
-    NSScreen *screen = [NSScreen mainScreen];
+    NSScreen *screen = NativeSdkPrimaryScreen();
     if (!screen) return frame;
     NSRect visible = screen.visibleFrame;
     if (frame.size.width > visible.size.width) frame.size.width = visible.size.width;
@@ -8254,6 +8320,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 
     [self startApplicationActivationObservers];
     [self startAppearanceObservers];
+    [self startDesktopObservers];
 
     [self emitEvent:(native_sdk_appkit_event_t){ .kind = NATIVE_SDK_APPKIT_EVENT_START }];
     // A failed START handler requests shutdown synchronously, before the
@@ -8338,6 +8405,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
         self.shortcutEventMonitor = nil;
     }
     [self stopAppearanceObservers];
+    [self stopDesktopObservers];
     [self stopApplicationActivationObservers];
     [NSApp stop:nil];
     NSEvent *event = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
@@ -8409,6 +8477,88 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
                                                                   name:NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification
                                                                 object:nil];
     self.observesAppearanceChanges = NO;
+}
+
+- (void)startDesktopObservers {
+    if (self.observesDesktopChanges || self.windowPrimaryAnchors.count == 0) return;
+    NSNotificationCenter *appCenter = [NSNotificationCenter defaultCenter];
+    [appCenter addObserver:self
+                  selector:@selector(desktopEnvironmentDidChange:)
+                      name:NSApplicationDidChangeScreenParametersNotification
+                    object:NSApp];
+    NSNotificationCenter *workspaceCenter = NSWorkspace.sharedWorkspace.notificationCenter;
+    [workspaceCenter addObserver:self
+                        selector:@selector(desktopEnvironmentDidChange:)
+                            name:NSWorkspaceActiveSpaceDidChangeNotification
+                          object:nil];
+    [workspaceCenter addObserver:self
+                        selector:@selector(desktopEnvironmentDidChange:)
+                            name:NSWorkspaceDidWakeNotification
+                          object:nil];
+    self.observesDesktopChanges = YES;
+    [self reapplyPrimaryDisplayAnchors:@"observer_start"];
+}
+
+- (void)stopDesktopObservers {
+    if (!self.observesDesktopChanges) return;
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:NSApplicationDidChangeScreenParametersNotification
+                                                  object:NSApp];
+    [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self
+                                                               name:NSWorkspaceActiveSpaceDidChangeNotification
+                                                             object:nil];
+    [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self
+                                                               name:NSWorkspaceDidWakeNotification
+                                                             object:nil];
+    self.observesDesktopChanges = NO;
+}
+
+- (void)desktopEnvironmentDidChange:(NSNotification *)notification {
+    [self reapplyPrimaryDisplayAnchors:notification.name ?: @"unknown"];
+}
+
+- (void)reapplyPrimaryDisplayAnchors:(NSString *)reason {
+    NSScreen *primary = NativeSdkPrimaryScreen();
+    if (!primary) return;
+    if (getenv("NATIVE_SDK_DISPLAY_POLICY")) {
+        fprintf(stderr, "native-sdk: displays reason=%s count=%lu\n",
+                reason.UTF8String ?: "unknown",
+                (unsigned long)NSScreen.screens.count);
+        for (NSUInteger index = 0; index < NSScreen.screens.count; index += 1) {
+            NSScreen *screen = NSScreen.screens[index];
+            NSRect frame = NativeSdkTopLeftRectFromAppKit(screen.frame, primary);
+            NSRect visible = NativeSdkTopLeftRectFromAppKit(screen.visibleFrame, primary);
+            fprintf(stderr,
+                    "native-sdk: display index=%lu primary=%d frame=(%.1f,%.1f %.1fx%.1f) visible=(%.1f,%.1f %.1fx%.1f) scale=%.2f\n",
+                    (unsigned long)index,
+                    screen == primary ? 1 : 0,
+                    frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
+                    visible.origin.x, visible.origin.y, visible.size.width, visible.size.height,
+                    screen.backingScaleFactor);
+        }
+    }
+    for (NSNumber *key in self.windowPrimaryAnchors) {
+        NSWindow *window = self.windows[key];
+        NSDictionary<NSString *, NSNumber *> *anchor = self.windowPrimaryAnchors[key];
+        if (!window || !anchor) continue;
+        NSRect frame = NativeSdkPrimaryAnchoredFrame(anchor[@"corner"].integerValue,
+                                                     anchor[@"offset_x"].doubleValue,
+                                                     anchor[@"offset_y"].doubleValue,
+                                                     window.frame.size);
+        if (!NSEqualRects(window.frame, frame)) {
+            [window setFrame:frame display:YES];
+        }
+        if (getenv("NATIVE_SDK_DISPLAY_POLICY")) {
+            NSRect topLeft = NativeSdkTopLeftRectFromAppKit(frame, primary);
+            fprintf(stderr,
+                    "native-sdk: anchor window=%llu corner=%ld offset=(%.1f,%.1f) frame=(%.1f,%.1f %.1fx%.1f)\n",
+                    (unsigned long long)key.unsignedLongLongValue,
+                    (long)anchor[@"corner"].integerValue,
+                    anchor[@"offset_x"].doubleValue,
+                    anchor[@"offset_y"].doubleValue,
+                    topLeft.origin.x, topLeft.origin.y, topLeft.size.width, topLeft.size.height);
+        }
+    }
 }
 
 - (void)accessibilityDisplayOptionsDidChange:(NSNotification *)notification {
@@ -8487,7 +8637,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 - (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open {
     NSWindow *window = self.windows[@(windowId)] ?: self.window;
     NSString *label = self.windowLabels[@(windowId)] ?: (windowId == 1 ? self.windowLabel : @"");
-    NSRect frame = window.frame;
+    NSRect frame = NativeSdkTopLeftRectFromAppKit(window.frame, NativeSdkPrimaryScreen());
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_WINDOW_FRAME,
         .window_id = windowId,
@@ -9777,7 +9927,7 @@ static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url) 
     return NO;
 }
 
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int show_policy) {
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int primary_anchor_corner, double primary_anchor_offset_x, double primary_anchor_offset_y, int show_policy) {
     @autoreleasepool {
         NSString *appNameString = [[NSString alloc] initWithBytes:app_name length:app_name_len encoding:NSUTF8StringEncoding] ?: @"native-sdk";
         NSString *displayNameString = [[NSString alloc] initWithBytes:display_name length:display_name_len encoding:NSUTF8StringEncoding] ?: @"";
@@ -9787,7 +9937,7 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
         NSString *bundleIdString = [[NSString alloc] initWithBytes:bundle_id length:bundle_id_len encoding:NSUTF8StringEncoding] ?: @"dev.native_sdk.app";
         NSString *iconPathString = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *windowLabelString = [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] ?: @"main";
-        NativeSdkAppKitHost *host = [[NativeSdkAppKitHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString hasWebContent:(has_web_content != 0) windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) titlebarStyle:titlebar_style transparent:(transparent != 0) windowLayer:window_layer clickThrough:(click_through != 0) noActivate:(no_activate != 0) showPolicy:show_policy];
+        NativeSdkAppKitHost *host = [[NativeSdkAppKitHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString hasWebContent:(has_web_content != 0) windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) titlebarStyle:titlebar_style transparent:(transparent != 0) windowLayer:window_layer clickThrough:(click_through != 0) noActivate:(no_activate != 0) primaryAnchorCorner:primary_anchor_corner primaryAnchorOffsetX:primary_anchor_offset_x primaryAnchorOffsetY:primary_anchor_offset_y showPolicy:show_policy];
         return (__bridge_retained native_sdk_appkit_host_t *)host;
     }
 }
@@ -9986,11 +10136,11 @@ void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char 
     [object setShortcutsWithIds:ids idLengths:id_lens keys:keys keyLengths:key_lens modifiers:modifiers count:count];
 }
 
-int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int show_policy) {
+int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int primary_anchor_corner, double primary_anchor_offset_x, double primary_anchor_offset_y, int show_policy) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"";
     NSString *labelString = window_label ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] : @"";
-    return [object createWindowWithId:window_id title:titleString ?: @"" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) titlebarStyle:titlebar_style transparent:(transparent != 0) windowLayer:window_layer clickThrough:(click_through != 0) noActivate:(no_activate != 0) showPolicy:show_policy makeMain:NO] ? 1 : 0;
+    return [object createWindowWithId:window_id title:titleString ?: @"" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) titlebarStyle:titlebar_style transparent:(transparent != 0) windowLayer:window_layer clickThrough:(click_through != 0) noActivate:(no_activate != 0) primaryAnchorCorner:primary_anchor_corner primaryAnchorOffsetX:primary_anchor_offset_x primaryAnchorOffsetY:primary_anchor_offset_y showPolicy:show_policy makeMain:NO] ? 1 : 0;
 }
 
 int native_sdk_appkit_set_window_content_min_size(native_sdk_appkit_host_t *host, uint64_t window_id, double min_width, double min_height) {
