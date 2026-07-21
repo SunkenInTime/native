@@ -134,6 +134,7 @@ pub const GpuFrame = runtime_api.GpuFrame;
 pub const GpuSurfaceFrameEvent = runtime_api.GpuSurfaceFrameEvent;
 pub const GpuSurfaceResizeEvent = runtime_api.GpuSurfaceResizeEvent;
 pub const GpuSurfaceInputEvent = runtime_api.GpuSurfaceInputEvent;
+pub const WindowFrameEvent = runtime_api.WindowFrameEvent;
 pub const CanvasWidgetPointerEvent = runtime_api.CanvasWidgetPointerEvent;
 pub const CanvasWidgetKeyboardEvent = runtime_api.CanvasWidgetKeyboardEvent;
 pub const CanvasWidgetScrollEvent = runtime_api.CanvasWidgetScrollEvent;

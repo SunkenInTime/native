@@ -490,9 +490,9 @@ pub const WindowChrome = struct {
 /// button in a drag header keeps its press, exactly like the runtime's
 /// own pointer walk — and a point counts as draggable only when it is
 /// inside a region rect and outside every exclusion rect. Platforms
-/// that start drags from the live pointer gesture instead (macOS:
-/// `performWindowDragWithEvent:`) leave the service null and the
-/// runtime skips the mirror entirely.
+/// macOS also mirrors these rectangles so its Metal view can call
+/// `performWindowDragWithEvent:` synchronously from the originating
+/// mouse-down.
 pub const WindowDragRegion = struct {
     frame: geometry.RectF,
     exclusion: bool = false,
@@ -2034,8 +2034,7 @@ pub const PlatformServices = struct {
     /// Replace the platform's mirror of a canvas view's window-drag
     /// regions (see `WindowDragRegion`). Called by the runtime after
     /// every layout install whose regions changed; an empty slice
-    /// clears the mirror. Platforms that resolve drags from the live
-    /// pointer gesture (macOS) leave this null.
+    /// clears the mirror.
     set_window_drag_regions_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, regions: []const WindowDragRegion) anyerror!void = null,
     create_view_fn: ?*const fn (context: ?*anyopaque, options: ViewOptions) anyerror!void = null,
     update_view_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8, patch: ViewPatch) anyerror!void = null,

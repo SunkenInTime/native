@@ -566,6 +566,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Called after presenting every frame except the installing
             /// one.
             on_frame: ?*const fn (model: *const ModelT, frame: platform.GpuFrame) ?MsgT = null,
+            /// Optional mapping from native top-level window frame
+            /// reports into messages. The platform owns live movement;
+            /// this hook observes the resulting logical frame and scale
+            /// so apps can persist user-owned placement without routing
+            /// pointer deltas through their model.
+            on_window_frame: ?*const fn (frame: core.WindowFrameEvent) ?MsgT = null,
             /// Reads runtime-owned widget state (slider values, scroll
             /// offsets) back into the model before update and rebuild so
             /// the next source tree does not stomp it. Main canvas only:
@@ -2640,6 +2646,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .canvas_widget_context_press => |press_event| try self.handleContextPress(runtime, press_event),
                 .canvas_widget_resize => |resize_event| try self.handleWidgetResize(runtime, resize_event),
                 .canvas_widget_change => |change_event| try self.handleWidgetChange(runtime, change_event),
+                .window_frame => |frame_event| {
+                    const map = self.options.on_window_frame orelse return;
+                    if (map(frame_event)) |msg| {
+                        try self.dispatch(runtime, frame_event.id, msg);
+                    }
+                },
                 .window_closed => |closed| try self.handleWindowClosed(runtime, closed),
                 .automation_provenance => |query| try self.handleProvenanceQuery(runtime, query),
                 else => {},

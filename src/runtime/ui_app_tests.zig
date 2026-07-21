@@ -176,6 +176,80 @@ test "ui app honors a declared software backend when packet services exist" {
     try std.testing.expectEqual(zero_platform.GpuPresentPath.pixels, info.gpu_present_path);
 }
 
+const WindowFrameModel = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    scale: f32 = 0,
+    deliveries: u32 = 0,
+};
+
+const WindowFrameMsg = union(enum) {
+    moved: zero_platform.WindowState,
+};
+
+const WindowFrameApp = ui_app_model.UiApp(WindowFrameModel, WindowFrameMsg);
+
+fn windowFrameUpdate(model: *WindowFrameModel, msg: WindowFrameMsg) void {
+    switch (msg) {
+        .moved => |frame| {
+            model.x = frame.frame.x;
+            model.y = frame.frame.y;
+            model.scale = frame.scale_factor;
+            model.deliveries += 1;
+        },
+    }
+}
+
+fn windowFrameView(ui: *WindowFrameApp.Ui, model: *const WindowFrameModel) WindowFrameApp.Ui.Node {
+    _ = model;
+    return ui.text(.{}, "window frame");
+}
+
+fn windowFrameMap(frame: zero_platform.WindowState) ?WindowFrameMsg {
+    return .{ .moved = frame };
+}
+
+test "ui app maps native window frame changes into messages" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try WindowFrameApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-window-frame",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = windowFrameUpdate,
+        .view = windowFrameView,
+        .on_window_frame = windowFrameMap,
+    });
+    defer app_state.destroy();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+        .id = 1,
+        .label = "main",
+        .title = "Window Frame",
+        .frame = geometry.RectF.init(121.5, 84.25, 400, 300),
+        .scale_factor = 2,
+        .open = true,
+        .focused = false,
+    } });
+
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.deliveries);
+    try std.testing.expectEqual(@as(f32, 121.5), app_state.model.x);
+    try std.testing.expectEqual(@as(f32, 84.25), app_state.model.y);
+    try std.testing.expectEqual(@as(f32, 2), app_state.model.scale);
+}
+
 // -------------------------------------- context-menu fallback fixture
 
 const TaskRowModel = struct {

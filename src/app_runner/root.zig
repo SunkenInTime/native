@@ -46,6 +46,10 @@ pub const RunOptions = struct {
     icon_path: []const u8 = "assets/icon.png",
     default_frame: native_sdk.geometry.RectF = native_sdk.geometry.RectF.init(0, 0, 1100, 760),
     restore_state: bool = true,
+    /// When false, skip both restoring and recording the runner's
+    /// bundle-scoped window state. Embedders that own a more specific
+    /// placement store use this to keep one persistence authority.
+    persist_window_state: bool = true,
     primary_display_anchor: ?native_sdk.PrimaryDisplayAnchor = null,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
@@ -408,7 +412,7 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
 fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = if (options.persist_window_state) prepareStateStore(init.io, init.environ_map, &app_info, &buffers) else null;
     const session_recorder = setupSessionRecorder(init, app_info);
     var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
     var trace_sink = StdoutTraceSink{};
@@ -461,7 +465,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     native_sdk.runtime.launch_timing.lap("runner_main");
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = if (options.persist_window_state) prepareStateStore(init.io, init.environ_map, &app_info, &buffers) else null;
     const session_recorder = setupSessionRecorder(init, app_info);
     var mac_platform = try native_sdk.platform.macos.MacPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
     defer mac_platform.deinit();
@@ -514,7 +518,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
 fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = if (options.persist_window_state) prepareStateStore(init.io, init.environ_map, &app_info, &buffers) else null;
     const session_recorder = setupSessionRecorder(init, app_info);
     var linux_platform = try native_sdk.platform.linux.LinuxPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
     defer linux_platform.deinit();
@@ -565,7 +569,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
 fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
-    const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
+    const store = if (options.persist_window_state) prepareStateStore(init.io, init.environ_map, &app_info, &buffers) else null;
     const session_recorder = setupSessionRecorder(init, app_info);
     var windows_platform = try native_sdk.platform.windows.WindowsPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
     defer windows_platform.deinit();

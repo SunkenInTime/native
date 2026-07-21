@@ -703,6 +703,11 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint32_t pendingPointerMotionModifiers;
 @property(nonatomic, assign) uint64_t pendingPointerMotionTimestampNs;
 @property(nonatomic, assign) uint64_t pointerMotionInputLastEmitNs;
+// Runtime-owned drag-region mirror in top-left canvas coordinates.
+// Inclusions and exclusions are split so mouseDown can answer the hit
+// synchronously while its NSEvent is still the live AppKit gesture.
+@property(nonatomic, strong) NSArray<NSValue *> *windowDragRegions;
+@property(nonatomic, strong) NSArray<NSValue *> *windowDragExclusions;
 @property(nonatomic, assign) BOOL scrollInputPending;
 @property(nonatomic, assign) NSPoint pendingScrollPoint;
 @property(nonatomic, assign) double pendingScrollDeltaX;
@@ -862,6 +867,9 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)queueScrollInputEvent:(NSEvent *)event deltaX:(double)deltaX deltaY:(double)deltaY;
 - (void)emitQueuedScrollInputEvent;
 - (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY;
+- (void)setWindowDragRegionRects:(const double *)rects exclusions:(const int *)exclusions count:(NSUInteger)count;
+- (BOOL)windowDragRegionContainsEvent:(NSEvent *)event;
+- (void)performWindowDragWithEvent:(NSEvent *)event;
 - (void)emitSyntheticKeyDownWithKey:(NSString *)key modifiers:(uint32_t)modifiers;
 - (void)updateSurfaceTrackingArea;
 - (void)emitSelectAllTextInputCommand;
@@ -1041,6 +1049,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (void)focusWindowWithId:(uint64_t)windowId;
 - (void)closeWindowWithId:(uint64_t)windowId;
 - (BOOL)startWindowDragWithId:(uint64_t)windowId;
+- (BOOL)setWindowDragRegionsInWindow:(uint64_t)windowId label:(NSString *)label rects:(const double *)rects exclusions:(const int *)exclusions count:(NSUInteger)count;
 - (BOOL)chromeInsetsForWindowId:(uint64_t)windowId top:(double *)top left:(double *)left bottom:(double *)bottom right:(double *)right buttonsX:(double *)buttonsX buttonsY:(double *)buttonsY buttonsWidth:(double *)buttonsWidth buttonsHeight:(double *)buttonsHeight;
 - (WKWebView *)ensureMainWebViewForWindowId:(uint64_t)windowId;
 - (WKWebView *)webViewForWindowId:(uint64_t)windowId;
@@ -3368,6 +3377,8 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     self.accessibilityRole = NSAccessibilityGroupRole;
     _surfaceCursor = [NSCursor arrowCursor];
     _canvasImageCache = [NSMutableDictionary dictionary];
+    _windowDragRegions = @[];
+    _windowDragExclusions = @[];
     self.markedText = @"";
     self.markedTextRange = NSMakeRange(NSNotFound, 0);
     self.selectedTextRange = NSMakeRange(0, 0);
@@ -5928,6 +5939,13 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     return YES;
 }
 
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    // Widget windows are nonactivating panels by design. Without this,
+    // AppKit consumes the press as an activation click and never calls
+    // mouseDown: on the canvas surface.
+    return YES;
+}
+
 - (void)resetCursorRects {
     [super resetCursorRects];
     [self addCursorRect:self.bounds cursor:self.surfaceCursor ?: [NSCursor arrowCursor]];
@@ -5949,7 +5967,104 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         [self emitInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_DOWN event:event button:1 deltaX:0 deltaY:0];
         return;
     }
+    BOOL windowDrag = [self windowDragRegionContainsEvent:event];
+    if (getenv("NATIVE_SDK_WINDOW_DRAG_TRACE")) {
+        NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+        NSLog(@"native-sdk: window-drag mouse-down window=%llu view=%@ point=%.1f,%.1f regions=%lu exclusions=%lu draggable=%d",
+              (unsigned long long)self.windowId,
+              self.surfaceLabel,
+              point.x,
+              self.bounds.size.height - point.y,
+              (unsigned long)self.windowDragRegions.count,
+              (unsigned long)self.windowDragExclusions.count,
+              windowDrag);
+    }
+    if (windowDrag) {
+        [self performWindowDragWithEvent:event];
+        return;
+    }
     [self emitInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_DOWN event:event button:0 deltaX:0 deltaY:0];
+}
+
+- (void)setWindowDragRegionRects:(const double *)rects exclusions:(const int *)exclusions count:(NSUInteger)count {
+    if (!rects || !exclusions || count == 0) {
+        self.windowDragRegions = @[];
+        self.windowDragExclusions = @[];
+        return;
+    }
+    NSMutableArray<NSValue *> *regions = [NSMutableArray arrayWithCapacity:count];
+    NSMutableArray<NSValue *> *carveOuts = [NSMutableArray arrayWithCapacity:count];
+    for (NSUInteger index = 0; index < count; index += 1) {
+        NSRect rect = NSMakeRect(
+            rects[index * 4 + 0],
+            rects[index * 4 + 1],
+            rects[index * 4 + 2],
+            rects[index * 4 + 3]
+        );
+        [(exclusions[index] != 0 ? carveOuts : regions) addObject:[NSValue valueWithRect:rect]];
+    }
+    self.windowDragRegions = regions;
+    self.windowDragExclusions = carveOuts;
+    if (getenv("NATIVE_SDK_WINDOW_DRAG_TRACE")) {
+        NSLog(@"native-sdk: window-drag mirror window=%llu view=%@ regions=%lu exclusions=%lu bounds=%.1fx%.1f",
+              (unsigned long long)self.windowId,
+              self.surfaceLabel,
+              (unsigned long)regions.count,
+              (unsigned long)carveOuts.count,
+              self.bounds.size.width,
+              self.bounds.size.height);
+        for (NSValue *value in regions) {
+            NSRect rect = value.rectValue;
+            NSLog(@"native-sdk: window-drag region rect=%.1f,%.1f %.1fx%.1f",
+                  rect.origin.x, rect.origin.y, rect.size.width, rect.size.height);
+        }
+    }
+}
+
+- (BOOL)windowDragRegionContainsEvent:(NSEvent *)event {
+    if (!event || self.windowDragRegions.count == 0) return NO;
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    point.y = self.bounds.size.height - point.y;
+    BOOL included = NO;
+    for (NSValue *value in self.windowDragRegions) {
+        if (NSPointInRect(point, value.rectValue)) {
+            included = YES;
+            break;
+        }
+    }
+    if (!included) return NO;
+    for (NSValue *value in self.windowDragExclusions) {
+        if (NSPointInRect(point, value.rectValue)) return NO;
+    }
+    return YES;
+}
+
+- (void)performWindowDragWithEvent:(NSEvent *)event {
+    NSWindow *window = self.window;
+    if (!window) return;
+    if (event.clickCount >= 2) {
+        NSString *action = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleActionOnDoubleClick"] ?: @"Maximize";
+        if ([action isEqualToString:@"Minimize"]) {
+            [window performMiniaturize:nil];
+        } else if (![action isEqualToString:@"None"]) {
+            [window performZoom:nil];
+        }
+        return;
+    }
+    if (getenv("NATIVE_SDK_WINDOW_DRAG_TRACE")) {
+        NSLog(@"native-sdk: window-drag begin window=%llu event=%ld movable=%d ignores_mouse=%d",
+              (unsigned long long)self.windowId,
+              (long)event.type,
+              window.movable,
+              window.ignoresMouseEvents);
+    }
+    [window performWindowDragWithEvent:event];
+    if (getenv("NATIVE_SDK_WINDOW_DRAG_TRACE")) {
+        NSRect frame = window.frame;
+        NSLog(@"native-sdk: window-drag end window=%llu frame=%.1f,%.1f %.1fx%.1f",
+              (unsigned long long)self.windowId,
+              frame.origin.x, frame.origin.y, frame.size.width, frame.size.height);
+    }
 }
 
 - (void)mouseUp:(NSEvent *)event {
@@ -6880,11 +6995,12 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     window.ignoresMouseEvents = clickThrough;
     switch (windowLayer) {
         case 1:
-            // One level above the wallpaper: below ordinary application
-            // windows and Finder's desktop items, without crossing the
-            // desktop-icon compositing boundary that flattens transparent
-            // window backing against white.
-            window.level = CGWindowLevelForKey(kCGDesktopWindowLevelKey) + 1;
+            // Finder's desktop-item window spans the whole display and
+            // wins hit testing over anything below it. Interactive
+            // widgets therefore sit immediately above that plane; true
+            // click-through widgets stay immediately below it. Both are
+            // still far below ordinary application windows.
+            window.level = CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) + (clickThrough ? -1 : 1);
             break;
         case 2:
             window.level = NSFloatingWindowLevel;
@@ -7130,6 +7246,13 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         return YES;
     }
     [window performWindowDragWithEvent:event];
+    return YES;
+}
+
+- (BOOL)setWindowDragRegionsInWindow:(uint64_t)windowId label:(NSString *)label rects:(const double *)rects exclusions:(const int *)exclusions count:(NSUInteger)count {
+    NSView *view = self.nativeViews[[self nativeViewKeyForWindow:windowId label:label]];
+    if (![view isKindOfClass:[NativeSdkMetalSurfaceView class]]) return NO;
+    [(NativeSdkMetalSurfaceView *)view setWindowDragRegionRects:rects exclusions:exclusions count:count];
     return YES;
 }
 
@@ -10583,6 +10706,12 @@ int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t w
     if (!object.windows[@(window_id)]) return 0;
     [object miniaturizeWindowWithId:window_id];
     return 1;
+}
+
+int native_sdk_appkit_set_window_drag_regions(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const double *rects, const int *exclusions, size_t count) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
+    return [object setWindowDragRegionsInWindow:window_id label:labelString ?: @"" rects:rects exclusions:exclusions count:count] ? 1 : 0;
 }
 
 int native_sdk_appkit_start_window_drag(native_sdk_appkit_host_t *host, uint64_t window_id) {

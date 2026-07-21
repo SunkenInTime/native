@@ -294,6 +294,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         trace.float("width", state.frame.width),
                         trace.float("height", state.frame.height),
                     });
+                    try dispatchEvent(self, app, .{ .window_frame = state });
                     if (was_open and !state.open) {
                         // The model owns the consequence (the dismissal
                         // precedent): the app maps this to a Msg and its
@@ -485,6 +486,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .canvas_widget_context_press => {},
                 .canvas_widget_resize => {},
                 .canvas_widget_change => {},
+                .window_frame => {},
                 .window_closed => {
                     self.invalidateFor(.state, null);
                 },

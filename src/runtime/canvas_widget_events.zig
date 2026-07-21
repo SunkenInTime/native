@@ -456,8 +456,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// mirror actually changed, so a hit-testing platform
         /// (Windows answering `WM_NCHITTEST`) tracks header moves and
         /// visibility flips without being spammed by unrelated
-        /// rebuilds. Platforms without the service (macOS, whose drag
-        /// path starts from the live pointer gesture) skip even the
+        /// rebuilds. Platforms without the service skip even the
         /// collection walk. A view that never had drag regions never
         /// pushes; one whose regions disappeared pushes the empty
         /// mirror once to clear the platform side.

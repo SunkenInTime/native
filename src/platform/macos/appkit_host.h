@@ -362,6 +362,10 @@ int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t wind
 // window controls on chromeless windows. Returns 0 when the window id
 // is unknown.
 int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t window_id);
+// Replace a canvas surface's window-drag region mirror. Rects are flat
+// x,y,width,height tuples in top-left local coordinates; exclusions
+// carve interactive controls out of the draggable area.
+int native_sdk_appkit_set_window_drag_regions(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, const double *rects, const int *exclusions, size_t count);
 // Window-drag region channel: called during dispatch of the pointer-down
 // that starts the gesture. Single click hands the event to
 // -[NSWindow performWindowDragWithEvent:] (moves only on actual

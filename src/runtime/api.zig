@@ -48,6 +48,7 @@ pub const GpuFrame = platform.GpuFrame;
 pub const GpuSurfaceFrameEvent = platform.GpuSurfaceFrameEvent;
 pub const GpuSurfaceResizeEvent = platform.GpuSurfaceResizeEvent;
 pub const GpuSurfaceInputEvent = platform.GpuSurfaceInputEvent;
+pub const WindowFrameEvent = platform.WindowState;
 
 pub const CanvasWidgetPointerEvent = struct {
     window_id: platform.WindowId = 1,
@@ -284,6 +285,7 @@ pub const Event = union(enum) {
     canvas_widget_context_press: CanvasWidgetContextPressEvent,
     canvas_widget_resize: CanvasWidgetResizeEvent,
     canvas_widget_change: CanvasWidgetChangeEvent,
+    window_frame: WindowFrameEvent,
     window_closed: WindowClosedEvent,
     automation_provenance: AutomationProvenanceEvent,
 
@@ -311,6 +313,7 @@ pub const Event = union(enum) {
             .canvas_widget_context_press => "canvas_widget_context_press",
             .canvas_widget_resize => "canvas_widget_resize",
             .canvas_widget_change => "canvas_widget_change",
+            .window_frame => "window_frame",
             .window_closed => "window_closed",
             .automation_provenance => "automation_provenance",
         };

@@ -169,6 +169,7 @@ extern fn native_sdk_appkit_set_window_content_min_size(host: *AppKitHost, windo
 extern fn native_sdk_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_minimize_window(host: *AppKitHost, window_id: u64) c_int;
+extern fn native_sdk_appkit_set_window_drag_regions(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, rects: [*]const f64, exclusions: [*]const c_int, count: usize) c_int;
 extern fn native_sdk_appkit_start_window_drag(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_window_chrome_insets(host: *AppKitHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
 extern fn native_sdk_appkit_create_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, gpu_backend: c_int, alpha_mode: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
@@ -614,6 +615,7 @@ pub const MacPlatform = struct {
                 .minimize_window_fn = minimizeWindow,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
+                .set_window_drag_regions_fn = setWindowDragRegions,
                 .create_view_fn = createView,
                 .update_view_fn = updateView,
                 .set_view_frame_fn = setViewFrame,
@@ -1151,6 +1153,25 @@ fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerr
 fn startWindowDrag(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_start_window_drag(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+const max_drag_region_push: usize = 64;
+
+/// Mirror canvas drag regions into the Metal view so its mouseDown:
+/// can enter AppKit's move loop with the original NSEvent.
+fn setWindowDragRegions(context: ?*anyopaque, window_id: platform_mod.WindowId, label: []const u8, regions: []const platform_mod.WindowDragRegion) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (regions.len > max_drag_region_push) return error.WindowLimitReached;
+    var rects: [max_drag_region_push * 4]f64 = undefined;
+    var exclusions: [max_drag_region_push]c_int = undefined;
+    for (regions, 0..) |region, index| {
+        rects[index * 4 + 0] = region.frame.x;
+        rects[index * 4 + 1] = region.frame.y;
+        rects[index * 4 + 2] = region.frame.width;
+        rects[index * 4 + 3] = region.frame.height;
+        exclusions[index] = if (region.exclusion) 1 else 0;
+    }
+    if (native_sdk_appkit_set_window_drag_regions(self.host, window_id, label.ptr, label.len, &rects, &exclusions, regions.len) == 0) return error.ViewNotFound;
 }
 
 fn windowChrome(context: ?*anyopaque, window_id: platform_mod.WindowId) platform_mod.WindowChrome {
