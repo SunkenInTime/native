@@ -1699,9 +1699,21 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     };
                 },
                 .bool => @field(options, zig_field) = evalExpr(node, entries, raw, ui, model, scope).truthy(),
-                // Optional bools (`expanded`): the attribute's PRESENCE
-                // makes the state non-null; the value sets it.
-                .optional => @field(options, zig_field) = evalExpr(node, entries, raw, ui, model, scope).truthy(),
+                .optional => |optional| switch (comptime @typeInfo(optional.child)) {
+                    // Optional bools (`expanded`): the attribute's PRESENCE
+                    // makes the state non-null; the value sets it.
+                    .bool => @field(options, zig_field) = evalExpr(node, entries, raw, ui, model, scope).truthy(),
+                    // Preferred width/height preserve an authored zero.
+                    .float => {
+                        comptime requireVariant(variant, &.{ .float, .integer }, node, "expected a number");
+                        @field(options, zig_field) = switch (evalExpr(node, entries, raw, ui, model, scope)) {
+                            .float => |float| float,
+                            .integer => |int| @floatFromInt(int),
+                            else => runtimeFail(optional.child, ui),
+                        };
+                    },
+                    else => @compileError("unsupported optional ElementOptions field"),
+                },
                 .int => {
                     comptime requireVariant(variant, &.{.integer}, node, "expected a whole number");
                     @field(options, zig_field) = switch (evalExpr(node, entries, raw, ui, model, scope)) {

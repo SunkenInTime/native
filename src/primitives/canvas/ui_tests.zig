@@ -668,27 +668,34 @@ test "wrapped text reserves its wrapped height in a definite-width pane" {
     try testing.expect(below_frame.?.y >= wrapped_frame.?.y + wrapped_frame.?.height);
 }
 
-test "explicit sizes are definite except on resizable" {
+test "explicit sizes are preferred while authored min and max stay independent" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
 
     var ui = InboxUi.init(arena_state.allocator());
     const tree = try ui.finalize(ui.column(.{}, .{
-        ui.el(.panel, .{ .width = 240, .height = 40 }, .{}),
-        // Resizable keeps width as the initial/min width only: the engine's
-        // drag handle writes larger frames past it.
+        ui.el(.panel, .{ .width = 240, .height = 40, .min_width = 80, .max_width = 320 }, .{}),
         ui.el(.resizable, .{ .width = 240 }, .{}),
+        ui.el(.panel, .{ .width = 0 }, .{}),
     }));
 
     const panel = tree.root.children[0];
-    try testing.expectEqual(@as(f32, 240), panel.layout.min_size.width);
-    try testing.expectEqual(@as(f32, 240), panel.layout.max_size.width);
-    try testing.expectEqual(@as(f32, 40), panel.layout.min_size.height);
-    try testing.expectEqual(@as(f32, 40), panel.layout.max_size.height);
+    try testing.expect(panel.layout.preferred_width_set);
+    try testing.expect(panel.layout.preferred_height_set);
+    try testing.expectEqual(@as(f32, 240), panel.frame.width);
+    try testing.expectEqual(@as(f32, 40), panel.frame.height);
+    try testing.expectEqual(@as(f32, 80), panel.layout.min_size.width);
+    try testing.expectEqual(@as(f32, 320), panel.layout.max_size.width);
 
     const resizable = tree.root.children[1];
-    try testing.expectEqual(@as(f32, 240), resizable.layout.min_size.width);
+    try testing.expect(resizable.layout.preferred_width_set);
+    try testing.expectEqual(@as(f32, 240), resizable.frame.width);
+    try testing.expectEqual(@as(f32, 0), resizable.layout.min_size.width);
     try testing.expectEqual(@as(f32, 0), resizable.layout.max_size.width);
+
+    const zero = tree.root.children[2];
+    try testing.expect(zero.layout.preferred_width_set);
+    try testing.expectEqual(@as(f32, 0), zero.frame.width);
 }
 
 test "opacity and transform flow to the widget with identity defaults" {
@@ -858,7 +865,8 @@ test "timeline items compose indicator, content, chevron, and a root press" {
     // trailing chevron.
     const badge = findByKind(first, .badge).?;
     try testing.expectEqual(canvas.WidgetVariant.primary, badge.variant);
-    try testing.expectEqual(@as(f32, 10), badge.layout.min_size.width);
+    try testing.expect(badge.layout.preferred_width_set);
+    try testing.expectEqual(@as(f32, 10), badge.frame.width);
     try testing.expectEqual(@as(usize, 1), countKindIn(first, .separator));
     try testing.expect(findSemanticsLabel(first, "Coder finished") != null);
     const chevron = findKindText(first, "›");

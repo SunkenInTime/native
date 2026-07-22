@@ -1632,9 +1632,18 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     else => return self.failVoid(node, "expected a number"),
                 },
                 .bool => @field(options, field) = value.truthy(),
-                // Optional bools (`expanded`): the attribute's PRESENCE
-                // makes the state non-null; the value sets it.
-                .optional => @field(options, field) = value.truthy(),
+                .optional => |optional| switch (@typeInfo(optional.child)) {
+                    // Optional bools (`expanded`): the attribute's PRESENCE
+                    // makes the state non-null; the value sets it.
+                    .bool => @field(options, field) = value.truthy(),
+                    // Preferred width/height preserve an authored zero.
+                    .float => @field(options, field) = switch (value) {
+                        .float => |float| float,
+                        .integer => |int| @floatFromInt(int),
+                        else => return self.failVoid(node, "expected a number"),
+                    },
+                    else => @compileError("unsupported optional ElementOptions field"),
+                },
                 .int => @field(options, field) = switch (value) {
                     .integer => |int| if (int < 0)
                         return self.failVoid(node, "expected a non-negative whole number")

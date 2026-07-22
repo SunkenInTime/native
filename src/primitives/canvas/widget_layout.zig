@@ -367,8 +367,8 @@ fn resolvedChildExtents(
     const cross_band = @max(0, available_cross - crossMarginStart(child, axis) - crossMarginEnd(child, axis));
     const percent_main = percentMainExtent(child, axis, available_main);
     const percent_cross = percentCrossExtent(child, axis, available_cross);
-    const main_determined = percent_main != null or explicitMainExtent(child, axis) > 0;
-    const cross_determined = percent_cross != null or explicitCrossExtent(child, axis) > 0;
+    const main_determined = percent_main != null or hasExplicitMainExtent(child, axis);
+    const cross_determined = percent_cross != null or hasExplicitCrossExtent(child, axis);
     var main = percent_main orelse mainExtentWithBubbleCap(child, axis, available_main, preferredMainExtentInCross(child, axis, cross_band, alignment, tokens));
     var cross = percent_cross orelse preferredCrossExtent(child, axis, cross_band, alignment, tokens);
     const ratio = child.layout.aspect_ratio;
@@ -419,10 +419,24 @@ fn explicitMainExtent(child: Widget, axis: LayoutAxis) f32 {
     };
 }
 
+fn hasExplicitMainExtent(child: Widget, axis: LayoutAxis) bool {
+    return switch (axis) {
+        .horizontal => child.layout.preferred_width_set or child.frame.width > 0,
+        .vertical => child.layout.preferred_height_set or child.frame.height > 0,
+    };
+}
+
 fn explicitCrossExtent(child: Widget, axis: LayoutAxis) f32 {
     return switch (axis) {
         .horizontal => child.frame.height,
         .vertical => child.frame.width,
+    };
+}
+
+fn hasExplicitCrossExtent(child: Widget, axis: LayoutAxis) bool {
+    return switch (axis) {
+        .horizontal => child.layout.preferred_height_set or child.frame.height > 0,
+        .vertical => child.layout.preferred_width_set or child.frame.width > 0,
     };
 }
 
@@ -606,7 +620,7 @@ fn preferredMainExtentInCross(
     alignment: WidgetCrossAlignment,
     tokens: DesignTokens,
 ) f32 {
-    if (axis == .vertical and child.frame.height <= 0 and widgetSubtreeHasTextSpans(child, 0)) {
+    if (axis == .vertical and !hasExplicitMainExtent(child, axis) and widgetSubtreeHasTextSpans(child, 0)) {
         const width = preferredCrossExtent(child, axis, cross_extent, alignment, tokens);
         return clampMainExtent(child, axis, wrappedVerticalExtentForWidth(child, width, tokens, 0));
     }
@@ -2048,7 +2062,7 @@ fn mainExtentWithBubbleCap(child: Widget, axis: LayoutAxis, available: f32, valu
 
 fn bubbleThreadCapEligible(child: Widget) bool {
     if (child.kind != .bubble or child.variant == .ghost) return false;
-    return child.frame.width <= 0 and child.layout.max_size.width <= 0;
+    return !child.layout.preferred_width_set and child.frame.width <= 0 and child.layout.max_size.width <= 0;
 }
 
 fn bubbleThreadWidthCap(child: Widget, available: f32, value: f32) f32 {
@@ -2061,7 +2075,7 @@ fn preferredMainExtent(widget: Widget, axis: LayoutAxis, tokens: DesignTokens) f
         .horizontal => widget.frame.width,
         .vertical => widget.frame.height,
     };
-    return clampMainExtent(widget, axis, if (value > 0) value else intrinsicMainExtent(widget, axis, tokens));
+    return clampMainExtent(widget, axis, if (hasExplicitMainExtent(widget, axis)) value else intrinsicMainExtent(widget, axis, tokens));
 }
 
 fn preferredCrossExtent(widget: Widget, axis: LayoutAxis, available: f32, alignment: WidgetCrossAlignment, tokens: DesignTokens) f32 {
@@ -2077,7 +2091,7 @@ fn preferredCrossExtent(widget: Widget, axis: LayoutAxis, available: f32, alignm
         .horizontal => widget.layout.max_size.height,
         .vertical => widget.layout.max_size.width,
     };
-    if (value > 0) return @max(min_value, boundedByMax(value, max_value));
+    if (hasExplicitCrossExtent(widget, axis)) return @max(min_value, boundedByMax(value, max_value));
     // The cross axis of a vertical container is the child's WIDTH, so
     // the bubble thread contract applies here: a bubble directly in a
     // column HUGS its message up to the thread fraction — even under

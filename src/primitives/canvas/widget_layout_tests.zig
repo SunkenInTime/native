@@ -2586,23 +2586,24 @@ test "widget tree layout widths follow the injected text measure provider" {
     try std.testing.expect(measured_layout.findById(2).?.frame.width > default_layout.findById(2).?.frame.width);
 }
 
-// ------------------------------------------------------ definite sizes
+// ----------------------------------------------------- preferred sizes
 
-test "definite width caps intrinsic content so siblings keep their share" {
+test "preferred width is used instead of intrinsic content" {
     // A sidebar repro shape: a non-growing 360px pane whose single-line text
     // is far wider than the pane. With width as a min-only floor the pane
     // ballooned to its intrinsic text width and starved the growing
-    // sibling; a definite width (min AND max) keeps the pane at 360.
+    // sibling; an authored preferred width keeps the pane at 360 while
+    // leaving independent min/max clamps available to flex layout.
     const long_text = "A long single-line status message that lays out much wider than the pane it sits in, pushing siblings to zero";
     const pane_children = [_]Widget{
         .{ .id = 3, .kind = .text, .text = long_text },
     };
-    const definite = geometry.SizeF.init(360, 0);
     const row_children = [_]Widget{
         .{
             .id = 2,
             .kind = .column,
-            .layout = .{ .min_size = definite, .max_size = definite },
+            .frame = geometry.RectF.init(0, 0, 360, 0),
+            .layout = .{ .preferred_width_set = true },
             .children = &pane_children,
         },
         .{ .id = 4, .kind = .column, .layout = .{ .grow = 1 } },
@@ -2641,10 +2642,10 @@ test "min-only width keeps the classic floor behavior" {
     try std.testing.expect(layout.findById(2).?.frame.width > 360);
 }
 
-test "definite width caps grow distribution" {
+test "authored max width caps grow distribution" {
     const definite = geometry.SizeF.init(200, 0);
     const row_children = [_]Widget{
-        .{ .id = 2, .kind = .column, .layout = .{ .grow = 1, .min_size = definite, .max_size = definite } },
+        .{ .id = 2, .kind = .column, .layout = .{ .grow = 1, .max_size = definite } },
         .{ .id = 3, .kind = .column, .layout = .{ .grow = 1 } },
     };
     const root = Widget{ .id = 1, .kind = .row, .children = &row_children };
@@ -2655,10 +2656,9 @@ test "definite width caps grow distribution" {
     try expectLayoutFrame(layout, 3, geometry.RectF.init(200, 0, 400, 100));
 }
 
-test "definite height caps cross-axis stretch in a row" {
-    const definite = geometry.SizeF.init(0, 40);
+test "preferred height overrides cross-axis stretch in a row" {
     const row_children = [_]Widget{
-        .{ .id = 2, .kind = .column, .layout = .{ .grow = 1, .min_size = definite, .max_size = definite } },
+        .{ .id = 2, .kind = .column, .frame = geometry.RectF.init(0, 0, 0, 40), .layout = .{ .grow = 1, .preferred_height_set = true } },
     };
     const root = Widget{ .id = 1, .kind = .row, .children = &row_children };
 
@@ -2667,16 +2667,27 @@ test "definite height caps cross-axis stretch in a row" {
     try expectLayoutFrame(layout, 2, geometry.RectF.init(0, 0, 300, 40));
 }
 
-test "definite size caps stack children instead of stretching them" {
-    const definite = geometry.SizeF.init(120, 60);
+test "preferred size caps stack children instead of stretching them" {
     const stack_children = [_]Widget{
-        .{ .id = 2, .kind = .panel, .layout = .{ .min_size = definite, .max_size = definite } },
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 120, 60), .layout = .{ .preferred_width_set = true, .preferred_height_set = true } },
     };
     const root = Widget{ .id = 1, .kind = .stack, .children = &stack_children };
 
     var nodes: [4]WidgetLayoutNode = undefined;
     const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 500, 400), &nodes);
     try expectLayoutFrame(layout, 2, geometry.RectF.init(0, 0, 120, 60));
+}
+
+test "explicit zero preferred width remains distinct from intrinsic sizing" {
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .text, .text = "intrinsic", .layout = .{ .preferred_width_set = true } },
+        .{ .id = 3, .kind = .text, .text = "intrinsic" },
+    };
+    const root = Widget{ .id = 1, .kind = .row, .children = &children };
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 300, 40), &nodes);
+    try std.testing.expectEqual(@as(f32, 0), layout.findById(2).?.frame.width);
+    try std.testing.expect(layout.findById(3).?.frame.width > 0);
 }
 
 // ------------------------------------------------- separator orientation

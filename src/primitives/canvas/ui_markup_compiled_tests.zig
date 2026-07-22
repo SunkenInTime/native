@@ -1135,9 +1135,11 @@ test "compiled wrap attribute matches the interpreter and the hand-written view"
     try testing.expectEqual(canvas.TextOverflow.clip, interpreted.root.children[3].text_overflow);
     try testing.expectEqual(canvas.TextOverflow.ellipsis, compiled.root.children[1].text_overflow);
     try testing.expectEqual(canvas.TextOverflow.ellipsis, interpreted.root.children[1].text_overflow);
-    // The definite width lands in both bounds.
-    try testing.expectEqual(@as(f32, 360), compiled.root.layout.min_size.width);
-    try testing.expectEqual(@as(f32, 360), compiled.root.layout.max_size.width);
+    // The authored width lands as a preferred size, independent of bounds.
+    try testing.expect(compiled.root.layout.preferred_width_set);
+    try testing.expectEqual(@as(f32, 360), compiled.root.frame.width);
+    try testing.expectEqual(@as(f32, 0), compiled.root.layout.min_size.width);
+    try testing.expectEqual(@as(f32, 0), compiled.root.layout.max_size.width);
 }
 
 // ------------------------------------------------ text size rung parity

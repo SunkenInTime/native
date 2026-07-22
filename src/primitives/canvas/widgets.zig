@@ -362,11 +362,14 @@ pub const WidgetLayoutStyle = struct {
     /// Anchored floating placement: non-null makes this widget a floating
     /// surface positioned against its parent (see `WidgetAnchor`).
     anchor: ?WidgetAnchor = null,
+    /// Whether the matching `Widget.frame` axis is an authored preferred
+    /// size. The bit is separate from the value so an explicit zero remains
+    /// distinct from an intrinsic/unset axis.
+    preferred_width_set: bool = false,
+    preferred_height_set: bool = false,
     min_size: geometry.SizeF = .{},
-    /// Per-axis upper bound; 0 leaves the axis unbounded. An explicit
-    /// author size is definite: the ui builder writes `width`/`height`
-    /// into both `min_size` and `max_size`, so intrinsic content can
-    /// neither shrink nor silently grow the box past it.
+    /// Per-axis upper bound; 0 leaves the axis unbounded. Authored preferred
+    /// sizes are independent of min/max and participate as flex bases.
     max_size: geometry.SizeF = .{},
     /// Per-axis percentage of the parent's content box. 0 leaves the axis
     /// intrinsic/explicit; values are clamped to 0...100 by layout.
