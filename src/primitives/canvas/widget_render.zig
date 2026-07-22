@@ -649,7 +649,7 @@ fn emitImmediateCanvas(builder: *Builder, widget: Widget) Error!void {
                 .color = value.color,
                 .inset = value.inset,
             }),
-            .text_shadow => continue,
+            .text_shadow, .text_font => continue,
             .fill_rect => |value| try builder.fillRect(.{
                 .id = id,
                 .rect = value.rect.translate(.{ .dx = widget.frame.x, .dy = widget.frame.y }),

@@ -9,6 +9,7 @@ const chart_model = @import("chart.zig");
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
 const ImageId = canvas.ImageId;
+const FontId = canvas.FontId;
 const Color = canvas.Color;
 const Affine = canvas.Affine;
 const ImageFit = canvas.ImageFit;
@@ -774,6 +775,9 @@ pub const ImmediateCanvasCommand = union(enum) {
     text_style: WidgetTextStyle,
     box_shadow: struct { offset: geometry.OffsetF = .{}, blur: f32 = 0, spread: f32 = 0, color: Color, inset: bool = false },
     text_shadow: canvas.TextShadow,
+    /// Per-text registered/built-in face override. Retaining this in the
+    /// existing command slice avoids enlarging every Widget for a rare style.
+    text_font: FontId,
 };
 
 /// Where a control sits inside a FLUSH button group (`button_group`

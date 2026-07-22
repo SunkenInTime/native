@@ -787,6 +787,7 @@ test "widget text alignment emits local text layout options" {
             .blur = 3,
             .color = Color.rgba8(10, 20, 30, 128),
         } },
+        .{ .text_font = canvas.min_registered_font_id },
     };
     const centered = Widget{
         .id = 1,
@@ -805,7 +806,7 @@ test "widget text alignment emits local text layout options" {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 1)), text.id);
             try std.testing.expectApproxEqAbs(@as(f32, 10), text.origin.x, 0.001);
             try std.testing.expectApproxEqAbs(@as(f32, 34.875), text.origin.y, 0.001);
-            try std.testing.expectEqual(@as(FontId, 4), text.font_id);
+            try std.testing.expectEqual(@as(FontId, canvas.min_registered_font_id), text.font_id);
             try std.testing.expectApproxEqAbs(@as(f32, 13), text.size, 0.001);
             try std.testing.expect(text.text_layout != null);
             try std.testing.expectEqual(@as(f32, 100), text.text_layout.?.max_width);
@@ -821,6 +822,27 @@ test "widget text alignment emits local text layout options" {
         },
         else => return error.TestUnexpectedResult,
     }
+
+    const custom_span = [_]canvas.TextSpan{.{ .text = "span", .weight = .bold }};
+    const custom_paragraph = Widget{
+        .id = 3,
+        .kind = .text,
+        .frame = geometry.RectF.init(0, 0, 100, 20),
+        .spans = &custom_span,
+        .immediate_commands = &text_effects,
+    };
+    var paragraph_commands: [3]CanvasCommand = undefined;
+    var paragraph_builder = Builder.init(&paragraph_commands);
+    try emitWidgetTree(&paragraph_builder, custom_paragraph, tokens);
+    var saw_custom_span = false;
+    for (paragraph_builder.displayList().commands) |command| switch (command) {
+        .draw_text => |text| {
+            try std.testing.expectEqual(@as(FontId, canvas.min_registered_font_id), text.font_id);
+            saw_custom_span = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_custom_span);
 
     const end = Widget{
         .id = 2,

@@ -55,7 +55,16 @@ fn scaledPlainTextSize(widget: Widget, base: f32) f32 {
 /// Face used by a plain text leaf. It mirrors span weight resolution so
 /// clamped text can retain the same font styling without becoming a paragraph.
 pub fn widgetTextFontId(widget: Widget, tokens: DesignTokens) canvas.FontId {
+    if (widgetTextFontOverride(widget)) |font_id| return font_id;
     return text_spans_model.textSpanFontId(.{ .weight = widget.textStyle().weight }, tokens.typography);
+}
+
+pub fn widgetTextFontOverride(widget: Widget) ?canvas.FontId {
+    for (widget.immediate_commands) |command| switch (command) {
+        .text_font => |font_id| if (font_id != 0) return font_id,
+        else => {},
+    };
+    return null;
 }
 
 pub fn widgetLabelTextSize(widget: Widget, tokens: DesignTokens) f32 {
@@ -107,6 +116,8 @@ pub fn textWrapMaxWidth(tokens: DesignTokens, width: f32) f32 {
 /// painted lines are therefore always <= the reserved line count.
 pub fn widgetTextSpanLayoutOptions(widget: Widget, tokens: DesignTokens, max_width: f32) text_spans_model.TextSpanLayoutOptions {
     const text_style = widget.textStyle();
+    var typography = tokens.typography;
+    if (widgetTextFontOverride(widget)) |font_id| typography.font_id = font_id;
     return .{
         .size = widgetBodyTextSize(widget, tokens),
         .line_height = text_style.line_height,
@@ -115,7 +126,7 @@ pub fn widgetTextSpanLayoutOptions(widget: Widget, tokens: DesignTokens, max_wid
         .max_width = max_width,
         .wrap = .word,
         .alignment = widget.text_alignment,
-        .typography = tokens.typography,
+        .typography = typography,
         .measure = tokens.text_measure,
     };
 }
