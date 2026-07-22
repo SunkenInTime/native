@@ -27,6 +27,24 @@ const measureTextWidthForFont = text_model.measureTextWidthForFont;
 fn measuredTextWidth(tokens: DesignTokens, text: []const u8, size: f32) f32 {
     return measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, text, size);
 }
+
+fn styledWidgetTextWidth(widget: Widget, tokens: DesignTokens, size: f32) f32 {
+    if (widget.text_letter_spacing == 0 and !widget.text_tabular_numbers) return measuredTextWidth(tokens, widget.text, size);
+    const options = text_model.TextLayoutOptions{
+        .letter_spacing = widget.text_letter_spacing,
+        .tabular_numbers = widget.text_tabular_numbers,
+        .measure = tokens.text_measure,
+    };
+    var width: f32 = 0;
+    const tabular_advance = text_model.styledTextTabularAdvance(options, tokens.typography.font_id, size);
+    var cursor: usize = 0;
+    while (cursor < widget.text.len) {
+        const next = text_model.nextTextOffset(widget.text, cursor);
+        width += text_model.styledTextClusterAdvanceWithTabular(widget.text, tokens.typography.font_id, size, 0, cursor, next, options, tabular_advance);
+        cursor = next;
+    }
+    return width;
+}
 const gridColumnCount = widget_tree.gridColumnCount;
 const gridRowCount = widget_tree.gridRowCount;
 const saturatingU32 = widget_tree.saturatingU32;
@@ -863,7 +881,7 @@ fn widgetIsSpanParagraph(widget: Widget) bool {
 
 fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize) bool {
     if (depth >= max_widget_depth) return false;
-    if (widgetIsSpanParagraph(widget)) return true;
+    if (widgetIsSpanParagraph(widget) or (widget.kind == .text and widget.text_max_lines > 0)) return true;
     for (widget.children) |child| {
         if (widgetSubtreeHasTextSpans(child, depth + 1)) return true;
     }
@@ -883,6 +901,8 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
     const content_height: f32 = switch (widget.kind) {
         .text, .data_cell => if (widget.spans.len > 0)
             spanParagraphHeight(widget, inner_width, tokens)
+        else if (widget.kind == .text and widget.text_max_lines > 0)
+            clampedTextHeight(widget, inner_width, tokens)
         else
             return preferredMainExtent(widget, .vertical, tokens),
         .column, .list, .data_grid, .table, .menu_surface, .dropdown_menu => blk: {
@@ -1024,6 +1044,29 @@ fn spanParagraphHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
         widget.spans,
         widgetTextSpanLayoutOptions(widget, tokens, width),
     );
+}
+
+fn clampedTextHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
+    const size = widgetBodyTextSize(widget, tokens);
+    const line_height = if (widget.text_line_height > 0) widget.text_line_height else widgetLineHeight(size);
+    const draw = text_model.DrawText{
+        .font_id = tokens.typography.font_id,
+        .size = size,
+        .origin = geometry.PointF.init(0, size),
+        .color = tokens.colors.text,
+        .text = widget.text,
+    };
+    var lines: [text_spans_model.max_text_span_lines_per_paragraph]text_model.TextLine = undefined;
+    const layout = text_model.layoutTextRun(draw, .{
+        .max_width = width,
+        .line_height = line_height,
+        .letter_spacing = widget.text_letter_spacing,
+        .tabular_numbers = widget.text_tabular_numbers,
+        .max_lines = widget.text_max_lines,
+        .wrap = .word,
+        .measure = tokens.text_measure,
+    }, &lines) catch return line_height * @as(f32, @floatFromInt(widget.text_max_lines));
+    return line_height * @as(f32, @floatFromInt(layout.lineCount()));
 }
 
 /// Position a span paragraph's link hit-area children. By convention the
@@ -1966,8 +2009,8 @@ fn intrinsicTextWidgetSize(widget: Widget, tokens: DesignTokens, text_size: f32)
         );
     }
     return geometry.SizeF.init(
-        measuredTextWidth(tokens, widget.text, text_size),
-        widgetLineHeight(text_size),
+        styledWidgetTextWidth(widget, tokens, text_size),
+        if (widget.text_line_height > 0) widget.text_line_height else widgetLineHeight(text_size),
     );
 }
 

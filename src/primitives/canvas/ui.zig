@@ -545,6 +545,14 @@ pub fn Ui(comptime Msg: type) type {
             /// status bars, and surface titles consume it. Controls that
             /// own their label placement (buttons, badges) ignore it.
             text_alignment: canvas.TextAlign = .start,
+            /// Explicit logical-pixel line height; 0 keeps the token-derived default.
+            text_line_height: f32 = 0,
+            /// Additional logical pixels between text clusters.
+            text_letter_spacing: f32 = 0,
+            /// Normalize ASCII digits to the widest digit advance.
+            text_tabular_numbers: bool = false,
+            /// Clamp wrapped text to this many lines; 0 is unlimited.
+            text_max_lines: usize = 0,
             /// Fixed column count for `grid` containers. 0 (the default)
             /// keeps the derived near-square column count.
             columns: usize = 0,
@@ -2255,7 +2263,7 @@ pub fn Ui(comptime Msg: type) type {
             // `widget.text`), so wrapping, intrinsic sizing, wrapped
             // height reservation, and rendering are all the existing span
             // path — no forked text pipeline.
-            if (node.wrap == true and widget.kind == .text and widget.spans.len == 0 and widget.text.len > 0) {
+            if (node.wrap == true and widget.text_max_lines == 0 and widget.kind == .text and widget.spans.len == 0 and widget.text.len > 0) {
                 const spans = try self.arena.alloc(canvas.TextSpan, 1);
                 spans[0] = .{ .text = widget.text };
                 widget.spans = spans;
@@ -2547,6 +2555,10 @@ pub fn Ui(comptime Msg: type) type {
                 .icon = options.icon,
                 .icon_placement = options.icon_placement,
                 .text_alignment = options.text_alignment,
+                .text_line_height = options.text_line_height,
+                .text_letter_spacing = options.text_letter_spacing,
+                .text_tabular_numbers = options.text_tabular_numbers,
+                .text_max_lines = options.text_max_lines,
                 .text_overflow = options.overflow,
                 .autofocus = options.autofocus,
                 .image_id = options.image,

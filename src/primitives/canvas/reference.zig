@@ -754,9 +754,13 @@ pub const ReferenceRenderSurface = struct {
         const end = @min(value.text.len, line.text_start + line.paintedTextLen());
         var text_offset: usize = line.text_start;
         var x = line.bounds.x;
+        const tabular_advance = if (value.text_layout) |options| text_model.styledTextTabularAdvance(options, value.font_id, value.size) else 0;
         while (text_offset < end) {
             const next_offset = nextTextOffset(value.text, text_offset);
-            const advance = measureTextAdvance(measure, value.font_id, value.size, value.text, line.text_start, text_offset, next_offset);
+            const advance = if (value.text_layout) |options|
+                text_model.styledTextClusterAdvanceWithTabular(value.text, value.font_id, value.size, line.text_start, text_offset, next_offset, options, tabular_advance)
+            else
+                measureTextAdvance(measure, value.font_id, value.size, value.text, line.text_start, text_offset, next_offset);
             defer {
                 text_offset = next_offset;
                 x += advance;
@@ -1083,7 +1087,6 @@ fn referenceScaleCommand(command: RenderCommand, scale: f32) RenderCommand {
 fn referenceScaleRect(rect: geometry.RectF, scale: f32) geometry.RectF {
     return geometry.RectF.init(rect.x * scale, rect.y * scale, rect.width * scale, rect.height * scale);
 }
-
 
 fn referencePixelCenter(x: usize, y: usize) geometry.PointF {
     return geometry.PointF.init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);

@@ -137,6 +137,9 @@ fn resourceHashOptionalTextLayoutOptions(hash: u64, options: ?TextLayoutOptions)
         var next = resourceHashU8(hash, 1);
         next = resourceHashF32(next, nonNegative(value.max_width));
         next = resourceHashF32(next, nonNegative(value.line_height));
+        next = resourceHashF32(next, value.letter_spacing);
+        next = resourceHashUsize(next, value.max_lines);
+        next = resourceHashU8(next, @intFromBool(value.tabular_numbers));
         next = resourceHashEnum(next, @intFromEnum(value.wrap));
         next = resourceHashEnum(next, @intFromEnum(value.alignment));
         // The default overflow stays out of the hash so fingerprints of

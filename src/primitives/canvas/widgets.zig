@@ -805,6 +805,10 @@ pub const Widget = struct {
     /// Icon-only buttons center the glyph regardless.
     icon_placement: WidgetIconPlacement = .leading,
     text_alignment: TextAlign = .start,
+    text_line_height: f32 = 0,
+    text_letter_spacing: f32 = 0,
+    text_tabular_numbers: bool = false,
+    text_max_lines: usize = 0,
     /// Explicit single-line mode for plain `.text` leaves
     /// (`ElementOptions.wrap = false` / markup `wrap="false"`). Plain
     /// leaves paint one line either way (measurement treats them as one

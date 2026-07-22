@@ -13,6 +13,19 @@ fn layout(spans: []const TextSpan, options: text_spans.TextSpanLayoutOptions, st
     return text_spans.layoutTextSpans(spans, options, storage);
 }
 
+test "span paragraphs apply tracking and tabular digit normalization" {
+    const plain = [_]TextSpan{.{ .text = "1111" }};
+    const wide = [_]TextSpan{.{ .text = "8888" }};
+    var plain_runs: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    var wide_runs: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;
+    const options = text_spans.TextSpanLayoutOptions{ .size = 10, .max_width = 200, .letter_spacing = 1.5, .tabular_numbers = true };
+    const ones = layout(&plain, options, &plain_runs);
+    const eights = layout(&wide, options, &wide_runs);
+    try testing.expectApproxEqAbs(ones.size.width, eights.size.width, 0.001);
+    try testing.expectApproxEqAbs(eights.size.width, eights.runs[0].width, 0.001);
+    try testing.expect(eights.size.width > text_metrics.estimateTextWidth("8888", 10));
+}
+
 test "single span word-wraps deterministically with the estimator" {
     const spans = [_]TextSpan{.{ .text = "Hello world" }};
     var runs: [text_spans.max_text_span_runs_per_paragraph]TextSpanRun = undefined;

@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const json = @import("json");
 const canvas = @import("root.zig");
@@ -182,9 +183,12 @@ pub fn writeCommandJson(command: CanvasCommand, writer: anytype) !void {
 }
 
 fn writeTextLayoutOptionsJson(options: TextLayoutOptions, writer: anytype) !void {
-    try writer.print("{{\"maxWidth\":{d},\"lineHeight\":{d},\"wrap\":", .{
+    try writer.print("{{\"maxWidth\":{d},\"lineHeight\":{d},\"letterSpacing\":{d},\"tabularNumbers\":{},\"maxLines\":{d},\"wrap\":", .{
         nonNegative(options.max_width),
         nonNegative(options.line_height),
+        options.letter_spacing,
+        options.tabular_numbers,
+        options.max_lines,
     });
     try json.writeString(writer, @tagName(options.wrap));
     try writer.writeAll(",\"align\":");
@@ -844,13 +848,16 @@ fn writeTextLayoutCacheActionJson(action: TextLayoutCacheAction, writer: anytype
 }
 
 fn writeTextLayoutKeyJson(key: TextLayoutKey, writer: anytype) !void {
-    try writer.print("{{\"fontId\":{d},\"size\":{d},\"origin\":[{d},{d}],\"maxWidth\":{d},\"lineHeight\":{d},\"wrap\":", .{
+    try writer.print("{{\"fontId\":{d},\"size\":{d},\"origin\":[{d},{d}],\"maxWidth\":{d},\"lineHeight\":{d},\"letterSpacing\":{d},\"tabularNumbers\":{},\"maxLines\":{d},\"wrap\":", .{
         key.font_id,
         key.size,
         key.origin.x,
         key.origin.y,
         key.max_width,
         key.line_height,
+        key.letter_spacing,
+        key.tabular_numbers,
+        key.max_lines,
     });
     try json.writeString(writer, @tagName(key.wrap));
     try writer.writeAll(",\"align\":");
@@ -1134,6 +1141,9 @@ pub fn canvasGpuCommandFingerprint(command: CanvasGpuCommand) u64 {
             h = hash.resourceHashU8(h, 1);
             h = hash.resourceHashF32(h, nonNegative(options.max_width));
             h = hash.resourceHashF32(h, nonNegative(options.line_height));
+            h = hash.resourceHashF32(h, options.letter_spacing);
+            h = hash.resourceHashUsize(h, options.max_lines);
+            h = hash.resourceHashU8(h, @intFromBool(options.tabular_numbers));
             h = hash.resourceHashEnum(h, @intFromEnum(options.wrap));
             h = hash.resourceHashEnum(h, @intFromEnum(options.alignment));
             // Default overflow stays out of the hash: fingerprints of
@@ -1423,7 +1433,8 @@ fn writeBinaryImage(image: CanvasGpuImage, writer: anytype) !void {
 
 /// Text draw: font_id u64 | size f32 | origin f32[2] | color f32[4]
 /// | text u32+bytes | has_layout u8 | layout { max_width f32,
-/// line_height f32, wrap u8 (0 none / 1 word / 2 character), align u8
+/// line_height f32, letter_spacing f32, tabular_numbers u8, max_lines u32,
+/// wrap u8 (0 none / 1 word / 2 character), align u8
 /// (0 start / 1 center / 2 end), has_lines u8, [line_count u32, lines
 /// { x f32, baseline f32, text u32+bytes }] }. Lines carry the same
 /// engine-measured breaks the JSON encoding serializes; has_lines = 0
@@ -1442,6 +1453,9 @@ fn writeBinaryText(text: CanvasGpuText, writer: anytype) !void {
     try writer.writeByte(1);
     try writeBinaryF32(nonNegative(options.max_width), writer);
     try writeBinaryF32(nonNegative(options.line_height), writer);
+    try writeBinaryF32(options.letter_spacing, writer);
+    try writer.writeByte(@intFromBool(options.tabular_numbers));
+    try writer.writeInt(u32, @intCast(@min(options.max_lines, std.math.maxInt(u32))), .little);
     try writer.writeByte(switch (options.wrap) {
         .none => 0,
         .word => 1,

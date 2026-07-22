@@ -94,6 +94,9 @@ pub fn textWrapMaxWidth(tokens: DesignTokens, width: f32) f32 {
 pub fn widgetTextSpanLayoutOptions(widget: Widget, tokens: DesignTokens, max_width: f32) text_spans_model.TextSpanLayoutOptions {
     return .{
         .size = widgetBodyTextSize(widget, tokens),
+        .line_height = widget.text_line_height,
+        .letter_spacing = widget.text_letter_spacing,
+        .tabular_numbers = widget.text_tabular_numbers,
         .max_width = max_width,
         .wrap = .word,
         .alignment = widget.text_alignment,

@@ -1,0 +1,1 @@
+feature: **Retained text styling breadth**: text widgets expose alignment, explicit line height, cluster tracking, tabular figures, and bounded wrapped-line clamping with measured last-line ellipsis across the reference and macOS packet paths.

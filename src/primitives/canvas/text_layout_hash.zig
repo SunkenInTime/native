@@ -31,6 +31,9 @@ pub fn textLayoutKey(text: DrawText, options: TextLayoutOptions) TextLayoutKey {
         .origin = text.origin,
         .max_width = nonNegative(options.max_width),
         .line_height = nonNegative(options.line_height),
+        .letter_spacing = options.letter_spacing,
+        .tabular_numbers = options.tabular_numbers,
+        .max_lines = options.max_lines,
         .wrap = options.wrap,
         .alignment = options.alignment,
         .overflow = options.overflow,
@@ -45,6 +48,9 @@ fn textLayoutFingerprint(text: DrawText, options: TextLayoutOptions) u64 {
     hash = resourceHashU64(hash, drawTextFingerprint(text));
     hash = resourceHashF32(hash, nonNegative(options.max_width));
     hash = resourceHashF32(hash, nonNegative(options.line_height));
+    hash = resourceHashF32(hash, options.letter_spacing);
+    hash = resourceHashUsize(hash, options.max_lines);
+    hash = resourceHashU8(hash, @intFromBool(options.tabular_numbers));
     hash = resourceHashEnum(hash, @intFromEnum(options.wrap));
     hash = resourceHashEnum(hash, @intFromEnum(options.alignment));
     hash = hashTextOverflow(hash, options.overflow);
@@ -87,6 +93,9 @@ pub fn textLayoutKeysEqual(a: TextLayoutKey, b: TextLayoutKey) bool {
         a.origin.y == b.origin.y and
         a.max_width == b.max_width and
         a.line_height == b.line_height and
+        a.letter_spacing == b.letter_spacing and
+        a.tabular_numbers == b.tabular_numbers and
+        a.max_lines == b.max_lines and
         a.wrap == b.wrap and
         a.alignment == b.alignment and
         a.overflow == b.overflow and
@@ -100,6 +109,9 @@ fn resourceHashOptionalTextLayoutOptions(hash: u64, options: ?TextLayoutOptions)
         var next = resourceHashU8(hash, 1);
         next = resourceHashF32(next, nonNegative(value.max_width));
         next = resourceHashF32(next, nonNegative(value.line_height));
+        next = resourceHashF32(next, value.letter_spacing);
+        next = resourceHashUsize(next, value.max_lines);
+        next = resourceHashU8(next, @intFromBool(value.tabular_numbers));
         next = resourceHashEnum(next, @intFromEnum(value.wrap));
         next = resourceHashEnum(next, @intFromEnum(value.alignment));
         next = hashTextOverflow(next, value.overflow);

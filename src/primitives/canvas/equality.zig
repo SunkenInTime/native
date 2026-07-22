@@ -155,6 +155,9 @@ pub fn optionalTextLayoutOptionsEqual(a: ?TextLayoutOptions, b: ?TextLayoutOptio
 pub fn textLayoutOptionsEqual(a: TextLayoutOptions, b: TextLayoutOptions) bool {
     return nonNegative(a.max_width) == nonNegative(b.max_width) and
         nonNegative(a.line_height) == nonNegative(b.line_height) and
+        a.letter_spacing == b.letter_spacing and
+        a.tabular_numbers == b.tabular_numbers and
+        a.max_lines == b.max_lines and
         a.wrap == b.wrap and
         a.alignment == b.alignment and
         a.overflow == b.overflow;

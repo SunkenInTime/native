@@ -989,7 +989,7 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
     // stays the selection/copy source of truth — or the explicit clip
     // opt-in (`overflow="clip"`), which keeps the historical hard-cut
     // behind a frame clip for fixed-format content.
-    const clip_overflow = widget.text_overflow == .clip;
+    const clip_overflow = widget.text_overflow == .clip or widget.text_max_lines > 0;
     if (clip_overflow) {
         try builder.pushClip(.{ .id = widgetPartId(widget.id, 9), .rect = widget.frame });
     }
@@ -1004,8 +1004,11 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
         .text = widget.text,
         .text_layout = .{
             .max_width = textWrapMaxWidth(tokens, widget.frame.width),
-            .line_height = text_size * 1.25,
-            .wrap = .none,
+            .line_height = if (widget.text_line_height > 0) widget.text_line_height else text_size * 1.25,
+            .letter_spacing = widget.text_letter_spacing,
+            .tabular_numbers = widget.text_tabular_numbers,
+            .max_lines = widget.text_max_lines,
+            .wrap = if (widget.text_max_lines > 0) .word else .none,
             .alignment = widget.text_alignment,
             .overflow = widget.text_overflow,
             .measure = tokens.text_measure,
@@ -1104,6 +1107,8 @@ fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
             .text_layout = .{
                 .max_width = 0,
                 .line_height = layout.line_height,
+                .letter_spacing = widget.text_letter_spacing,
+                .tabular_numbers = widget.text_tabular_numbers,
                 .wrap = .none,
                 .alignment = .start,
                 .measure = tokens.text_measure,

@@ -779,11 +779,16 @@ test "widget text alignment emits local text layout options" {
         .frame = geometry.RectF.init(10, 20, 100, 20),
         .text = "Hi",
         .text_alignment = .center,
+        .text_line_height = 18,
+        .text_letter_spacing = 1.5,
+        .text_tabular_numbers = true,
+        .text_max_lines = 2,
     };
-    var center_commands: [1]CanvasCommand = undefined;
+    var center_commands: [3]CanvasCommand = undefined;
     var center_builder = Builder.init(&center_commands);
     try emitWidgetTree(&center_builder, centered, tokens);
-    switch (center_builder.displayList().commands[0]) {
+    try std.testing.expectEqual(@as(usize, 3), center_builder.displayList().commandCount());
+    switch (center_builder.displayList().commands[1]) {
         .draw_text => |text| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 1)), text.id);
             try std.testing.expectApproxEqAbs(@as(f32, 10), text.origin.x, 0.001);
@@ -791,6 +796,11 @@ test "widget text alignment emits local text layout options" {
             try std.testing.expect(text.text_layout != null);
             try std.testing.expectEqual(@as(f32, 100), text.text_layout.?.max_width);
             try std.testing.expectEqual(TextAlign.center, text.text_layout.?.alignment);
+            try std.testing.expectEqual(@as(f32, 18), text.text_layout.?.line_height);
+            try std.testing.expectEqual(@as(f32, 1.5), text.text_layout.?.letter_spacing);
+            try std.testing.expect(text.text_layout.?.tabular_numbers);
+            try std.testing.expectEqual(@as(usize, 2), text.text_layout.?.max_lines);
+            try std.testing.expectEqual(TextWrap.word, text.text_layout.?.wrap);
         },
         else => return error.TestUnexpectedResult,
     }

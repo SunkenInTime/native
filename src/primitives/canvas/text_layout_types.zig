@@ -48,6 +48,12 @@ pub const TextAlign = enum {
 pub const TextLayoutOptions = struct {
     max_width: f32 = 0,
     line_height: f32 = 0,
+    /// Additional advance between text clusters, in logical pixels.
+    letter_spacing: f32 = 0,
+    /// Normalize ASCII digit advances to the widest digit in the face.
+    tabular_numbers: bool = false,
+    /// 0 is unlimited. A positive limit elides the final visible line.
+    max_lines: usize = 0,
     wrap: TextWrap = .word,
     alignment: TextAlign = .start,
     /// Single-line overflow policy; only consulted when `wrap == .none`
@@ -119,6 +125,9 @@ pub const TextLayoutKey = struct {
     origin: geometry.PointF = .{},
     max_width: f32 = 0,
     line_height: f32 = 0,
+    letter_spacing: f32 = 0,
+    tabular_numbers: bool = false,
+    max_lines: usize = 0,
     wrap: TextWrap = .word,
     alignment: TextAlign = .start,
     overflow: TextOverflow = .ellipsis,
