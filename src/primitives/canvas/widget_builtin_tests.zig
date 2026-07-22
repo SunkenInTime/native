@@ -416,6 +416,58 @@ test "cover image in padded fixed stack cannot erase the stack rounded clip" {
     try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 17, 10);
 }
 
+test "interaction styles resolve all four channels with pressed precedence" {
+    const hover_ink = Color.rgb8(210, 20, 30);
+    const hovered_text = Widget{
+        .id = 5,
+        .kind = .text,
+        .frame = geometry.RectF.init(0, 0, 80, 20),
+        .text = "Hover",
+        .state = .{ .hovered = true },
+        .immediate_commands = &.{.{ .hover_style = .{ .foreground = hover_ink, .opacity = 0.4 } }},
+    };
+    var text_commands: [4]CanvasCommand = undefined;
+    var text_builder = Builder.init(&text_commands);
+    try emitWidgetTree(&text_builder, hovered_text, DesignTokens{});
+    const text_list = text_builder.displayList();
+    try std.testing.expectEqual(@as(usize, 3), text_list.commands.len);
+    switch (text_list.commands[0]) {
+        .push_opacity => |opacity| try std.testing.expectEqual(@as(f32, 0.4), opacity),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (text_list.commands[1]) {
+        .draw_text => |text| try std.testing.expectEqualDeep(hover_ink, text.color),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(text_list.commands[2] == .pop_opacity);
+
+    const pressed_background = Color.rgb8(30, 40, 50);
+    const pressed_border = Color.rgb8(220, 230, 240);
+    const active_panel = Widget{
+        .id = 6,
+        .kind = .panel,
+        .frame = geometry.RectF.init(0, 0, 80, 40),
+        .state = .{ .hovered = true, .pressed = true },
+        .immediate_commands = &.{
+            .{ .hover_style = .{ .background = Color.rgb8(1, 2, 3), .border = Color.rgb8(4, 5, 6) } },
+            .{ .pressed_style = .{ .background = pressed_background, .border = pressed_border } },
+        },
+    };
+    var panel_commands: [8]CanvasCommand = undefined;
+    var panel_builder = Builder.init(&panel_commands);
+    try emitWidgetTree(&panel_builder, active_panel, DesignTokens{});
+    const panel_list = panel_builder.displayList();
+    const fill = switch (panel_list.findCommandById(widgetPartId(6, 2)).?.command) {
+        .fill_rounded_rect => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try expectFillColor(pressed_background, fill.fill);
+    const border = switch (panel_list.findCommandById(widgetPartId(6, 3)).?.command) {
+        .stroke_rect => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try expectFillColor(pressed_border, border.stroke.fill);
+}
 const toggleWidgetKnobCommandId = support.toggleWidgetKnobCommandId;
 const toggleWidgetKnobTravel = support.toggleWidgetKnobTravel;
 const textSelectionForWidgetPoint = support.textSelectionForWidgetPoint;

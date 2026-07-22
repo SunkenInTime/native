@@ -399,6 +399,17 @@ pub const WidgetLayoutStyle = struct {
 /// override and resolves through the existing non-negative clamp.
 pub const unset_widget_corner_radius = -std.math.inf(f32);
 
+/// Optional visual overrides for one pointer-interaction state. A null
+/// channel inherits the base `WidgetStyle` channel, so authors can change one
+/// property without restating the other three. Pressed wins over hovered when
+/// both states are true.
+pub const WidgetInteractionStyle = struct {
+    background: ?Color = null,
+    foreground: ?Color = null,
+    opacity: ?f32 = null,
+    border: ?Color = null,
+};
+
 pub const WidgetStyle = struct {
     background: ?Color = null,
     foreground: ?Color = null,
@@ -786,6 +797,11 @@ pub const ImmediateCanvasCommand = union(enum) {
     text_font: FontId,
     /// Retained vector geometry for a path-authored icon. Metadata only.
     icon_path: WidgetIconPath,
+    /// Rare retained visual metadata rides the existing command slice rather
+    /// than enlarging every Widget. Emitters consume these entries as style;
+    /// immediate canvases never draw them.
+    hover_style: WidgetInteractionStyle,
+    pressed_style: WidgetInteractionStyle,
 };
 
 /// Where a control sits inside a FLUSH button group (`button_group`

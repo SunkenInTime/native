@@ -638,6 +638,11 @@ pub fn Ui(comptime Msg: type) type {
             /// meaningful with a nonzero `resize_duration`.
             resize_origin: f32 = -1,
             style: canvas.WidgetStyle = .{},
+            /// Pointer-state overrides are values at the builder boundary;
+            /// `el` copies non-null records into its frame arena so retained
+            /// Widgets carry only two optional pointers.
+            hover_style: ?canvas.WidgetInteractionStyle = null,
+            pressed_style: ?canvas.WidgetInteractionStyle = null,
             /// Named token references resolved against design tokens in
             /// `finalizeWithTokens`; explicit `style` values win.
             style_tokens: StyleTokenRefs = .{},
@@ -1093,8 +1098,25 @@ pub fn Ui(comptime Msg: type) type {
         pub fn el(self: *Self, kind: WidgetKind, options: ElementOptions, children: anytype) Node {
             if (options.on_dismiss != null) warnDismissHandlerKind(kind);
             if (options.on_resize != null) warnResizeHandlerKind(kind);
+            var widget = self.widgetFromOptions(kind, options);
+            const interaction_count: usize = @intFromBool(options.hover_style != null) + @intFromBool(options.pressed_style != null);
+            if (interaction_count > 0) {
+                const retained_count = widget.immediate_commands.len;
+                const metadata = self.arena.alloc(canvas.ImmediateCanvasCommand, retained_count + interaction_count) catch {
+                    self.failed = true;
+                    return .{};
+                };
+                @memcpy(metadata[0..retained_count], widget.immediate_commands);
+                var metadata_index: usize = retained_count;
+                if (options.hover_style) |style| {
+                    metadata[metadata_index] = .{ .hover_style = style };
+                    metadata_index += 1;
+                }
+                if (options.pressed_style) |style| metadata[metadata_index] = .{ .pressed_style = style };
+                widget.immediate_commands = metadata;
+            }
             return .{
-                .widget = self.widgetFromOptions(kind, options),
+                .widget = widget,
                 .key = options.key,
                 .global_key = options.global_key,
                 .wrap = options.wrap,
@@ -1179,7 +1201,17 @@ pub fn Ui(comptime Msg: type) type {
         /// damage remain the ordinary builder contracts.
         pub fn immediateCanvas(self: *Self, options: ElementOptions, commands: []const canvas.ImmediateCanvasCommand) Node {
             var node = self.el(.stack, options, .{});
-            node.widget.immediate_commands = commands;
+            if (node.widget.immediate_commands.len == 0) {
+                node.widget.immediate_commands = commands;
+            } else if (commands.len > 0) {
+                const combined = self.arena.alloc(canvas.ImmediateCanvasCommand, node.widget.immediate_commands.len + commands.len) catch {
+                    self.failed = true;
+                    return .{};
+                };
+                @memcpy(combined[0..node.widget.immediate_commands.len], node.widget.immediate_commands);
+                @memcpy(combined[node.widget.immediate_commands.len..], commands);
+                node.widget.immediate_commands = combined;
+            }
             return node;
         }
 

@@ -203,15 +203,16 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
     if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
     if (widget.semantics.hidden) return;
 
-    const opacity = widgetOpacity(widget);
+    const resolved_widget = widgetWithInteractionStyle(widget);
+    const opacity = widgetOpacity(resolved_widget);
     if (opacity <= 0) return;
     const wrap_opacity = opacity < 1;
-    const transform = widgetTransform(widget);
+    const transform = widgetTransform(resolved_widget);
     const wrap_transform = !affinesEqual(transform, Affine.identity());
     const inverse_transform = if (wrap_transform) transform.inverse() orelse return error.InvalidTransform else Affine.identity();
     if (wrap_opacity) try builder.pushOpacity(opacity);
     if (wrap_transform) try builder.transform(transform);
-    try emitWidgetDepthContent(builder, widget, tokens, depth);
+    try emitWidgetDepthContent(builder, resolved_widget, tokens, depth);
     if (wrap_transform) try builder.transform(inverse_transform);
     if (wrap_opacity) try builder.popOpacity();
 }
@@ -475,7 +476,7 @@ fn emitWidgetLayoutNode(
     const node = layout.nodes[node_index];
     if (node.widget.semantics.hidden) return;
 
-    var widget = widgetWithRenderState(widgetWithFrame(node.widget, node.frame), state);
+    var widget = widgetWithInteractionStyle(widgetWithRenderState(widgetWithFrame(node.widget, node.frame), state));
     widget.group_segment = segment;
     const opacity = widgetOpacity(widget);
     if (opacity <= 0) return;
@@ -650,7 +651,7 @@ fn emitImmediateCanvas(builder: *Builder, widget: Widget) Error!void {
                 .color = value.color,
                 .inset = value.inset,
             }),
-            .text_shadow, .text_font, .icon_path => continue,
+            .text_shadow, .text_font, .icon_path, .hover_style, .pressed_style => continue,
             .fill_rect => |value| try builder.fillRect(.{
                 .id = id,
                 .rect = value.rect.translate(.{ .dx = widget.frame.x, .dy = widget.frame.y }),
@@ -734,6 +735,31 @@ fn emitWidgetLayoutScrollableChildren(
 
 fn widgetOpacity(widget: Widget) f32 {
     return std.math.clamp(widget.opacity, 0, 1);
+}
+
+/// Resolve author-declared interaction channels after the runtime has applied
+/// its retained hover/press ids and before any emitter reads opacity or style.
+/// This one copy feeds every widget kind and both tree/layout render walks.
+fn widgetWithInteractionStyle(widget: Widget) Widget {
+    if (widget.state.disabled) return widget;
+    var interaction: ?widget_model.WidgetInteractionStyle = null;
+    for (widget.immediate_commands) |command| switch (command) {
+        .pressed_style => |style| if (widget.state.pressed) {
+            interaction = style;
+            break;
+        },
+        .hover_style => |style| {
+            if (widget.state.hovered and interaction == null) interaction = style;
+        },
+        else => {},
+    };
+    const resolved = interaction orelse return widget;
+    var copy = widget;
+    if (resolved.background) |value| copy.style.background = value;
+    if (resolved.foreground) |value| copy.style.foreground = value;
+    if (resolved.opacity) |value| copy.opacity = value;
+    if (resolved.border) |value| copy.style.border = value;
+    return copy;
 }
 
 fn pixelSnapScale(tokens: DesignTokens) ?f32 {

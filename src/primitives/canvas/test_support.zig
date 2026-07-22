@@ -231,6 +231,7 @@ pub const WidgetMainAlignment = canvas.WidgetMainAlignment;
 pub const WidgetCrossAlignment = canvas.WidgetCrossAlignment;
 pub const WidgetLayoutStyle = canvas.WidgetLayoutStyle;
 pub const WidgetStyle = canvas.WidgetStyle;
+pub const WidgetInteractionStyle = canvas.WidgetInteractionStyle;
 pub const WidgetVariant = canvas.WidgetVariant;
 pub const WidgetSize = canvas.WidgetSize;
 pub const WidgetRole = canvas.WidgetRole;
