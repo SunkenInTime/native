@@ -613,9 +613,12 @@ pub const ReferenceRenderSurface = struct {
     fn drawShadow(self: ReferenceRenderSurface, command: RenderCommand, value: Shadow, draw_bounds: geometry.RectF) Error!void {
         const scale = referenceTransformScale(command.transform);
         const blur_radius = nonNegative(value.blur) * scale;
-        const shadow_rect = command.transform.transformRect(referenceSpreadRect(value.rect.normalized().translate(value.offset), value.spread)).normalized();
+        const effective_spread = if (value.inset) -value.spread else value.spread;
+        const shadow_rect = command.transform.transformRect(referenceSpreadRect(value.rect.normalized().translate(value.offset), effective_spread)).normalized();
         if (shadow_rect.isEmpty()) return;
-        const shadow_radius = referenceScaleRadius(referenceSpreadRadius(value.radius, value.spread), command.transform);
+        const shadow_radius = referenceScaleRadius(referenceSpreadRadius(value.radius, effective_spread), command.transform);
+        const clip_rect = command.transform.transformRect(value.rect.normalized()).normalized();
+        const clip_radius = referenceScaleRadius(value.radius, command.transform);
         const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return;
 
         // Render memo: the shadow evaluates a rounded-rect distance
@@ -629,8 +632,13 @@ pub const ReferenceRenderSurface = struct {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const point = referencePixelCenter(x, y);
-                const distance = referenceDistanceToRoundedRect(point, shadow_rect, shadow_radius);
-                const alpha = referenceShadowFalloff(distance, blur_radius);
+                const alpha = if (value.inset) block: {
+                    const coverage = referenceRoundedRectCoverage(point, clip_rect, clip_radius);
+                    if (coverage <= 0) break :block 0;
+                    const signed_distance = referenceSignedDistanceToRoundedRect(point, shadow_rect, shadow_radius);
+                    const edge_alpha = if (signed_distance >= 0) 1 else referenceShadowFalloff(-signed_distance, blur_radius);
+                    break :block coverage * edge_alpha;
+                } else referenceShadowFalloff(referenceDistanceToRoundedRect(point, shadow_rect, shadow_radius), blur_radius);
                 if (alpha > 0) self.blendPixel(@intCast(x), @intCast(y), referenceScaleColorAlpha(value.color, alpha), command.opacity);
             }
         }
@@ -692,6 +700,35 @@ pub const ReferenceRenderSurface = struct {
     }
 
     fn drawText(self: ReferenceRenderSurface, command: RenderCommand, value: DrawText, draw_bounds: geometry.RectF) Error!void {
+        if (value.text_shadow) |shadow| {
+            const blur = nonNegative(shadow.blur);
+            const steps: i32 = @intFromFloat(@min(4, @ceil(blur)));
+            var weight_total: f32 = 0;
+            var sy: i32 = -steps;
+            while (sy <= steps) : (sy += 1) {
+                var sx: i32 = -steps;
+                while (sx <= steps) : (sx += 1) weight_total += 1 / (1 + @as(f32, @floatFromInt(sx * sx + sy * sy)));
+            }
+            if (steps == 0) weight_total = 1;
+            sy = -steps;
+            while (sy <= steps) : (sy += 1) {
+                var sx: i32 = -steps;
+                while (sx <= steps) : (sx += 1) {
+                    const weight = (1 / (1 + @as(f32, @floatFromInt(sx * sx + sy * sy)))) / weight_total;
+                    const scale = if (steps > 0) blur / @as(f32, @floatFromInt(steps)) else 0;
+                    var cast = value;
+                    cast.origin.x += shadow.offset.dx + @as(f32, @floatFromInt(sx)) * scale;
+                    cast.origin.y += shadow.offset.dy + @as(f32, @floatFromInt(sy)) * scale;
+                    cast.color = referenceScaleColorAlpha(shadow.color, weight);
+                    cast.text_shadow = null;
+                    try self.drawTextCore(command, cast, draw_bounds);
+                }
+            }
+        }
+        try self.drawTextCore(command, value, draw_bounds);
+    }
+
+    fn drawTextCore(self: ReferenceRenderSurface, command: RenderCommand, value: DrawText, draw_bounds: geometry.RectF) Error!void {
         if (value.size <= 0) return;
 
         if (value.text_layout) |options| {
@@ -1237,6 +1274,25 @@ fn referenceDistanceToRoundedRect(point: geometry.PointF, rect: geometry.RectF, 
     const dx = @max(@max(normalized.x - point.x, 0), point.x - normalized.maxX());
     const dy = @max(@max(normalized.y - point.y, 0), point.y - normalized.maxY());
     return @sqrt(dx * dx + dy * dy);
+}
+
+fn referenceSignedDistanceToRoundedRect(point: geometry.PointF, rect: geometry.RectF, radius: Radius) f32 {
+    const normalized = rect.normalized();
+    if (normalized.isEmpty()) return 0;
+    const half_width = normalized.width * 0.5;
+    const half_height = normalized.height * 0.5;
+    const dx = point.x - (normalized.x + half_width);
+    const dy = point.y - (normalized.y + half_height);
+    const max_radius = @min(half_width, half_height);
+    const corner_radius = std.math.clamp(nonNegative(if (dx < 0)
+        (if (dy < 0) radius.top_left else radius.bottom_left)
+    else
+        (if (dy < 0) radius.top_right else radius.bottom_right)), 0, max_radius);
+    const qx = @abs(dx) - half_width + corner_radius;
+    const qy = @abs(dy) - half_height + corner_radius;
+    const mx = @max(qx, 0);
+    const my = @max(qy, 0);
+    return @sqrt(mx * mx + my * my) + @min(@max(qx, qy), 0) - corner_radius;
 }
 
 fn referenceDistanceToCircle(point: geometry.PointF, center: geometry.PointF, radius: f32) f32 {

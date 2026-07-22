@@ -15,6 +15,7 @@ const Glyph = text_atlas.Glyph;
 const max_text_bounds_layout_lines: usize = 64;
 
 pub const DrawText = text_layout_types.DrawText;
+pub const TextShadow = text_layout_types.TextShadow;
 pub const TextWrap = text_layout_types.TextWrap;
 pub const TextOverflow = text_layout_types.TextOverflow;
 pub const TextAlign = text_layout_types.TextAlign;
@@ -500,7 +501,10 @@ fn textInkInsets(size: f32) geometry.InsetsF {
 
 pub fn textBounds(value: DrawText) ?geometry.RectF {
     const metric = metricTextBounds(value) orelse return null;
-    return metric.inflate(textInkInsets(value.size));
+    const ink = metric.inflate(textInkInsets(value.size));
+    const shadow = value.text_shadow orelse return ink;
+    const shadow_bounds = ink.translate(shadow.offset).inflate(geometry.InsetsF.all(@max(0, shadow.blur)));
+    return geometry.RectF.unionWith(ink, shadow_bounds);
 }
 
 fn metricTextBounds(value: DrawText) ?geometry.RectF {

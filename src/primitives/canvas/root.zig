@@ -119,6 +119,7 @@ pub const GlyphAtlasCacheAction = text_model.GlyphAtlasCacheAction;
 pub const GlyphAtlasCachePlan = text_model.GlyphAtlasCachePlan;
 pub const GlyphAtlasCachePlanner = text_model.GlyphAtlasCachePlanner;
 pub const DrawText = text_model.DrawText;
+pub const TextShadow = text_model.TextShadow;
 pub const TextWrap = text_model.TextWrap;
 pub const TextOverflow = text_model.TextOverflow;
 pub const TextAlign = text_model.TextAlign;

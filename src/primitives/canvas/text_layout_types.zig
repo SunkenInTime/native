@@ -9,6 +9,12 @@ const FontId = canvas.FontId;
 const Color = drawing_model.Color;
 pub const Glyph = text_atlas.Glyph;
 
+pub const TextShadow = struct {
+    offset: geometry.OffsetF = .{},
+    blur: f32 = 0,
+    color: Color,
+};
+
 pub const DrawText = struct {
     id: ObjectId = 0,
     font_id: FontId = 0,
@@ -18,6 +24,7 @@ pub const DrawText = struct {
     text: []const u8 = "",
     glyphs: []const Glyph = &.{},
     text_layout: ?TextLayoutOptions = null,
+    text_shadow: ?TextShadow = null,
 };
 
 pub const TextWrap = enum {

@@ -271,6 +271,7 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         previous.widget.text_overflow != next.widget.text_overflow or
         previous.widget.variant != next.widget.variant or
         previous.widget.size != next.widget.size or
+        !immediateCommandsEqual(previous.widget.immediate_commands, next.widget.immediate_commands) or
         !widgetStylesEqual(previous.widget.style, next.widget.style);
     const state_dirty = !widgetStatesEqual(previous.widget.state, next.widget.state);
     const visibility_dirty = previous.widget.semantics.hidden != next.widget.semantics.hidden;
@@ -632,6 +633,15 @@ fn widgetFocusStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 fn widgetShadowPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
+    if (widget_render_style.widgetBoxShadow(widget)) |custom| {
+        var value = custom;
+        value.rect = widget.frame;
+        value.radius = widgetShadowRadius(widget, tokens);
+        return shadowBounds(value);
+    }
+    if (widget_render_style.widgetTextShadow(widget)) |text_shadow| {
+        return widget.frame.normalized().translate(text_shadow.offset).inflate(geometry.InsetsF.all(@max(0, text_shadow.blur)));
+    }
     // Buttons cast NO shadow (the base control register is flat), so
     // they carry no shadow damage budget — only the elevated surfaces
     // below reserve halo pixels.
@@ -728,6 +738,25 @@ fn widgetStylesEqual(a: WidgetStyle, b: WidgetStyle) bool {
         a.radius_bottom_left == b.radius_bottom_left and
         optionalF32Equal(a.stroke_width, b.stroke_width) and
         a.quiet_hover == b.quiet_hover;
+}
+
+fn immediateCommandsEqual(a: []const canvas.ImmediateCanvasCommand, b: []const canvas.ImmediateCanvasCommand) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (std.meta.activeTag(left) != std.meta.activeTag(right)) return false;
+        switch (left) {
+            .box_shadow => |value| switch (right) {
+                .box_shadow => |other| if (!equality_model.offsetsEqual(value.offset, other.offset) or value.blur != other.blur or value.spread != other.spread or !equality_model.colorsEqual(value.color, other.color) or value.inset != other.inset) return false,
+                else => unreachable,
+            },
+            .text_shadow => |value| switch (right) {
+                .text_shadow => |other| if (!equality_model.offsetsEqual(value.offset, other.offset) or value.blur != other.blur or !equality_model.colorsEqual(value.color, other.color)) return false,
+                else => unreachable,
+            },
+            else => if (!std.meta.eql(left, right)) return false,
+        }
+    }
+    return true;
 }
 
 fn widgetSemanticsEqual(a: WidgetSemantics, b: WidgetSemantics) bool {

@@ -141,7 +141,16 @@ pub fn drawTextsEqual(a: DrawText, b: DrawText) bool {
         colorsEqual(a.color, b.color) and
         std.mem.eql(u8, a.text, b.text) and
         glyphsEqual(a.glyphs, b.glyphs) and
-        optionalTextLayoutOptionsEqual(a.text_layout, b.text_layout);
+        optionalTextLayoutOptionsEqual(a.text_layout, b.text_layout) and
+        optionalTextShadowsEqual(a.text_shadow, b.text_shadow);
+}
+
+fn optionalTextShadowsEqual(a: ?text_model.TextShadow, b: ?text_model.TextShadow) bool {
+    if (a) |left| {
+        if (b) |right| return offsetsEqual(left.offset, right.offset) and left.blur == right.blur and colorsEqual(left.color, right.color);
+        return false;
+    }
+    return b == null;
 }
 
 pub fn optionalTextLayoutOptionsEqual(a: ?TextLayoutOptions, b: ?TextLayoutOptions) bool {
@@ -170,7 +179,8 @@ pub fn shadowsEqual(a: Shadow, b: Shadow) bool {
         offsetsEqual(a.offset, b.offset) and
         a.blur == b.blur and
         a.spread == b.spread and
-        colorsEqual(a.color, b.color);
+        colorsEqual(a.color, b.color) and
+        a.inset == b.inset;
 }
 
 pub fn blursEqual(a: Blur, b: Blur) bool {

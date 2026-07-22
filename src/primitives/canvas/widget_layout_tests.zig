@@ -773,20 +773,28 @@ test "widget text alignment emits local text layout options" {
         .typography = .{ .font_id = 1, .body_size = 10 },
     };
 
-    const centered = Widget{
-        .id = 1,
-        .kind = .text,
-        .frame = geometry.RectF.init(10, 20, 100, 20),
-        .text = "Hi",
-        .text_alignment = .center,
-        .immediate_commands = &.{.{ .text_style = .{
+    const text_effects = [_]canvas.ImmediateCanvasCommand{
+        .{ .text_style = .{
             .scale = 1.3,
             .weight = .bold,
             .line_height = 18,
             .letter_spacing = 1.5,
             .tabular_numbers = true,
             .max_lines = 2,
-        } }},
+        } },
+        .{ .text_shadow = .{
+            .offset = .{ .dx = 1, .dy = 2 },
+            .blur = 3,
+            .color = Color.rgba8(10, 20, 30, 128),
+        } },
+    };
+    const centered = Widget{
+        .id = 1,
+        .kind = .text,
+        .frame = geometry.RectF.init(10, 20, 100, 20),
+        .text = "Hi",
+        .text_alignment = .center,
+        .immediate_commands = &text_effects,
     };
     var center_commands: [3]CanvasCommand = undefined;
     var center_builder = Builder.init(&center_commands);
@@ -807,6 +815,9 @@ test "widget text alignment emits local text layout options" {
             try std.testing.expect(text.text_layout.?.tabular_numbers);
             try std.testing.expectEqual(@as(usize, 2), text.text_layout.?.max_lines);
             try std.testing.expectEqual(TextWrap.word, text.text_layout.?.wrap);
+            try std.testing.expect(text.text_shadow != null);
+            try std.testing.expectEqual(@as(f32, 1), text.text_shadow.?.offset.dx);
+            try std.testing.expectEqual(@as(f32, 3), text.text_shadow.?.blur);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -835,6 +846,36 @@ test "text-only styling does not grow the common retained Widget" {
     // N3's compact common shape: future text-only metadata belongs in the
     // existing rare-command side channel, not on every retained widget.
     try std.testing.expectEqual(@as(usize, 728), @sizeOf(Widget));
+}
+
+test "panel chrome projects author inset shadow after its fill" {
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .box_shadow = .{
+        .offset = .{ .dx = 2, .dy = 2 },
+        .blur = 4,
+        .spread = 1,
+        .color = Color.rgba8(0, 0, 0, 100),
+        .inset = true,
+    } }};
+    const panel = Widget{
+        .id = 9,
+        .kind = .panel,
+        .frame = geometry.RectF.init(0, 0, 80, 40),
+        .immediate_commands = &effects,
+    };
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, panel, .{});
+    try std.testing.expectEqual(@as(usize, 3), builder.displayList().commandCount());
+    try std.testing.expect(builder.displayList().commands[0] == .fill_rounded_rect);
+    switch (builder.displayList().commands[1]) {
+        .shadow => |shadow| {
+            try std.testing.expect(shadow.inset);
+            try std.testing.expectEqual(@as(f32, 2), shadow.offset.dx);
+            try std.testing.expectEqual(@as(f32, 4), shadow.blur);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(builder.displayList().commands[2] == .stroke_rect);
 }
 
 test "widget opacity wraps subtree display list commands" {

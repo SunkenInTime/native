@@ -640,6 +640,16 @@ fn emitImmediateCanvas(builder: *Builder, widget: Widget) Error!void {
     for (widget.immediate_commands, 0..) |command, index| {
         const id = immediateCanvasCommandId(widget.id, index + 1);
         switch (command) {
+            .box_shadow => |value| try builder.shadow(.{
+                .id = id,
+                .rect = widget.frame,
+                .offset = value.offset,
+                .blur = value.blur,
+                .spread = value.spread,
+                .color = value.color,
+                .inset = value.inset,
+            }),
+            .text_shadow => continue,
             .fill_rect => |value| try builder.fillRect(.{
                 .id = id,
                 .rect = value.rect.translate(.{ .dx = widget.frame.x, .dy = widget.frame.y }),
@@ -1015,6 +1025,7 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
             .overflow = widget.text_overflow,
             .measure = tokens.text_measure,
         },
+        .text_shadow = widget_render_style.widgetTextShadow(widget),
     });
     if (clip_overflow) try builder.popClip();
 }
@@ -1116,6 +1127,7 @@ fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
                 .alignment = .start,
                 .measure = tokens.text_measure,
             },
+            .text_shadow = widget_render_style.widgetTextShadow(widget),
         });
 
         const thickness = @max(1, tokens.stroke.hairline);

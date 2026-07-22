@@ -772,6 +772,8 @@ pub const ImmediateCanvasCommand = union(enum) {
     polyline: struct { points: []const geometry.PointF, width: f32, color: Color },
     /// Rare retained metadata; never emitted as immediate paint.
     text_style: WidgetTextStyle,
+    box_shadow: struct { offset: geometry.OffsetF = .{}, blur: f32 = 0, spread: f32 = 0, color: Color, inset: bool = false },
+    text_shadow: canvas.TextShadow,
 };
 
 /// Where a control sits inside a FLUSH button group (`button_group`
