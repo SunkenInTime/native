@@ -2057,6 +2057,7 @@ test "canvas render pass builds gpu packet for backend handoff" {
             .opacity = 0.75,
             .fit = .cover,
             .sampling = .nearest,
+            .tile = true,
         } },
         .{ .draw_text = .{
             .id = 5,
@@ -2222,6 +2223,7 @@ test "canvas render pass builds gpu packet for backend handoff" {
     try std.testing.expectEqual(@as(f32, 0.75), packet.commands[5].image.?.opacity);
     try std.testing.expectEqual(ImageFit.cover, packet.commands[5].image.?.fit);
     try std.testing.expectEqual(ImageSampling.nearest, packet.commands[5].image.?.sampling);
+    try std.testing.expect(packet.commands[5].image.?.tile);
     try std.testing.expectEqual(CanvasGpuCommandKind.draw_text, packet.commands[6].kind);
     try std.testing.expect(packet.commands[6].uses_glyph_atlas);
     try std.testing.expect(packet.commands[6].uses_text_layout);
@@ -2268,7 +2270,7 @@ test "canvas render pass builds gpu packet for backend handoff" {
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"shape\":{\"kind\":\"rounded_rect\",\"rect\":[16,0,24,12],\"radius\":[3,5,6,2]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"paint\":{\"kind\":\"linear_gradient\",\"start\":[16,0],\"end\":[40,12]") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"shape\":{\"kind\":\"path\",\"path\":[{\"verb\":\"move_to\",\"points\":[[0,0]]},{\"verb\":\"line_to\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"image\":{\"image\":42,\"src\":[4,8,32,24],\"dst\":[44,0,16,16],\"opacity\":0.75,\"fit\":\"cover\",\"sampling\":\"nearest\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"image\":{\"image\":42,\"src\":[4,8,32,24],\"dst\":[44,0,16,16],\"opacity\":0.75,\"fit\":\"cover\",\"sampling\":\"nearest\",\"tile\":true}") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"text\":{\"font\":7,\"size\":12,\"origin\":[0,32]") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"effect\":{\"kind\":\"shadow\",\"rect\":[0,36,40,20],\"radius\":[6,6,6,6],\"offset\":[2,3],\"blur\":8,\"spread\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"effect\":{\"kind\":\"blur\",\"rect\":[44,36,20,20],\"radius\":4}") != null);

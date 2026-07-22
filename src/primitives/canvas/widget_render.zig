@@ -1258,6 +1258,8 @@ fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
         .opacity = widget.image_opacity,
         .fit = widget.image_fit,
         .sampling = widget.image_sampling,
+        .tile = widget.image_tile,
+        .radius = widgetRadius(widget, 0),
     });
     if (clips_image) try builder.popClip();
 }
@@ -1287,6 +1289,7 @@ fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
             .opacity = widget.image_opacity,
             .fit = widget.image_fit,
             .sampling = widget.image_sampling,
+            .tile = widget.image_tile,
             // The render plan flattens the clip stack to rects, so the
             // pill clip above only crops the bounds; the draw's own
             // radius mask is what actually rounds the image.

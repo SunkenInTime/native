@@ -1,0 +1,1 @@
+feature: **Image tiling**: canvas and UI image draws can repeat a source rectangle from the destination origin while preserving fit, sampling, and asymmetric rounded-mask metadata across reference and macOS packet rendering.

@@ -146,6 +146,7 @@ pub fn writeCommandJson(command: CanvasCommand, writer: anytype) !void {
             try json.writeString(writer, @tagName(value.fit));
             try writer.writeAll(",\"sampling\":");
             try json.writeString(writer, @tagName(value.sampling));
+            if (value.tile) try writer.writeAll(",\"tile\":true");
             if (radiusIsSet(value.radius)) {
                 try writer.writeAll(",\"radius\":");
                 try writeRadiusJson(value.radius, writer);
@@ -467,6 +468,7 @@ fn writeCanvasGpuImageJson(image: ?CanvasGpuImage, writer: anytype) !void {
     try json.writeString(writer, @tagName(value.fit));
     try writer.writeAll(",\"sampling\":");
     try json.writeString(writer, @tagName(value.sampling));
+    if (value.tile) try writer.writeAll(",\"tile\":true");
     // Zero radius is omitted so image payloads without the rounded mask
     // stay byte-identical to the pre-radius wire format.
     if (radiusIsSet(value.radius)) {
@@ -1006,7 +1008,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Compact binary gpu-surface packet encoding (wire format v6).
+// Compact binary gpu-surface packet encoding (wire format v7).
 //
 // The version this comment names, the `binary_packet_version` constant
 // below, and the host decoder's spec comment (appkit_host.m) must agree;
@@ -1050,6 +1052,9 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 // v6 (from v5): command clips carry four per-corner radii after their rect,
 // preserving rounded overflow masks through render-plan flattening.
 //
+// v7 (from v6): image payloads carry a tile byte after sampling so packet
+// hosts repeat source pixels with the same semantics as the reference path.
+//
 // Layout:
 //   "NSGP" u8[4] | version u8 | load_action u8 (1 load / 2 clear /
 //     3 patch) | flags u8 (bit0 scissor, bit1 dirty rect list) | reserved u8
@@ -1067,7 +1072,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 //     | order_count u32 | order keys u64[]
 
 pub const binary_packet_magic = "NSGP";
-pub const binary_packet_version: u8 = 6;
+pub const binary_packet_version: u8 = 7;
 
 /// Most dirty rects a patch header carries: enough to keep far-apart
 /// small changes (a switch plus a status line) from fusing into a
@@ -1147,6 +1152,7 @@ pub fn canvasGpuCommandFingerprint(command: CanvasGpuCommand) u64 {
         h = hash.resourceHashF32(h, image.opacity);
         h = hash.resourceHashEnum(h, @intFromEnum(image.fit));
         h = hash.resourceHashEnum(h, @intFromEnum(image.sampling));
+        h = hash.resourceHashU8(h, @intFromBool(image.tile));
         h = hash.resourceHashRadius(h, image.radius);
     } else {
         h = hash.resourceHashU8(h, 0);
@@ -1450,7 +1456,7 @@ fn writeBinaryPaint(paint: CanvasGpuPaint, writer: anytype) !void {
 
 /// Image draw: image_id u64 | has_src u8 [src f32[4]] | dst f32[4]
 /// | opacity f32 | fit u8 (0 stretch / 1 contain / 2 cover)
-/// | sampling u8 (0 nearest / 1 linear) | radius f32[4].
+/// | sampling u8 (0 nearest / 1 linear) | tile u8 | radius f32[4].
 fn writeBinaryImage(image: CanvasGpuImage, writer: anytype) !void {
     try writer.writeInt(u64, image.image_id, .little);
     if (image.src) |src| {
@@ -1470,6 +1476,7 @@ fn writeBinaryImage(image: CanvasGpuImage, writer: anytype) !void {
         .nearest => 0,
         .linear => 1,
     });
+    try writer.writeByte(@intFromBool(image.tile));
     try writeBinaryRadius(image.radius, writer);
 }
 

@@ -456,6 +456,11 @@ pub fn Ui(comptime Msg: type) type {
             /// keeps the widget on its non-image rendering (an avatar
             /// falls back to initials).
             image: canvas.ImageId = 0,
+            /// Image scaling policy for `.image` and image-bearing widgets.
+            image_fit: canvas.ImageFit = .stretch,
+            image_sampling: canvas.ImageSampling = .linear,
+            /// Repeat the selected source rectangle at native pixel size.
+            image_tile: bool = false,
             /// Vector icon name drawn inside icon-bearing controls
             /// (`button`, `toggle_button`, `icon_button`, `list_item`,
             /// `menu_item`): a built-in registry name
@@ -2566,6 +2571,9 @@ pub fn Ui(comptime Msg: type) type {
                 .text_overflow = options.overflow,
                 .autofocus = options.autofocus,
                 .image_id = options.image,
+                .image_fit = options.image_fit,
+                .image_sampling = options.image_sampling,
+                .image_tile = options.image_tile,
                 .value = options.value,
                 .variant = options.variant,
                 .size = options.size,

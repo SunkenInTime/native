@@ -130,6 +130,7 @@ pub fn drawImagesEqual(a: DrawImage, b: DrawImage) bool {
         a.opacity == b.opacity and
         a.fit == b.fit and
         a.sampling == b.sampling and
+        a.tile == b.tile and
         radiiEqual(a.radius, b.radius);
 }
 

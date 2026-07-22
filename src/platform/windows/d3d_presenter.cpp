@@ -49,7 +49,7 @@ struct RetainedCommand {
 
 // Must match serialization.zig `binary_packet_version`; the build-time
 // wire-format ratchet checks this independently of the macOS decoder.
-static constexpr uint8_t kBinaryPacketVersion = 6;
+static constexpr uint8_t kBinaryPacketVersion = 7;
 
 struct PacketReader {
     const uint8_t *cursor;

@@ -333,6 +333,33 @@ test "stack clip content emits its authored asymmetric rounded mask" {
     }
     try std.testing.expect(list.commands[list.commands.len - 1] == .pop_clip);
 }
+
+test "image widget emits fit tile and asymmetric radius on the draw" {
+    const widget = Widget{
+        .id = 4,
+        .kind = .image,
+        .frame = geometry.RectF.init(0, 0, 80, 48),
+        .image_id = 42,
+        .image_fit = .contain,
+        .image_sampling = .nearest,
+        .image_tile = true,
+        .style = .{ .radius = 11, .radius_bottom_left = 3 },
+    };
+    var commands: [2]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, widget, DesignTokens{});
+    const list = builder.displayList();
+    try std.testing.expectEqual(@as(usize, 1), list.commands.len);
+    switch (list.commands[0]) {
+        .draw_image => |image| {
+            try std.testing.expectEqual(ImageFit.contain, image.fit);
+            try std.testing.expectEqual(ImageSampling.nearest, image.sampling);
+            try std.testing.expect(image.tile);
+            try std.testing.expectEqualDeep(Radius{ .top_left = 11, .top_right = 11, .bottom_right = 11, .bottom_left = 3 }, image.radius);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
 const toggleWidgetKnobCommandId = support.toggleWidgetKnobCommandId;
 const toggleWidgetKnobTravel = support.toggleWidgetKnobTravel;
 const textSelectionForWidgetPoint = support.textSelectionForWidgetPoint;
