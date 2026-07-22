@@ -1220,7 +1220,8 @@ pub fn Ui(comptime Msg: type) type {
             if (options.on_dismiss != null) warnDismissHandlerKind(kind);
             if (options.on_resize != null) warnResizeHandlerKind(kind);
             var widget = self.widgetFromOptions(kind, options);
-            const interaction_count: usize = @intFromBool(options.hover_style != null) + @intFromBool(options.pressed_style != null);
+            const interaction_count = @as(usize, @intFromBool(options.hover_style != null)) +
+                @as(usize, @intFromBool(options.pressed_style != null));
             if (interaction_count > 0) {
                 const retained_count = widget.immediate_commands.len;
                 const metadata = self.arena.alloc(canvas.ImmediateCanvasCommand, retained_count + interaction_count) catch {

@@ -1524,3 +1524,23 @@ test "structural id goldens: the id algorithm is pinned end to end" {
     try testing.expectEqual(@as(canvas.ObjectId, 10740830058688169295), canvas.globalWidgetId(.tree, .{ .index = 3 }));
     try testing.expectEqual(@as(canvas.ObjectId, 9835495177657875356), canvas.globalWidgetId(.split_divider, canvas.uiKey("divider")));
 }
+
+test "element retains hover and pressed metadata together" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.panel(.{
+        .hover_style = .{ .opacity = 0.8 },
+        .pressed_style = .{ .opacity = 0.6 },
+    }, .{}));
+
+    try testing.expectEqual(@as(usize, 2), tree.root.immediate_commands.len);
+    switch (tree.root.immediate_commands[0]) {
+        .hover_style => |style| try testing.expectEqual(@as(?f32, 0.8), style.opacity),
+        else => return error.TestExpectedEqual,
+    }
+    switch (tree.root.immediate_commands[1]) {
+        .pressed_style => |style| try testing.expectEqual(@as(?f32, 0.6), style.opacity),
+        else => return error.TestExpectedEqual,
+    }
+}
