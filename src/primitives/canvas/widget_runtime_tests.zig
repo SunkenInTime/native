@@ -601,6 +601,31 @@ test "non-layout shadow changes invalidate the complete old and new halos" {
     try std.testing.expect(dirty.maxY() > previous.findById(2).?.frame.maxY());
 }
 
+test "hover and pressed transitions invalidate shadow halos" {
+    const shadow_commands = [_]canvas.ImmediateCanvasCommand{.{ .box_shadow = .{
+        .offset = .{ .dx = 7, .dy = 5 },
+        .blur = 6,
+        .spread = 2,
+        .color = Color.rgba8(0, 0, 0, 128),
+    } }};
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(20, 20, 80, 30),
+        .immediate_commands = &shadow_commands,
+    }};
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 160, 110), &nodes);
+    const frame = layout.findById(2).?.frame;
+
+    const hover_dirty = layout.renderStateDirtyBounds(.{}, .{ .hovered_id = 2 }).?;
+    try std.testing.expect(hover_dirty.maxX() > frame.maxX());
+    try std.testing.expect(hover_dirty.maxY() > frame.maxY());
+    const pressed_dirty = layout.renderStateDirtyBounds(.{ .hovered_id = 2 }, .{ .hovered_id = 2, .pressed_id = 2 }).?;
+    try std.testing.expect(pressed_dirty.maxX() > frame.maxX());
+    try std.testing.expect(pressed_dirty.maxY() > frame.maxY());
+}
+
 test "widget render state dirty bounds uses custom focus stroke tokens" {
     const children = [_]Widget{.{
         .id = 2,
