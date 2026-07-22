@@ -393,6 +393,13 @@ pub const WidgetLayoutStyle = struct {
     aspect_ratio: f32 = 0,
 };
 
+/// Per-corner radii are hot-path style data on every retained node. Keep an
+/// unset corner in-band so four rare overrides cost four floats, not four
+/// optional-float payload/tag pairs. Negative infinity cannot collide with an
+/// authored radius: every finite negative author value remains an explicit
+/// override and resolves through the existing non-negative clamp.
+pub const unset_widget_corner_radius = -std.math.inf(f32);
+
 pub const WidgetStyle = struct {
     background: ?Color = null,
     foreground: ?Color = null,
@@ -401,10 +408,10 @@ pub const WidgetStyle = struct {
     border: ?Color = null,
     focus_ring: ?Color = null,
     radius: ?f32 = null,
-    radius_top_left: ?f32 = null,
-    radius_top_right: ?f32 = null,
-    radius_bottom_right: ?f32 = null,
-    radius_bottom_left: ?f32 = null,
+    radius_top_left: f32 = unset_widget_corner_radius,
+    radius_top_right: f32 = unset_widget_corner_radius,
+    radius_bottom_right: f32 = unset_widget_corner_radius,
+    radius_bottom_left: f32 = unset_widget_corner_radius,
     stroke_width: ?f32 = null,
     /// The quiet-surface knob: `true` removes this widget's HOVER wash —
     /// the pointer resting on it paints no fill. For image-forward

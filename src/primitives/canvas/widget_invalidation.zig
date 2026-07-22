@@ -712,10 +712,10 @@ fn widgetStylesEqual(a: WidgetStyle, b: WidgetStyle) bool {
         optionalColorsEqual(a.border, b.border) and
         optionalColorsEqual(a.focus_ring, b.focus_ring) and
         optionalF32Equal(a.radius, b.radius) and
-        optionalF32Equal(a.radius_top_left, b.radius_top_left) and
-        optionalF32Equal(a.radius_top_right, b.radius_top_right) and
-        optionalF32Equal(a.radius_bottom_right, b.radius_bottom_right) and
-        optionalF32Equal(a.radius_bottom_left, b.radius_bottom_left) and
+        a.radius_top_left == b.radius_top_left and
+        a.radius_top_right == b.radius_top_right and
+        a.radius_bottom_right == b.radius_bottom_right and
+        a.radius_bottom_left == b.radius_bottom_left and
         optionalF32Equal(a.stroke_width, b.stroke_width) and
         a.quiet_hover == b.quiet_hover;
 }

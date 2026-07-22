@@ -2060,6 +2060,16 @@ test "widget emitter applies surface control tokens" {
     }
 }
 
+test "per-corner radius overrides stay compact without changing unset or negative semantics" {
+    try std.testing.expect(@sizeOf(WidgetStyle) <= 156);
+    const base = Radius{ .top_left = 1, .top_right = 2, .bottom_right = 3, .bottom_left = 4 };
+    try std.testing.expectEqualDeep(base, widget_render_style.styleRadius(.{ .kind = .panel }, base));
+    try std.testing.expectEqualDeep(
+        Radius{ .top_left = 7, .top_right = 2, .bottom_right = 0, .bottom_left = 4 },
+        widget_render_style.styleRadius(.{ .kind = .panel, .style = .{ .radius_top_left = 7, .radius_bottom_right = -2 } }, base),
+    );
+}
+
 test "widget emitter applies control radius and stroke tokens" {
     const tokens = DesignTokens{
         .controls = .{
