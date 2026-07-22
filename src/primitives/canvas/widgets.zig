@@ -311,6 +311,9 @@ pub const WidgetAnchor = struct {
 
 pub const WidgetLayoutStyle = struct {
     padding: geometry.InsetsF = .{},
+    /// External spacing reserved by the parent layout. Margins never
+    /// participate in the widget's own content inset or painted frame.
+    margin: geometry.InsetsF = .{},
     gap: f32 = 0,
     grow: f32 = 0,
     main_alignment: WidgetMainAlignment = .start,
@@ -365,6 +368,12 @@ pub const WidgetLayoutStyle = struct {
     /// into both `min_size` and `max_size`, so intrinsic content can
     /// neither shrink nor silently grow the box past it.
     max_size: geometry.SizeF = .{},
+    /// Per-axis percentage of the parent's content box. 0 leaves the axis
+    /// intrinsic/explicit; values are clamped to 0...100 by layout.
+    percent_size: geometry.SizeF = .{},
+    /// Width divided by height. Applied only when exactly one axis is
+    /// author-determined, matching CSS/Tailwind aspect-ratio behavior.
+    aspect_ratio: f32 = 0,
 };
 
 pub const WidgetStyle = struct {

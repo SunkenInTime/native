@@ -297,25 +297,27 @@ fn layoutAxisChildren(
     };
     const clamped_gap = nonNegative(style.gap);
     const total_gap = clamped_gap * @as(f32, @floatFromInt(flow_count - 1));
+    var total_margin: f32 = 0;
     var fixed_extent: f32 = 0;
     var grow_total: f32 = 0;
     for (children) |child| {
         if (child.layout.anchor != null) continue;
+        total_margin += mainMarginStart(child, axis) + mainMarginEnd(child, axis);
         const grow = nonNegative(child.layout.grow);
-        if (grow > 0) {
+        if (grow > 0 and percentMainExtent(child, axis, available_extent) == null) {
             grow_total += grow;
         } else {
             // The bubble thread fraction binds on a row's main axis
             // (the child's width): a hug-sized bubble measures at most
             // 80% of the row, so a spacer beside it keeps real share
             // and a long message wraps instead of overflowing.
-            fixed_extent += mainExtentWithBubbleCap(child, axis, available_extent, preferredMainExtentInCross(child, axis, cross_extent, style.cross_alignment, tokens));
+            fixed_extent += resolvedChildExtents(child, axis, available_extent, cross_extent, style.cross_alignment, tokens).main;
         }
     }
 
-    const remaining = @max(0, available_extent - fixed_extent - total_gap);
+    const remaining = @max(0, available_extent - fixed_extent - total_margin - total_gap);
     const assigned_extent = assignedAxisChildrenExtent(children, axis, fixed_extent, grow_total, remaining);
-    const used_extent = assigned_extent + total_gap;
+    const used_extent = assigned_extent + total_margin + total_gap;
     if (axisLayoutOverflow(available_extent, used_extent)) |overflow| {
         logAxisChildrenOverflow(output, parent_index, axis, available_extent, used_extent, overflow);
     }
@@ -331,20 +333,136 @@ fn layoutAxisChildren(
 
     for (children) |child| {
         if (child.layout.anchor != null) continue;
+        cursor += mainMarginStart(child, axis);
         const grow = nonNegative(child.layout.grow);
-        const main_extent = if (grow > 0 and grow_total > 0)
+        const resolved = resolvedChildExtents(child, axis, available_extent, cross_extent, style.cross_alignment, tokens);
+        const main_extent = if (grow > 0 and grow_total > 0 and percentMainExtent(child, axis, available_extent) == null)
             clampMainExtent(child, axis, remaining * grow / grow_total)
         else
-            mainExtentWithBubbleCap(child, axis, available_extent, preferredMainExtentInCross(child, axis, cross_extent, style.cross_alignment, tokens));
-        const cross = preferredCrossExtent(child, axis, cross_extent, style.cross_alignment, tokens);
-        const cross_origin = alignedCrossAxisOrigin(content, axis, cross_extent, cross, child, style.cross_alignment);
+            resolved.main;
+        const cross = resolved.cross;
+        const cross_start_margin = crossMarginStart(child, axis);
+        const cross_end_margin = crossMarginEnd(child, axis);
+        const cross_band = @max(0, cross_extent - cross_start_margin - cross_end_margin);
+        const cross_origin = alignedCrossAxisOrigin(content, axis, cross_band, cross, child, style.cross_alignment) + cross_start_margin;
         const child_frame = switch (axis) {
             .horizontal => geometry.RectF.init(cursor, cross_origin, main_extent, cross),
             .vertical => geometry.RectF.init(cross_origin, cursor, cross, main_extent),
         };
         _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len, tokens);
-        cursor += main_extent + child_gap;
+        cursor += main_extent + mainMarginEnd(child, axis) + child_gap;
     }
+}
+
+const ResolvedChildExtents = struct { main: f32, cross: f32 };
+
+fn resolvedChildExtents(
+    child: Widget,
+    axis: LayoutAxis,
+    available_main: f32,
+    available_cross: f32,
+    alignment: WidgetCrossAlignment,
+    tokens: DesignTokens,
+) ResolvedChildExtents {
+    const cross_band = @max(0, available_cross - crossMarginStart(child, axis) - crossMarginEnd(child, axis));
+    const percent_main = percentMainExtent(child, axis, available_main);
+    const percent_cross = percentCrossExtent(child, axis, available_cross);
+    const main_determined = percent_main != null or explicitMainExtent(child, axis) > 0;
+    const cross_determined = percent_cross != null or explicitCrossExtent(child, axis) > 0;
+    var main = percent_main orelse mainExtentWithBubbleCap(child, axis, available_main, preferredMainExtentInCross(child, axis, cross_band, alignment, tokens));
+    var cross = percent_cross orelse preferredCrossExtent(child, axis, cross_band, alignment, tokens);
+    const ratio = child.layout.aspect_ratio;
+    if (std.math.isFinite(ratio) and ratio > 0 and main_determined != cross_determined) {
+        if (main_determined) {
+            cross = switch (axis) {
+                .horizontal => main / ratio,
+                .vertical => main * ratio,
+            };
+        } else {
+            main = switch (axis) {
+                .horizontal => cross * ratio,
+                .vertical => cross / ratio,
+            };
+        }
+    }
+    return .{
+        .main = clampMainExtent(child, axis, main),
+        .cross = clampCrossExtent(child, axis, cross),
+    };
+}
+
+fn clampedPercent(value: f32) ?f32 {
+    if (!std.math.isFinite(value) or value <= 0) return null;
+    return @min(value, 100) / 100;
+}
+
+fn percentMainExtent(child: Widget, axis: LayoutAxis, available: f32) ?f32 {
+    const percent = switch (axis) {
+        .horizontal => child.layout.percent_size.width,
+        .vertical => child.layout.percent_size.height,
+    };
+    return if (clampedPercent(percent)) |fraction| available * fraction else null;
+}
+
+fn percentCrossExtent(child: Widget, axis: LayoutAxis, available: f32) ?f32 {
+    const percent = switch (axis) {
+        .horizontal => child.layout.percent_size.height,
+        .vertical => child.layout.percent_size.width,
+    };
+    return if (clampedPercent(percent)) |fraction| available * fraction else null;
+}
+
+fn explicitMainExtent(child: Widget, axis: LayoutAxis) f32 {
+    return switch (axis) {
+        .horizontal => child.frame.width,
+        .vertical => child.frame.height,
+    };
+}
+
+fn explicitCrossExtent(child: Widget, axis: LayoutAxis) f32 {
+    return switch (axis) {
+        .horizontal => child.frame.height,
+        .vertical => child.frame.width,
+    };
+}
+
+fn clampCrossExtent(child: Widget, axis: LayoutAxis, value: f32) f32 {
+    return switch (axis) {
+        .horizontal => clampIntrinsicAxis(value, child.layout.min_size.height, child.layout.max_size.height),
+        .vertical => clampIntrinsicAxis(value, child.layout.min_size.width, child.layout.max_size.width),
+    };
+}
+
+fn mainMarginStart(child: Widget, axis: LayoutAxis) f32 {
+    return finiteMargin(switch (axis) {
+        .horizontal => child.layout.margin.left,
+        .vertical => child.layout.margin.top,
+    });
+}
+
+fn mainMarginEnd(child: Widget, axis: LayoutAxis) f32 {
+    return finiteMargin(switch (axis) {
+        .horizontal => child.layout.margin.right,
+        .vertical => child.layout.margin.bottom,
+    });
+}
+
+fn crossMarginStart(child: Widget, axis: LayoutAxis) f32 {
+    return finiteMargin(switch (axis) {
+        .horizontal => child.layout.margin.top,
+        .vertical => child.layout.margin.left,
+    });
+}
+
+fn crossMarginEnd(child: Widget, axis: LayoutAxis) f32 {
+    return finiteMargin(switch (axis) {
+        .horizontal => child.layout.margin.bottom,
+        .vertical => child.layout.margin.right,
+    });
+}
+
+fn finiteMargin(value: f32) f32 {
+    return if (std.math.isFinite(value)) value else 0;
 }
 
 /// Tolerance separating real layout overflow from float noise.
@@ -625,15 +743,18 @@ fn rowChildWidth(row: Widget, available_width: f32, index: usize, tokens: Design
     if (children.len == 0) return available_width;
     var flow_count: usize = 0;
     var fixed_extent: f32 = 0;
+    var total_margin: f32 = 0;
     var grow_total: f32 = 0;
     for (children) |child| {
         if (child.layout.anchor != null) continue;
         flow_count += 1;
+        total_margin += mainMarginStart(child, .horizontal) + mainMarginEnd(child, .horizontal);
         const grow = nonNegative(child.layout.grow);
-        if (grow > 0) {
+        const percent = percentMainExtent(child, .horizontal, available_width);
+        if (grow > 0 and percent == null) {
             grow_total += grow;
         } else {
-            fixed_extent += bubbleThreadWidthCap(child, available_width, preferredMainExtent(child, .horizontal, tokens));
+            fixed_extent += percent orelse bubbleThreadWidthCap(child, available_width, preferredMainExtent(child, .horizontal, tokens));
         }
     }
     if (flow_count == 0) return available_width;
@@ -646,8 +767,9 @@ fn rowChildWidth(row: Widget, available_width: f32, index: usize, tokens: Design
         else => nonNegative(row.layout.gap),
     };
     const total_gap = row_gap * @as(f32, @floatFromInt(flow_count - 1));
-    const remaining = @max(0, available_width - fixed_extent - total_gap);
+    const remaining = @max(0, available_width - fixed_extent - total_margin - total_gap);
     const child = children[index];
+    if (percentMainExtent(child, .horizontal, available_width)) |percent| return clampMainExtent(child, .horizontal, percent);
     const grow = nonNegative(child.layout.grow);
     if (grow > 0 and grow_total > 0) return clampMainExtent(child, .horizontal, remaining * grow / grow_total);
     // The same bubble thread cap `layoutAxisChildren` applies, replayed
@@ -712,7 +834,11 @@ fn assignedAxisChildrenExtent(children: []const Widget, axis: LayoutAxis, fixed_
     for (children) |child| {
         if (child.layout.anchor != null) continue;
         const grow = nonNegative(child.layout.grow);
-        if (grow <= 0) continue;
+        const percent = switch (axis) {
+            .horizontal => child.layout.percent_size.width,
+            .vertical => child.layout.percent_size.height,
+        };
+        if (grow <= 0 or clampedPercent(percent) != null) continue;
         assigned += clampMainExtent(child, axis, remaining * grow / grow_total);
     }
     return assigned;
@@ -1287,11 +1413,26 @@ pub fn widgetKindStacksChildren(kind: widget_model.WidgetKind) bool {
 }
 
 fn stackChildFrame(content: geometry.RectF, child: Widget) geometry.RectF {
-    const width = if (child.frame.width > 0) child.frame.width else content.width;
-    const height = if (child.frame.height > 0) child.frame.height else content.height;
+    const margin = child.layout.margin;
+    const inner = content.inset(.{
+        .top = finiteMargin(margin.top),
+        .right = finiteMargin(margin.right),
+        .bottom = finiteMargin(margin.bottom),
+        .left = finiteMargin(margin.left),
+    });
+    const width_percent = clampedPercent(child.layout.percent_size.width);
+    const height_percent = clampedPercent(child.layout.percent_size.height);
+    var width = if (width_percent) |fraction| inner.width * fraction else if (child.frame.width > 0) child.frame.width else inner.width;
+    var height = if (height_percent) |fraction| inner.height * fraction else if (child.frame.height > 0) child.frame.height else inner.height;
+    const width_determined = width_percent != null or child.frame.width > 0;
+    const height_determined = height_percent != null or child.frame.height > 0;
+    const ratio = child.layout.aspect_ratio;
+    if (std.math.isFinite(ratio) and ratio > 0 and width_determined != height_determined) {
+        if (width_determined) height = width / ratio else width = height * ratio;
+    }
     return geometry.RectF.init(
-        content.x + child.frame.x,
-        content.y + child.frame.y,
+        inner.x + child.frame.x,
+        inner.y + child.frame.y,
         clampIntrinsicAxis(width, child.layout.min_size.width, child.layout.max_size.width),
         clampIntrinsicAxis(height, child.layout.min_size.height, child.layout.max_size.height),
     );
@@ -1457,9 +1598,17 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
 
 fn intrinsicChildSize(child: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
     const intrinsic = intrinsicWidgetSizeDepth(child, tokens, depth);
+    var width = @max(intrinsic.width, nonNegative(child.frame.width));
+    var height = @max(intrinsic.height, nonNegative(child.frame.height));
+    const width_determined = child.frame.width > 0;
+    const height_determined = child.frame.height > 0;
+    const ratio = child.layout.aspect_ratio;
+    if (std.math.isFinite(ratio) and ratio > 0 and width_determined != height_determined) {
+        if (width_determined) height = width / ratio else width = height * ratio;
+    }
     return geometry.SizeF.init(
-        clampIntrinsicAxis(@max(intrinsic.width, nonNegative(child.frame.width)), child.layout.min_size.width, child.layout.max_size.width),
-        clampIntrinsicAxis(@max(intrinsic.height, nonNegative(child.frame.height)), child.layout.min_size.height, child.layout.max_size.height),
+        clampIntrinsicAxis(width, child.layout.min_size.width, child.layout.max_size.width),
+        clampIntrinsicAxis(height, child.layout.min_size.height, child.layout.max_size.height),
     );
 }
 
@@ -1496,12 +1645,12 @@ fn intrinsicAxisChildrenSize(widget: Widget, tokens: DesignTokens, axis: LayoutA
         const size = intrinsicChildSizeInAxis(child, tokens, depth + 1, axis);
         switch (axis) {
             .horizontal => {
-                main_sum += size.width;
-                cross_max = @max(cross_max, size.height);
+                main_sum += size.width + finiteMargin(child.layout.margin.left) + finiteMargin(child.layout.margin.right);
+                cross_max = @max(cross_max, size.height + finiteMargin(child.layout.margin.top) + finiteMargin(child.layout.margin.bottom));
             },
             .vertical => {
-                main_sum += size.height;
-                cross_max = @max(cross_max, size.width);
+                main_sum += size.height + finiteMargin(child.layout.margin.top) + finiteMargin(child.layout.margin.bottom);
+                cross_max = @max(cross_max, size.width + finiteMargin(child.layout.margin.left) + finiteMargin(child.layout.margin.right));
             },
         }
     }
@@ -1528,8 +1677,8 @@ fn intrinsicOverlayChildrenSize(widget: Widget, tokens: DesignTokens, depth: usi
     for (widget.children) |child| {
         if (child.layout.anchor != null) continue;
         const size = intrinsicChildSize(child, tokens, depth + 1);
-        width_max = @max(width_max, size.width);
-        height_max = @max(height_max, size.height);
+        width_max = @max(width_max, size.width + finiteMargin(child.layout.margin.left) + finiteMargin(child.layout.margin.right));
+        height_max = @max(height_max, size.height + finiteMargin(child.layout.margin.top) + finiteMargin(child.layout.margin.bottom));
     }
     return paddedIntrinsicSize(widget, geometry.SizeF.init(width_max, height_max));
 }

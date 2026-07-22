@@ -497,9 +497,27 @@ pub fn Ui(comptime Msg: type) type {
             /// Split panes use it to constrain the divider drag (the
             /// clamp band derives from both panes' floors).
             min_width: f32 = 0,
+            min_height: f32 = 0,
+            max_width: f32 = 0,
+            max_height: f32 = 0,
+            /// Percentage sizes use 0 as the unset sentinel. The Weaver
+            /// projection keeps these mutually exclusive with width/height.
+            width_percent: f32 = 0,
+            height_percent: f32 = 0,
+            /// Width divided by height; 0 leaves aspect unconstrained.
+            aspect_ratio: f32 = 0,
             grow: f32 = 0,
             gap: f32 = 0,
             padding: f32 = 0,
+            padding_top: ?f32 = null,
+            padding_right: ?f32 = null,
+            padding_bottom: ?f32 = null,
+            padding_left: ?f32 = null,
+            margin: f32 = 0,
+            margin_top: ?f32 = null,
+            margin_right: ?f32 = null,
+            margin_bottom: ?f32 = null,
+            margin_left: ?f32 = null,
             main: canvas.WidgetMainAlignment = .start,
             cross: canvas.WidgetCrossAlignment = .stretch,
             /// Line policy for `text` leaves. `true`: word-wrap through
@@ -2503,7 +2521,9 @@ pub fn Ui(comptime Msg: type) type {
         /// default gap. Explicit spacing always wins for its own field.
         fn applyKindDefaultLayout(kind: WidgetKind, options: ElementOptions, layout: *canvas.WidgetLayoutStyle) void {
             const defaults = canvas.widgetKindDefaultLayout(kind, options.size) orelse return;
-            if (options.padding == 0) layout.padding = defaults.padding;
+            if (options.padding == 0 and options.padding_top == null and options.padding_right == null and options.padding_bottom == null and options.padding_left == null) {
+                layout.padding = defaults.padding;
+            }
             if (options.gap == 0) layout.gap = defaults.gap;
             if (layout.cross_alignment == .stretch and defaults.cross_alignment != .stretch) {
                 layout.cross_alignment = defaults.cross_alignment;
@@ -2536,10 +2556,16 @@ pub fn Ui(comptime Msg: type) type {
                 },
                 .layout = .{
                     .padding = .{
-                        .top = options.padding,
-                        .right = options.padding,
-                        .bottom = options.padding,
-                        .left = options.padding,
+                        .top = options.padding_top orelse options.padding,
+                        .right = options.padding_right orelse options.padding,
+                        .bottom = options.padding_bottom orelse options.padding,
+                        .left = options.padding_left orelse options.padding,
+                    },
+                    .margin = .{
+                        .top = options.margin_top orelse options.margin,
+                        .right = options.margin_right orelse options.margin,
+                        .bottom = options.margin_bottom orelse options.margin,
+                        .left = options.margin_left orelse options.margin,
                     },
                     .gap = options.gap,
                     .grow = options.grow,
@@ -2559,12 +2585,23 @@ pub fn Ui(comptime Msg: type) type {
                     .virtual_anchor_index = options.virtual_anchor_index,
                     .virtual_anchor_extent = options.virtual_anchor_extent,
                     .virtual_total_extent = options.virtual_total_extent,
-                    .min_size = .{ .width = @max(options.width, options.min_width), .height = options.height },
+                    .min_size = .{
+                        .width = @max(options.width, options.min_width),
+                        .height = @max(options.height, options.min_height),
+                    },
                     // Explicit sizes are definite (min AND max). Resizable
                     // is the exception: width documents the initial width
                     // and the engine's drag handle keeps writing larger
                     // frames past it.
-                    .max_size = if (kind == .resizable) .{} else .{ .width = options.width, .height = options.height },
+                    .max_size = if (kind == .resizable) .{} else .{
+                        .width = if (options.width > 0) options.width else options.max_width,
+                        .height = if (options.height > 0) options.height else options.max_height,
+                    },
+                    .percent_size = .{
+                        .width = options.width_percent,
+                        .height = options.height_percent,
+                    },
+                    .aspect_ratio = options.aspect_ratio,
                 },
                 .style = options.style,
                 .semantics = options.semantics,

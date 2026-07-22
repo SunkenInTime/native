@@ -680,6 +680,7 @@ fn widgetStatesEqual(a: WidgetState, b: WidgetState) bool {
 
 fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
     return insetsEqual(a.padding, b.padding) and
+        insetsEqual(a.margin, b.margin) and
         a.gap == b.gap and
         a.grow == b.grow and
         a.main_alignment == b.main_alignment and
@@ -695,7 +696,9 @@ fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
         a.virtual_anchor_extent == b.virtual_anchor_extent and
         a.virtual_total_extent == b.virtual_total_extent and
         sizesEqual(a.min_size, b.min_size) and
-        sizesEqual(a.max_size, b.max_size);
+        sizesEqual(a.max_size, b.max_size) and
+        sizesEqual(a.percent_size, b.percent_size) and
+        a.aspect_ratio == b.aspect_ratio;
 }
 
 fn widgetStylesEqual(a: WidgetStyle, b: WidgetStyle) bool {

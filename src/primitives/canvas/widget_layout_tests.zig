@@ -424,6 +424,60 @@ test "widget layout resolves row sizing and emits laid out commands" {
     }
 }
 
+test "widget layout resolves margins percentage sizes and min max bounds" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .panel,
+            .layout = .{
+                .margin = .{ .top = 4, .right = 5, .bottom = 6, .left = 10 },
+                .percent_size = geometry.SizeF.init(50, 50),
+                .min_size = geometry.SizeF.init(0, 60),
+                .max_size = geometry.SizeF.init(90, 0),
+            },
+        },
+        .{
+            .id = 3,
+            .kind = .panel,
+            .frame = geometry.RectF.init(0, 0, 20, 10),
+            .layout = .{ .margin = .{ .left = -5 } },
+        },
+    };
+    const row = Widget{ .id = 1, .kind = .row, .children = &children };
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(row, geometry.RectF.init(0, 0, 200, 100), &nodes);
+
+    // Percentages use the parent's content box; min/max then clamp the
+    // painted frame. Margins reserve external flow space and may be negative.
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(10, 4, 90, 60));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(100, 0, 20, 10));
+}
+
+test "widget layout applies aspect ratio when exactly one axis is definite" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .panel,
+            .frame = geometry.RectF.init(0, 0, 80, 0),
+            .layout = .{ .aspect_ratio = 2, .margin = .{ .top = 10 } },
+        },
+    };
+    const column = Widget{ .id = 1, .kind = .column, .children = &children };
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(column, geometry.RectF.init(0, 0, 200, 200), &nodes);
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(0, 10, 80, 40));
+
+    const overlaid_children = [_]Widget{.{
+        .id = 4,
+        .kind = .panel,
+        .layout = .{ .percent_size = geometry.SizeF.init(50, 0), .aspect_ratio = 2 },
+    }};
+    const stack = Widget{ .id = 3, .kind = .stack, .children = &overlaid_children };
+    var stack_nodes: [2]WidgetLayoutNode = undefined;
+    const stack_layout = try layoutWidgetTree(stack, geometry.RectF.init(0, 0, 240, 120), &stack_nodes);
+    try expectLayoutFrame(stack_layout, 4, geometry.RectF.init(0, 0, 120, 60));
+}
+
 test "chat bubbles cap at the thread fraction, never the full thread" {
     // A hug-sized bubble in a WIDE thread: its message wants 700 points,
     // the row offers 600, and the reference contract caps the bubble at
