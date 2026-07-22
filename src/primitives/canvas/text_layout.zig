@@ -108,6 +108,11 @@ fn styledTextWidth(text: []const u8, start: usize, end: usize, font_id: FontId, 
     return width;
 }
 
+/// Styled width seam for consumers that must replay plain-text paint geometry.
+pub fn styledTextWidthForRange(text: []const u8, start: usize, end: usize, font_id: FontId, size: f32, options: TextLayoutOptions) f32 {
+    return styledTextWidth(text, start, end, font_id, size, options);
+}
+
 /// True when a run's options ask for single-line trailing elision:
 /// `wrap = .none` bounded by a real width with the (default) ellipsis
 /// overflow policy. Wrapping runs and unbounded runs never elide.

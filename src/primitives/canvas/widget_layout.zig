@@ -29,18 +29,19 @@ fn measuredTextWidth(tokens: DesignTokens, text: []const u8, size: f32) f32 {
 }
 
 fn styledWidgetTextWidth(widget: Widget, tokens: DesignTokens, size: f32) f32 {
-    if (widget.text_letter_spacing == 0 and !widget.text_tabular_numbers) return measuredTextWidth(tokens, widget.text, size);
+    const font_id = widget_metrics.widgetTextFontId(widget, tokens);
+    if (widget.text_letter_spacing == 0 and !widget.text_tabular_numbers) return measureTextWidthForFont(tokens.text_measure, font_id, widget.text, size);
     const options = text_model.TextLayoutOptions{
         .letter_spacing = widget.text_letter_spacing,
         .tabular_numbers = widget.text_tabular_numbers,
         .measure = tokens.text_measure,
     };
     var width: f32 = 0;
-    const tabular_advance = text_model.styledTextTabularAdvance(options, tokens.typography.font_id, size);
+    const tabular_advance = text_model.styledTextTabularAdvance(options, font_id, size);
     var cursor: usize = 0;
     while (cursor < widget.text.len) {
         const next = text_model.nextTextOffset(widget.text, cursor);
-        width += text_model.styledTextClusterAdvanceWithTabular(widget.text, tokens.typography.font_id, size, 0, cursor, next, options, tabular_advance);
+        width += text_model.styledTextClusterAdvanceWithTabular(widget.text, font_id, size, 0, cursor, next, options, tabular_advance);
         cursor = next;
     }
     return width;
@@ -1050,7 +1051,7 @@ fn clampedTextHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
     const size = widgetBodyTextSize(widget, tokens);
     const line_height = if (widget.text_line_height > 0) widget.text_line_height else widgetLineHeight(size);
     const draw = text_model.DrawText{
-        .font_id = tokens.typography.font_id,
+        .font_id = widget_metrics.widgetTextFontId(widget, tokens),
         .size = size,
         .origin = geometry.PointF.init(0, size),
         .color = tokens.colors.text,

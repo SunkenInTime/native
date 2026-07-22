@@ -545,6 +545,10 @@ pub fn Ui(comptime Msg: type) type {
             /// status bars, and surface titles consume it. Controls that
             /// own their label placement (buttons, badges) ignore it.
             text_alignment: canvas.TextAlign = .start,
+            /// Relative size multiplier for plain text leaves; 0 means inherit.
+            text_scale: f32 = 0,
+            /// Font weight for plain text leaves.
+            text_weight: canvas.TextSpanWeight = .regular,
             /// Explicit logical-pixel line height; 0 keeps the token-derived default.
             text_line_height: f32 = 0,
             /// Additional logical pixels between text clusters.
@@ -2555,6 +2559,8 @@ pub fn Ui(comptime Msg: type) type {
                 .icon = options.icon,
                 .icon_placement = options.icon_placement,
                 .text_alignment = options.text_alignment,
+                .text_scale = options.text_scale,
+                .text_weight = options.text_weight,
                 .text_line_height = options.text_line_height,
                 .text_letter_spacing = options.text_letter_spacing,
                 .text_tabular_numbers = options.text_tabular_numbers,

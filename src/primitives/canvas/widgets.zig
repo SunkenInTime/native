@@ -16,6 +16,7 @@ const ImageSampling = canvas.ImageSampling;
 const TextAlign = text_model.TextAlign;
 const TextOverflow = text_model.TextOverflow;
 const TextSpan = text_spans_model.TextSpan;
+const TextSpanWeight = text_spans_model.TextSpanWeight;
 const TextRange = text_model.TextRange;
 const TextSelection = text_model.TextSelection;
 const CanvasRenderAnimation = canvas.CanvasRenderAnimation;
@@ -805,6 +806,10 @@ pub const Widget = struct {
     /// Icon-only buttons center the glyph regardless.
     icon_placement: WidgetIconPlacement = .leading,
     text_alignment: TextAlign = .start,
+    /// Relative size multiplier for plain text leaves; 0 means inherit.
+    text_scale: f32 = 0,
+    /// Font weight for plain text leaves.
+    text_weight: TextSpanWeight = .regular,
     text_line_height: f32 = 0,
     text_letter_spacing: f32 = 0,
     text_tabular_numbers: bool = false,

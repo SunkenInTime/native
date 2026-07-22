@@ -1,4 +1,5 @@
 const std = @import("std");
+const canvas = @import("root.zig");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
 const text_spans_model = @import("text_spans.zig");
@@ -36,12 +37,24 @@ pub fn widgetBodyTextSize(widget: Widget, tokens: DesignTokens) f32 {
     // views get a Debug warning from `Ui.el`).
     if (widget.kind == .text) {
         switch (widget.size) {
-            .heading => return tokens.typography.heading_size,
-            .display => return tokens.typography.display_size,
+            .heading => return scaledPlainTextSize(widget, tokens.typography.heading_size),
+            .display => return scaledPlainTextSize(widget, tokens.typography.display_size),
             else => {},
         }
     }
-    return widgetTypographySize(widget, tokens.typography.body_size);
+    const base = widgetTypographySize(widget, tokens.typography.body_size);
+    return if (widget.kind == .text) scaledPlainTextSize(widget, base) else base;
+}
+
+fn scaledPlainTextSize(widget: Widget, base: f32) f32 {
+    if (!std.math.isFinite(widget.text_scale) or widget.text_scale <= 0) return base;
+    return @max(1, base * widget.text_scale);
+}
+
+/// Face used by a plain text leaf. It mirrors span weight resolution so
+/// clamped text can retain the same font styling without becoming a paragraph.
+pub fn widgetTextFontId(widget: Widget, tokens: DesignTokens) canvas.FontId {
+    return text_spans_model.textSpanFontId(.{ .weight = widget.text_weight }, tokens.typography);
 }
 
 pub fn widgetLabelTextSize(widget: Widget, tokens: DesignTokens) f32 {

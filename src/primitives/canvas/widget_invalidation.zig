@@ -266,6 +266,8 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         previous.widget.backdrop_blur_token != next.widget.backdrop_blur_token or
         previous.widget.scrim != next.widget.scrim or
         previous.widget.text_alignment != next.widget.text_alignment or
+        previous.widget.text_scale != next.widget.text_scale or
+        previous.widget.text_weight != next.widget.text_weight or
         previous.widget.text_line_height != next.widget.text_line_height or
         previous.widget.text_letter_spacing != next.widget.text_letter_spacing or
         previous.widget.text_tabular_numbers != next.widget.text_tabular_numbers or

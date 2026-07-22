@@ -779,6 +779,8 @@ test "widget text alignment emits local text layout options" {
         .frame = geometry.RectF.init(10, 20, 100, 20),
         .text = "Hi",
         .text_alignment = .center,
+        .text_scale = 1.3,
+        .text_weight = .bold,
         .text_line_height = 18,
         .text_letter_spacing = 1.5,
         .text_tabular_numbers = true,
@@ -792,7 +794,9 @@ test "widget text alignment emits local text layout options" {
         .draw_text => |text| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 1)), text.id);
             try std.testing.expectApproxEqAbs(@as(f32, 10), text.origin.x, 0.001);
-            try std.testing.expectApproxEqAbs(@as(f32, 33.75), text.origin.y, 0.001);
+            try std.testing.expectApproxEqAbs(@as(f32, 34.875), text.origin.y, 0.001);
+            try std.testing.expectEqual(@as(FontId, 4), text.font_id);
+            try std.testing.expectApproxEqAbs(@as(f32, 13), text.size, 0.001);
             try std.testing.expect(text.text_layout != null);
             try std.testing.expectEqual(@as(f32, 100), text.text_layout.?.max_width);
             try std.testing.expectEqual(TextAlign.center, text.text_layout.?.alignment);

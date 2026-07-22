@@ -997,7 +997,7 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
     const text_size = widgetBodyTextSize(widget, tokens);
     try builder.drawText(.{
         .id = widgetPartId(widget.id, 1),
-        .font_id = tokens.typography.font_id,
+        .font_id = widget_metrics.widgetTextFontId(widget, tokens),
         .size = text_size,
         .origin = pixelSnapTextPoint(tokens, textOrigin(widget.frame, text_size, 0)),
         .color = widgetForegroundColor(widget, tokens, tokens.colors.text),

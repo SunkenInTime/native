@@ -54,6 +54,7 @@ pub const measureTextAdvance = text_layout.measureTextAdvance;
 pub const styledTextClusterAdvance = text_layout.styledTextClusterAdvance;
 pub const styledTextClusterAdvanceWithTabular = text_layout.styledTextClusterAdvanceWithTabular;
 pub const styledTextTabularAdvance = text_layout.styledTextTabularAdvance;
+pub const styledTextWidthForRange = text_layout.styledTextWidthForRange;
 pub const estimateTextWidth = text_layout.estimateTextWidth;
 pub const estimateTextWidthForFont = text_layout.estimateTextWidthForFont;
 pub const estimateTextWidthForFace = text_layout.estimateTextWidthForFace;
