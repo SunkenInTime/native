@@ -302,33 +302,14 @@ fn layoutAxisChildren(
     const clamped_gap = nonNegative(style.gap);
     const total_gap = clamped_gap * @as(f32, @floatFromInt(flow_count - 1));
     var total_margin: f32 = 0;
-    var fixed_extent: f32 = 0;
-    var shrink_capacity: f32 = 0;
-    var grow_total: f32 = 0;
     for (children) |child| {
         if (child.layout.anchor != null) continue;
         total_margin += mainMarginStart(child, axis) + mainMarginEnd(child, axis);
-        const grow = nonNegative(child.layout.grow);
-        if (grow > 0 and percentMainExtent(child, axis, available_extent) == null) {
-            grow_total += grow;
-        } else {
-            // The bubble thread fraction binds on a row's main axis
-            // (the child's width): a hug-sized bubble measures at most
-            // 80% of the row, so a spacer beside it keeps real share
-            // and a long message wraps instead of overflowing.
-            const alignment = child.layout.self_alignment orelse style.cross_alignment;
-            const extent = resolvedChildExtents(child, axis, available_extent, cross_extent, alignment, tokens).main;
-            fixed_extent += extent;
-            if (child.layout.shrink > 0) shrink_capacity += @max(0, extent - minMainExtent(child, axis));
-        }
     }
 
-    const deficit = @max(0, fixed_extent + total_margin + total_gap - available_extent);
-    const shrink_fraction = if (shrink_capacity > 0) @min(1, deficit / shrink_capacity) else 0;
-    const compressed_fixed_extent = fixed_extent - shrink_capacity * shrink_fraction;
-    const remaining = @max(0, available_extent - compressed_fixed_extent - total_margin - total_gap);
-    const assigned_extent = assignedAxisChildrenExtent(children, axis, compressed_fixed_extent, grow_total, remaining);
-    const used_extent = assigned_extent + total_margin + total_gap;
+    const flex_budget = @max(0, available_extent - total_margin - total_gap);
+    const distribution = flexDistribution(children, axis, available_extent, cross_extent, style.cross_alignment, tokens, flex_budget);
+    const used_extent = distribution.assigned + total_margin + total_gap;
     if (axisLayoutOverflow(available_extent, used_extent)) |overflow| {
         logAxisChildrenOverflow(output, parent_index, axis, available_extent, used_extent, overflow);
     }
@@ -349,15 +330,10 @@ fn layoutAxisChildren(
     for (children) |child| {
         if (child.layout.anchor != null) continue;
         cursor += mainMarginStart(child, axis);
-        const grow = nonNegative(child.layout.grow);
         const alignment = child.layout.self_alignment orelse style.cross_alignment;
         const resolved = resolvedChildExtents(child, axis, available_extent, cross_extent, alignment, tokens);
-        const main_extent = if (grow > 0 and grow_total > 0 and percentMainExtent(child, axis, available_extent) == null)
-            clampMainExtent(child, axis, remaining * grow / grow_total)
-        else if (child.layout.shrink > 0)
-            @max(minMainExtent(child, axis), resolved.main - @max(0, resolved.main - minMainExtent(child, axis)) * shrink_fraction)
-        else
-            resolved.main;
+        const base = flexBaseMainExtent(child, axis, available_extent, resolved.main);
+        const main_extent = distributedMainExtent(child, axis, base, available_extent, distribution);
         const cross = resolved.cross;
         const cross_start_margin = crossMarginStart(child, axis);
         const cross_end_margin = crossMarginEnd(child, axis);
@@ -406,7 +382,11 @@ fn layoutWrappedAxisChildren(
             const child = children[finish];
             if (child.layout.anchor != null) continue;
             const alignment = child.layout.self_alignment orelse style.cross_alignment;
-            const resolved = resolvedChildExtents(child, axis, available_main, available_cross, alignment, tokens);
+            // Stretch is resolved against the line band after line breaking;
+            // measuring it against the whole container makes line one consume
+            // every cross-axis pixel.
+            const measure_alignment: WidgetCrossAlignment = if (alignment == .stretch) .start else alignment;
+            const resolved = resolvedChildExtents(child, axis, available_main, available_cross, measure_alignment, tokens);
             const outer_main = resolved.main + mainMarginStart(child, axis) + mainMarginEnd(child, axis);
             const candidate = used + (if (count > 0) gap else 0) + outer_main;
             if (count > 0 and candidate > available_main) break;
@@ -437,6 +417,164 @@ fn layoutWrappedAxisChildren(
 }
 
 const ResolvedChildExtents = struct { main: f32, cross: f32 };
+
+const FlexDistribution = struct {
+    budget: f32,
+    base_total: f32,
+    assigned: f32,
+    grow_unit: f32 = 0,
+    shrink_unit: f32 = 0,
+};
+
+fn flexDistribution(
+    children: []const Widget,
+    axis: LayoutAxis,
+    available_main: f32,
+    available_cross: f32,
+    parent_alignment: WidgetCrossAlignment,
+    tokens: DesignTokens,
+    budget: f32,
+) FlexDistribution {
+    var base_total: f32 = 0;
+    for (children) |child| {
+        if (child.layout.anchor != null) continue;
+        const alignment = child.layout.self_alignment orelse parent_alignment;
+        const resolved = resolvedChildExtents(child, axis, available_main, available_cross, alignment, tokens).main;
+        base_total += flexBaseMainExtent(child, axis, available_main, resolved);
+    }
+
+    var result = FlexDistribution{ .budget = budget, .base_total = base_total, .assigned = base_total };
+    if (base_total < budget) {
+        result.grow_unit = resolvedGrowUnit(children, axis, available_main, available_cross, parent_alignment, tokens, budget, base_total);
+    } else if (base_total > budget) {
+        result.shrink_unit = resolvedShrinkUnit(children, axis, available_main, available_cross, parent_alignment, tokens, budget, base_total);
+    }
+
+    result.assigned = 0;
+    for (children) |child| {
+        if (child.layout.anchor != null) continue;
+        const alignment = child.layout.self_alignment orelse parent_alignment;
+        const resolved = resolvedChildExtents(child, axis, available_main, available_cross, alignment, tokens).main;
+        const base = flexBaseMainExtent(child, axis, available_main, resolved);
+        result.assigned += distributedMainExtent(child, axis, base, available_main, result);
+    }
+    return result;
+}
+
+fn growEligible(child: Widget, axis: LayoutAxis, available_main: f32) bool {
+    return nonNegative(child.layout.grow) > 0 and percentMainExtent(child, axis, available_main) == null;
+}
+
+fn flexBaseMainExtent(child: Widget, axis: LayoutAxis, available_main: f32, resolved: f32) f32 {
+    if (!growEligible(child, axis, available_main)) return resolved;
+    // Preserve Native's established intrinsic-grow contract (grow weights
+    // divide the available track) while an authored width/height is a real
+    // flex basis that can then grow beyond that preference.
+    return if (hasExplicitMainExtent(child, axis)) resolved else minMainExtent(child, axis);
+}
+
+fn resolvedGrowUnit(
+    children: []const Widget,
+    axis: LayoutAxis,
+    available_main: f32,
+    available_cross: f32,
+    parent_alignment: WidgetCrossAlignment,
+    tokens: DesignTokens,
+    budget: f32,
+    base_total: f32,
+) f32 {
+    var total_grow: f32 = 0;
+    for (children) |child| if (child.layout.anchor == null and growEligible(child, axis, available_main)) {
+        total_grow += nonNegative(child.layout.grow);
+    };
+    if (total_grow <= 0) return 0;
+    var unit = @max(0, budget - base_total) / total_grow;
+    var iteration: usize = 0;
+    while (iteration < children.len) : (iteration += 1) {
+        var fixed: f32 = 0;
+        var active_base: f32 = 0;
+        var active_grow: f32 = 0;
+        for (children) |child| {
+            if (child.layout.anchor != null) continue;
+            const alignment = child.layout.self_alignment orelse parent_alignment;
+            const resolved = resolvedChildExtents(child, axis, available_main, available_cross, alignment, tokens).main;
+            const base = flexBaseMainExtent(child, axis, available_main, resolved);
+            const grow = nonNegative(child.layout.grow);
+            const max_value = maxMainExtent(child, axis);
+            if (!growEligible(child, axis, available_main)) {
+                fixed += base;
+            } else if (max_value > 0 and base + grow * unit >= max_value) {
+                fixed += max_value;
+            } else {
+                active_base += base;
+                active_grow += grow;
+            }
+        }
+        const next = if (active_grow > 0) @max(0, budget - fixed - active_base) / active_grow else 0;
+        if (@abs(next - unit) <= 0.0001) return next;
+        unit = next;
+    }
+    return unit;
+}
+
+fn resolvedShrinkUnit(
+    children: []const Widget,
+    axis: LayoutAxis,
+    available_main: f32,
+    available_cross: f32,
+    parent_alignment: WidgetCrossAlignment,
+    tokens: DesignTokens,
+    budget: f32,
+    base_total: f32,
+) f32 {
+    var total_weight: f32 = 0;
+    for (children) |child| {
+        if (child.layout.anchor != null) continue;
+        const alignment = child.layout.self_alignment orelse parent_alignment;
+        const resolved = resolvedChildExtents(child, axis, available_main, available_cross, alignment, tokens).main;
+        const base = flexBaseMainExtent(child, axis, available_main, resolved);
+        total_weight += nonNegative(child.layout.shrink) * base;
+    }
+    if (total_weight <= 0) return 0;
+    var unit = @max(0, base_total - budget) / total_weight;
+    var iteration: usize = 0;
+    while (iteration < children.len) : (iteration += 1) {
+        var fixed: f32 = 0;
+        var active_base: f32 = 0;
+        var active_weight: f32 = 0;
+        for (children) |child| {
+            if (child.layout.anchor != null) continue;
+            const alignment = child.layout.self_alignment orelse parent_alignment;
+            const resolved = resolvedChildExtents(child, axis, available_main, available_cross, alignment, tokens).main;
+            const base = flexBaseMainExtent(child, axis, available_main, resolved);
+            const weight = nonNegative(child.layout.shrink) * base;
+            const minimum = minMainExtent(child, axis);
+            if (weight <= 0) {
+                fixed += base;
+            } else if (base - weight * unit <= minimum) {
+                fixed += minimum;
+            } else {
+                active_base += base;
+                active_weight += weight;
+            }
+        }
+        const next = if (active_weight > 0) @max(0, fixed + active_base - budget) / active_weight else 0;
+        if (@abs(next - unit) <= 0.0001) return next;
+        unit = next;
+    }
+    return unit;
+}
+
+fn distributedMainExtent(child: Widget, axis: LayoutAxis, base: f32, available_main: f32, distribution: FlexDistribution) f32 {
+    if (distribution.grow_unit > 0 and growEligible(child, axis, available_main)) {
+        return clampMainExtent(child, axis, base + nonNegative(child.layout.grow) * distribution.grow_unit);
+    }
+    if (distribution.shrink_unit > 0 and child.layout.shrink > 0) {
+        const weight = nonNegative(child.layout.shrink) * base;
+        return @max(minMainExtent(child, axis), base - weight * distribution.shrink_unit);
+    }
+    return base;
+}
 
 fn resolvedChildExtents(
     child: Widget,

@@ -666,6 +666,23 @@ test "widget layout shrinks eligible children to their minimum floors" {
     try expectLayoutFrame(mixed_layout, 3, geometry.RectF.init(80, 0, 30, 10));
 }
 
+test "preferred sizes act as flex bases that grow and shrink within authored bounds" {
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 80, 10), .layout = .{ .flags = .{ .preferred_width_set = true }, .grow = 1, .shrink = 1, .min_size = geometry.SizeF.init(20, 0) } },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(0, 0, 40, 10), .layout = .{ .flags = .{ .preferred_width_set = true }, .grow = 1, .shrink = 1, .min_size = geometry.SizeF.init(20, 0) } },
+    };
+    const row = Widget{ .id = 1, .kind = .row, .children = &children };
+    var nodes: [3]WidgetLayoutNode = undefined;
+
+    const grown = try layoutWidgetTree(row, geometry.RectF.init(0, 0, 200, 20), &nodes);
+    try expectLayoutFrame(grown, 2, geometry.RectF.init(0, 0, 120, 10));
+    try expectLayoutFrame(grown, 3, geometry.RectF.init(120, 0, 80, 10));
+
+    const shrunk = try layoutWidgetTree(row, geometry.RectF.init(0, 0, 60, 20), &nodes);
+    try expectLayoutFrame(shrunk, 2, geometry.RectF.init(0, 0, 40, 10));
+    try expectLayoutFrame(shrunk, 3, geometry.RectF.init(40, 0, 20, 10));
+}
+
 test "widget layout honors self alignment and wraps into lines" {
     const self_children = [_]Widget{.{
         .id = 2,
@@ -689,6 +706,14 @@ test "widget layout honors self alignment and wraps into lines" {
     try expectLayoutFrame(wrap_layout, 4, geometry.RectF.init(0, 0, 40, 20));
     try expectLayoutFrame(wrap_layout, 5, geometry.RectF.init(50, 0, 40, 20));
     try expectLayoutFrame(wrap_layout, 6, geometry.RectF.init(0, 30, 40, 20));
+
+    const stretch_row = Widget{ .id = 7, .kind = .row, .layout = .{ .gap = 10, .flex_wrap = true }, .children = &wrap_children };
+    const stretch_layout = try layoutWidgetTree(stretch_row, geometry.RectF.init(0, 0, 100, 80), &wrap_nodes);
+    // Stretch resolves inside each 20px line band, not against the full
+    // 80px container cross extent.
+    try expectLayoutFrame(stretch_layout, 4, geometry.RectF.init(0, 0, 40, 20));
+    try expectLayoutFrame(stretch_layout, 5, geometry.RectF.init(50, 0, 40, 20));
+    try expectLayoutFrame(stretch_layout, 6, geometry.RectF.init(0, 30, 40, 20));
 }
 
 test "cross-centering splits the overflow of a taller-than-band child evenly" {
@@ -2715,7 +2740,8 @@ test "authored max width caps grow distribution" {
     var nodes: [4]WidgetLayoutNode = undefined;
     const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 800, 100), &nodes);
     try expectLayoutFrame(layout, 2, geometry.RectF.init(0, 0, 200, 100));
-    try expectLayoutFrame(layout, 3, geometry.RectF.init(200, 0, 400, 100));
+    // The 200px rejected by child 2's max is redistributed to child 3.
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(200, 0, 600, 100));
 }
 
 test "preferred height overrides cross-axis stretch in a row" {
