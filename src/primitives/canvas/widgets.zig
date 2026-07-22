@@ -266,6 +266,8 @@ pub const WidgetMainAlignment = enum {
     center,
     end,
     space_between,
+    space_around,
+    space_evenly,
 };
 
 pub const WidgetCrossAlignment = enum {
@@ -323,8 +325,13 @@ pub const WidgetLayoutStyle = struct {
     margin: geometry.InsetsF = .{},
     gap: f32 = 0,
     grow: f32 = 0,
+    /// Flex compression participation. Zero preserves the historical Native
+    /// layout; Weaver projects Tailwind's default of one explicitly.
+    shrink: f32 = 0,
     main_alignment: WidgetMainAlignment = .start,
     cross_alignment: WidgetCrossAlignment = .stretch,
+    self_alignment: ?WidgetCrossAlignment = null,
+    flex_wrap: bool = false,
     /// Authored-size presence shares the historical clip flag byte so an
     /// explicit zero remains distinct without growing retained widgets.
     flags: WidgetLayoutFlags = .{},

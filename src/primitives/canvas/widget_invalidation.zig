@@ -683,8 +683,11 @@ fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
         insetsEqual(a.margin, b.margin) and
         a.gap == b.gap and
         a.grow == b.grow and
+        a.shrink == b.shrink and
         a.main_alignment == b.main_alignment and
         a.cross_alignment == b.cross_alignment and
+        a.self_alignment == b.self_alignment and
+        a.flex_wrap == b.flex_wrap and
         a.flags == b.flags and
         a.columns == b.columns and
         a.virtualized == b.virtualized and

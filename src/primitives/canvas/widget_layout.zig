@@ -286,6 +286,10 @@ fn layoutAxisChildren(
         if (child.layout.anchor == null) flow_count += 1;
     }
     if (flow_count == 0) return;
+    if (style.flex_wrap) {
+        try layoutWrappedAxisChildren(children, content, axis, parent_index, depth, output, len, style, tokens);
+        return;
+    }
 
     const available_extent = switch (axis) {
         .horizontal => content.width,
@@ -299,6 +303,7 @@ fn layoutAxisChildren(
     const total_gap = clamped_gap * @as(f32, @floatFromInt(flow_count - 1));
     var total_margin: f32 = 0;
     var fixed_extent: f32 = 0;
+    var shrink_capacity: f32 = 0;
     var grow_total: f32 = 0;
     for (children) |child| {
         if (child.layout.anchor != null) continue;
@@ -311,12 +316,18 @@ fn layoutAxisChildren(
             // (the child's width): a hug-sized bubble measures at most
             // 80% of the row, so a spacer beside it keeps real share
             // and a long message wraps instead of overflowing.
-            fixed_extent += resolvedChildExtents(child, axis, available_extent, cross_extent, style.cross_alignment, tokens).main;
+            const alignment = child.layout.self_alignment orelse style.cross_alignment;
+            const extent = resolvedChildExtents(child, axis, available_extent, cross_extent, alignment, tokens).main;
+            fixed_extent += extent;
+            if (child.layout.shrink > 0) shrink_capacity += @max(0, extent - minMainExtent(child, axis));
         }
     }
 
-    const remaining = @max(0, available_extent - fixed_extent - total_margin - total_gap);
-    const assigned_extent = assignedAxisChildrenExtent(children, axis, fixed_extent, grow_total, remaining);
+    const deficit = @max(0, fixed_extent + total_margin + total_gap - available_extent);
+    const shrink_fraction = if (shrink_capacity > 0) @min(1, deficit / shrink_capacity) else 0;
+    const compressed_fixed_extent = fixed_extent - shrink_capacity * shrink_fraction;
+    const remaining = @max(0, available_extent - compressed_fixed_extent - total_margin - total_gap);
+    const assigned_extent = assignedAxisChildrenExtent(children, axis, compressed_fixed_extent, grow_total, remaining);
     const used_extent = assigned_extent + total_margin + total_gap;
     if (axisLayoutOverflow(available_extent, used_extent)) |overflow| {
         logAxisChildrenOverflow(output, parent_index, axis, available_extent, used_extent, overflow);
@@ -325,32 +336,103 @@ fn layoutAxisChildren(
     var child_gap = clamped_gap;
     if (style.main_alignment == .space_between and flow_count > 1) {
         child_gap += free_extent / @as(f32, @floatFromInt(flow_count - 1));
+    } else if (style.main_alignment == .space_around) {
+        child_gap += free_extent / @as(f32, @floatFromInt(flow_count));
+    } else if (style.main_alignment == .space_evenly) {
+        child_gap += free_extent / @as(f32, @floatFromInt(flow_count + 1));
     }
     var cursor: f32 = switch (axis) {
         .horizontal => content.x,
         .vertical => content.y,
-    } + mainAxisAlignmentOffset(style.main_alignment, free_extent);
+    } + mainAxisAlignmentOffset(style.main_alignment, free_extent, flow_count);
 
     for (children) |child| {
         if (child.layout.anchor != null) continue;
         cursor += mainMarginStart(child, axis);
         const grow = nonNegative(child.layout.grow);
-        const resolved = resolvedChildExtents(child, axis, available_extent, cross_extent, style.cross_alignment, tokens);
+        const alignment = child.layout.self_alignment orelse style.cross_alignment;
+        const resolved = resolvedChildExtents(child, axis, available_extent, cross_extent, alignment, tokens);
         const main_extent = if (grow > 0 and grow_total > 0 and percentMainExtent(child, axis, available_extent) == null)
             clampMainExtent(child, axis, remaining * grow / grow_total)
+        else if (child.layout.shrink > 0)
+            @max(minMainExtent(child, axis), resolved.main - @max(0, resolved.main - minMainExtent(child, axis)) * shrink_fraction)
         else
             resolved.main;
         const cross = resolved.cross;
         const cross_start_margin = crossMarginStart(child, axis);
         const cross_end_margin = crossMarginEnd(child, axis);
         const cross_band = @max(0, cross_extent - cross_start_margin - cross_end_margin);
-        const cross_origin = alignedCrossAxisOrigin(content, axis, cross_band, cross, child, style.cross_alignment) + cross_start_margin;
+        const cross_origin = alignedCrossAxisOrigin(content, axis, cross_band, cross, child, alignment) + cross_start_margin;
         const child_frame = switch (axis) {
             .horizontal => geometry.RectF.init(cursor, cross_origin, main_extent, cross),
             .vertical => geometry.RectF.init(cross_origin, cursor, cross, main_extent),
         };
         _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len, tokens);
         cursor += main_extent + mainMarginEnd(child, axis) + child_gap;
+    }
+}
+
+fn layoutWrappedAxisChildren(
+    children: []const Widget,
+    content: geometry.RectF,
+    axis: LayoutAxis,
+    parent_index: usize,
+    depth: usize,
+    output: []WidgetLayoutNode,
+    len: *usize,
+    style: WidgetLayoutStyle,
+    tokens: DesignTokens,
+) Error!void {
+    const available_main = switch (axis) {
+        .horizontal => content.width,
+        .vertical => content.height,
+    };
+    const available_cross = switch (axis) {
+        .horizontal => content.height,
+        .vertical => content.width,
+    };
+    const gap = nonNegative(style.gap);
+    var cross_cursor: f32 = switch (axis) {
+        .horizontal => content.y,
+        .vertical => content.x,
+    };
+    var start: usize = 0;
+    while (start < children.len) {
+        var finish = start;
+        var used: f32 = 0;
+        var line_cross: f32 = 0;
+        var count: usize = 0;
+        while (finish < children.len) : (finish += 1) {
+            const child = children[finish];
+            if (child.layout.anchor != null) continue;
+            const alignment = child.layout.self_alignment orelse style.cross_alignment;
+            const resolved = resolvedChildExtents(child, axis, available_main, available_cross, alignment, tokens);
+            const outer_main = resolved.main + mainMarginStart(child, axis) + mainMarginEnd(child, axis);
+            const candidate = used + (if (count > 0) gap else 0) + outer_main;
+            if (count > 0 and candidate > available_main) break;
+            used = candidate;
+            line_cross = @max(line_cross, resolved.cross + crossMarginStart(child, axis) + crossMarginEnd(child, axis));
+            count += 1;
+        }
+        if (count == 0) {
+            finish += 1;
+            start = finish;
+            continue;
+        }
+        var line_style = style;
+        line_style.flex_wrap = false;
+        const remaining_cross = @max(0, switch (axis) {
+            .horizontal => content.maxY() - cross_cursor,
+            .vertical => content.maxX() - cross_cursor,
+        });
+        const band = @min(@max(line_cross, 0), remaining_cross);
+        const line_content = switch (axis) {
+            .horizontal => geometry.RectF.init(content.x, cross_cursor, content.width, band),
+            .vertical => geometry.RectF.init(cross_cursor, content.y, band, content.height),
+        };
+        try layoutAxisChildren(children[start..finish], line_content, axis, parent_index, depth, output, len, line_style, tokens);
+        cross_cursor += band + gap;
+        start = finish;
     }
 }
 
@@ -865,11 +947,13 @@ fn assignedAxisChildrenExtent(children: []const Widget, axis: LayoutAxis, fixed_
     return assigned;
 }
 
-fn mainAxisAlignmentOffset(alignment: WidgetMainAlignment, free_extent: f32) f32 {
+fn mainAxisAlignmentOffset(alignment: WidgetMainAlignment, free_extent: f32, item_count: usize) f32 {
     return switch (alignment) {
         .start, .space_between => 0,
         .center => free_extent * 0.5,
         .end => free_extent,
+        .space_around => free_extent / (@as(f32, @floatFromInt(item_count)) * 2),
+        .space_evenly => free_extent / @as(f32, @floatFromInt(item_count + 1)),
     };
 }
 

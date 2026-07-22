@@ -629,6 +629,68 @@ test "widget layout aligns row children on main and cross axes" {
     try expectLayoutFrame(spaced_layout, 6, geometry.RectF.init(100, 0, 20, 16));
 }
 
+test "widget layout distributes around and evenly" {
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 20, 10) },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(0, 0, 20, 10) },
+    };
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const around = Widget{ .id = 1, .kind = .row, .layout = .{ .main_alignment = .space_around }, .children = &children };
+    const around_layout = try layoutWidgetTree(around, geometry.RectF.init(0, 0, 100, 20), &nodes);
+    try expectLayoutFrame(around_layout, 2, geometry.RectF.init(15, 0, 20, 10));
+    try expectLayoutFrame(around_layout, 3, geometry.RectF.init(65, 0, 20, 10));
+
+    const evenly = Widget{ .id = 1, .kind = .row, .layout = .{ .main_alignment = .space_evenly }, .children = &children };
+    const evenly_layout = try layoutWidgetTree(evenly, geometry.RectF.init(0, 0, 100, 20), &nodes);
+    try expectLayoutFrame(evenly_layout, 2, geometry.RectF.init(20, 0, 20, 10));
+    try expectLayoutFrame(evenly_layout, 3, geometry.RectF.init(60, 0, 20, 10));
+}
+
+test "widget layout shrinks eligible children to their minimum floors" {
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 80, 10), .layout = .{ .shrink = 1, .min_size = geometry.SizeF.init(30, 0) } },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(0, 0, 80, 10), .layout = .{ .shrink = 1, .min_size = geometry.SizeF.init(30, 0) } },
+    };
+    const row = Widget{ .id = 1, .kind = .row, .children = &children };
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(row, geometry.RectF.init(0, 0, 100, 20), &nodes);
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(0, 0, 50, 10));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(50, 0, 50, 10));
+
+    const mixed = [_]Widget{ children[0], children[1] };
+    var mixed_children = mixed;
+    mixed_children[0].layout.shrink = 0;
+    const mixed_row = Widget{ .id = 1, .kind = .row, .children = &mixed_children };
+    const mixed_layout = try layoutWidgetTree(mixed_row, geometry.RectF.init(0, 0, 100, 20), &nodes);
+    try expectLayoutFrame(mixed_layout, 2, geometry.RectF.init(0, 0, 80, 10));
+    try expectLayoutFrame(mixed_layout, 3, geometry.RectF.init(80, 0, 30, 10));
+}
+
+test "widget layout honors self alignment and wraps into lines" {
+    const self_children = [_]Widget{.{
+        .id = 2,
+        .kind = .panel,
+        .frame = geometry.RectF.init(0, 0, 20, 20),
+        .layout = .{ .self_alignment = .end },
+    }};
+    const self_row = Widget{ .id = 1, .kind = .row, .layout = .{ .cross_alignment = .start }, .children = &self_children };
+    var self_nodes: [2]WidgetLayoutNode = undefined;
+    const self_layout = try layoutWidgetTree(self_row, geometry.RectF.init(0, 0, 100, 100), &self_nodes);
+    try expectLayoutFrame(self_layout, 2, geometry.RectF.init(0, 80, 20, 20));
+
+    const wrap_children = [_]Widget{
+        .{ .id = 4, .kind = .panel, .frame = geometry.RectF.init(0, 0, 40, 20) },
+        .{ .id = 5, .kind = .panel, .frame = geometry.RectF.init(0, 0, 40, 20) },
+        .{ .id = 6, .kind = .panel, .frame = geometry.RectF.init(0, 0, 40, 20) },
+    };
+    const wrap_row = Widget{ .id = 3, .kind = .row, .layout = .{ .gap = 10, .flex_wrap = true, .cross_alignment = .start }, .children = &wrap_children };
+    var wrap_nodes: [4]WidgetLayoutNode = undefined;
+    const wrap_layout = try layoutWidgetTree(wrap_row, geometry.RectF.init(0, 0, 100, 80), &wrap_nodes);
+    try expectLayoutFrame(wrap_layout, 4, geometry.RectF.init(0, 0, 40, 20));
+    try expectLayoutFrame(wrap_layout, 5, geometry.RectF.init(50, 0, 40, 20));
+    try expectLayoutFrame(wrap_layout, 6, geometry.RectF.init(0, 30, 40, 20));
+}
+
 test "cross-centering splits the overflow of a taller-than-band child evenly" {
     // A fixed-height list row whose centered text stack is TALLER than
     // the padded band: the stack keeps its intrinsic height and the
