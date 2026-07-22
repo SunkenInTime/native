@@ -2091,7 +2091,13 @@ test "widget emitter applies control radius and stroke tokens" {
     try emitWidgetTree(&builder, .{ .id = 80, .kind = .button, .variant = .primary, .frame = geometry.RectF.init(0, 0, 120, 32), .text = "Save" }, tokens);
     try emitWidgetTree(&builder, .{ .id = 81, .kind = .text_field, .frame = geometry.RectF.init(0, 40, 160, 34), .text = "Name" }, tokens);
     try emitWidgetTree(&builder, .{ .id = 82, .kind = .checkbox, .frame = geometry.RectF.init(0, 86, 40, 24) }, tokens);
-    try emitWidgetTree(&builder, .{ .id = 83, .kind = .panel, .frame = geometry.RectF.init(0, 120, 180, 90), .style = .{ .radius = 6, .stroke_width = 1 } }, tokens);
+    try emitWidgetTree(&builder, .{ .id = 83, .kind = .panel, .frame = geometry.RectF.init(0, 120, 180, 90), .style = .{
+        .radius = 6,
+        .radius_top_left = 14,
+        .radius_bottom_right = 2,
+        .border = Color.rgb8(1, 2, 3),
+        .stroke_width = 1,
+    } }, tokens);
 
     // Buttons are flat, so the button's chrome sits at [0]/[1].
     const display_list = builder.displayList();
@@ -2133,14 +2139,14 @@ test "widget emitter applies control radius and stroke tokens" {
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[9]) {
-        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(6), fill.radius),
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius{ .top_left = 14, .top_right = 6, .bottom_right = 2, .bottom_left = 6 }, fill.radius),
         else => return error.TestUnexpectedResult,
     }
     switch (display_list.commands[10]) {
         .stroke_rect => |stroke| {
-            try std.testing.expectEqualDeep(Radius.all(6), stroke.radius);
+            try std.testing.expectEqualDeep(Radius{ .top_left = 14, .top_right = 6, .bottom_right = 2, .bottom_left = 6 }, stroke.radius);
             try std.testing.expectEqual(@as(f32, 1), stroke.stroke.width);
-            try expectFillColor(Color.rgb8(72, 82, 92), stroke.stroke.fill);
+            try expectFillColor(Color.rgb8(1, 2, 3), stroke.stroke.fill);
         },
         else => return error.TestUnexpectedResult,
     }

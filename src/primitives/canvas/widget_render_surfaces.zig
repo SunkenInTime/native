@@ -285,8 +285,7 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
 /// instead of ballooning into a lozenge. Deriving from the lg token
 /// keeps themed radius scales in step. An author `radius` wins.
 pub fn bubbleWidgetRadius(widget: Widget, tokens: DesignTokens) Radius {
-    if (widget.style.radius) |radius| return Radius.all(@max(0, radius));
-    return Radius.all(@max(0, tokens.radius.lg) + 12);
+    return widget_render_style.styleRadius(widget, Radius.all(@max(0, widget.style.radius orelse tokens.radius.lg + 12)));
 }
 
 /// The chat bubble chrome: a capsule-cornered message surface that sits

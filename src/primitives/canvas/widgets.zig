@@ -401,6 +401,10 @@ pub const WidgetStyle = struct {
     border: ?Color = null,
     focus_ring: ?Color = null,
     radius: ?f32 = null,
+    radius_top_left: ?f32 = null,
+    radius_top_right: ?f32 = null,
+    radius_bottom_right: ?f32 = null,
+    radius_bottom_left: ?f32 = null,
     stroke_width: ?f32 = null,
     /// The quiet-surface knob: `true` removes this widget's HOVER wash —
     /// the pointer resting on it paints no fill. For image-forward
