@@ -148,15 +148,35 @@ pub fn Markdown(comptime Msg: type) type {
             options: Options,
             details_count: usize = 0,
 
-            fn allocNodes(self: *Builder) []Node {
-                return self.ui.arena.alloc(Node, max_markdown_blocks_per_container) catch {
+            /// A block consumes at least one non-empty source line. Count
+            /// those lines before allocating so short documents do not pay
+            /// for 64 full `Ui.Node` values merely because 64 is the safety
+            /// cap. Continuation lines can only overestimate, so parsing and
+            /// truncation semantics remain unchanged.
+            fn blockCapacity(lines: LineIterator, scope: BlockScope) usize {
+                var probe = lines;
+                var count: usize = 0;
+                while (probe.next()) |line| {
+                    const trimmed = std.mem.trim(u8, line, " \t");
+                    if (scope == .details and std.ascii.startsWithIgnoreCase(trimmed, "</details>")) break;
+                    if (trimmed.len == 0) continue;
+                    count += 1;
+                    if (count == max_markdown_blocks_per_container) break;
+                }
+                return count;
+            }
+
+            fn allocNodes(self: *Builder, lines: LineIterator, scope: BlockScope) []Node {
+                const capacity = blockCapacity(lines, scope);
+                if (capacity == 0) return &.{};
+                return self.ui.arena.alloc(Node, capacity) catch {
                     self.ui.failed = true;
                     return &.{};
                 };
             }
 
             fn parseBlocks(self: *Builder, lines: *LineIterator, scope: BlockScope) []const Node {
-                const nodes = self.allocNodes();
+                const nodes = self.allocNodes(lines.*, scope);
                 if (nodes.len == 0) return &.{};
                 var len: usize = 0;
 
@@ -326,7 +346,16 @@ pub fn Markdown(comptime Msg: type) type {
             }
 
             fn parseList(self: *Builder, lines: *LineIterator, indent: usize, depth: usize) ?Node {
-                const items = self.ui.arena.alloc(Node, max_markdown_list_items_per_list) catch {
+                var probe = lines.*;
+                var item_capacity: usize = 0;
+                while (probe.next()) |line| {
+                    const marker = listMarker(line) orelse break;
+                    if (marker.indent < indent) break;
+                    item_capacity += 1;
+                    if (item_capacity == max_markdown_list_items_per_list) break;
+                }
+                if (item_capacity == 0) return null;
+                const items = self.ui.arena.alloc(Node, item_capacity) catch {
                     self.ui.failed = true;
                     return null;
                 };
@@ -421,7 +450,15 @@ pub fn Markdown(comptime Msg: type) type {
                 const alignments = tableDelimiterAlignments(delimiter_line) orelse return null;
                 if (alignments.len != header.len) return null;
 
-                const rows = self.ui.arena.alloc(Node, max_markdown_table_rows) catch {
+                var row_probe = lines.*;
+                var row_capacity: usize = 1;
+                while (row_probe.next()) |line| {
+                    const trimmed = std.mem.trim(u8, line, " \t");
+                    if (trimmed.len == 0 or std.mem.indexOfScalar(u8, trimmed, '|') == null) break;
+                    row_capacity += 1;
+                    if (row_capacity == max_markdown_table_rows) break;
+                }
+                const rows = self.ui.arena.alloc(Node, row_capacity) catch {
                     self.ui.failed = true;
                     return null;
                 };
