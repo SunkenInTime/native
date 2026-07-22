@@ -89,7 +89,7 @@ pub fn widgetTransform(widget: Widget) Affine {
 }
 
 pub fn widgetClipsContent(widget: Widget) bool {
-    return widget.kind == .scroll_view or widget.layout.clip_content;
+    return widget.kind == .scroll_view or widget.layout.flags.clip_content;
 }
 
 /// True for anchored floating widgets (`layout.anchor` set): hoisted out

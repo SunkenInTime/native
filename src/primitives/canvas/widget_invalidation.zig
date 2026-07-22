@@ -685,7 +685,7 @@ fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
         a.grow == b.grow and
         a.main_alignment == b.main_alignment and
         a.cross_alignment == b.cross_alignment and
-        a.clip_content == b.clip_content and
+        a.flags == b.flags and
         a.columns == b.columns and
         a.virtualized == b.virtualized and
         a.virtual_item_extent == b.virtual_item_extent and

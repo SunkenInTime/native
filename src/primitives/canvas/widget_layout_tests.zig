@@ -866,7 +866,7 @@ test "widget clip content wraps subtree display list and hit testing" {
         .id = 1,
         .kind = .stack,
         .frame = geometry.RectF.init(0, 0, 50, 20),
-        .layout = .{ .clip_content = true },
+        .layout = .{ .flags = .{ .clip_content = true } },
         .children = &children,
     };
 
@@ -2603,7 +2603,7 @@ test "preferred width is used instead of intrinsic content" {
             .id = 2,
             .kind = .column,
             .frame = geometry.RectF.init(0, 0, 360, 0),
-            .layout = .{ .preferred_width_set = true },
+            .layout = .{ .flags = .{ .preferred_width_set = true } },
             .children = &pane_children,
         },
         .{ .id = 4, .kind = .column, .layout = .{ .grow = 1 } },
@@ -2658,7 +2658,7 @@ test "authored max width caps grow distribution" {
 
 test "preferred height overrides cross-axis stretch in a row" {
     const row_children = [_]Widget{
-        .{ .id = 2, .kind = .column, .frame = geometry.RectF.init(0, 0, 0, 40), .layout = .{ .grow = 1, .preferred_height_set = true } },
+        .{ .id = 2, .kind = .column, .frame = geometry.RectF.init(0, 0, 0, 40), .layout = .{ .grow = 1, .flags = .{ .preferred_height_set = true } } },
     };
     const root = Widget{ .id = 1, .kind = .row, .children = &row_children };
 
@@ -2669,7 +2669,7 @@ test "preferred height overrides cross-axis stretch in a row" {
 
 test "preferred size caps stack children instead of stretching them" {
     const stack_children = [_]Widget{
-        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 120, 60), .layout = .{ .preferred_width_set = true, .preferred_height_set = true } },
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 120, 60), .layout = .{ .flags = .{ .preferred_width_set = true, .preferred_height_set = true } } },
     };
     const root = Widget{ .id = 1, .kind = .stack, .children = &stack_children };
 
@@ -2680,7 +2680,7 @@ test "preferred size caps stack children instead of stretching them" {
 
 test "explicit zero preferred width remains distinct from intrinsic sizing" {
     const children = [_]Widget{
-        .{ .id = 2, .kind = .text, .text = "intrinsic", .layout = .{ .preferred_width_set = true } },
+        .{ .id = 2, .kind = .text, .text = "intrinsic", .layout = .{ .flags = .{ .preferred_width_set = true } } },
         .{ .id = 3, .kind = .text, .text = "intrinsic" },
     };
     const root = Widget{ .id = 1, .kind = .row, .children = &children };
@@ -2688,6 +2688,16 @@ test "explicit zero preferred width remains distinct from intrinsic sizing" {
     const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 300, 40), &nodes);
     try std.testing.expectEqual(@as(f32, 0), layout.findById(2).?.frame.width);
     try std.testing.expect(layout.findById(3).?.frame.width > 0);
+}
+
+test "explicit zero maximum clamps an intrinsic width" {
+    const children = [_]Widget{
+        .{ .id = 2, .kind = .text, .text = "intrinsic", .layout = .{ .max_size = geometry.SizeF.init(-0.0, 0) } },
+    };
+    const root = Widget{ .id = 1, .kind = .row, .children = &children };
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 300, 40), &nodes);
+    try std.testing.expectEqual(@as(f32, 0), layout.findById(2).?.frame.width);
 }
 
 // ------------------------------------------------- separator orientation

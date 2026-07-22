@@ -403,7 +403,7 @@ fn buttonGroupSegmentAt(ordinal: usize, visible_total: usize) widget_model.Widge
 /// docs scene and a live app would render different bars.
 fn emitButtonGroupWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
     if (!buttonGroupStampsSegments(widget, tokens)) return emitWidgetClippedChildren(builder, widget, tokens, depth);
-    if (widget.layout.clip_content) try builder.pushClip(widgetContentClip(widget, tokens));
+    if (widget.layout.flags.clip_content) try builder.pushClip(widgetContentClip(widget, tokens));
     var emitted: usize = 0;
     var previous: ?WidgetPaintOrder = null;
     while (emitted < widget.children.len) : (emitted += 1) {
@@ -413,7 +413,7 @@ fn emitButtonGroupWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
         try emitWidgetDepth(builder, child, tokens, depth + 1);
         previous = .{ .layer = widgetPaintLayer(child, tokens), .index = child_index };
     }
-    if (widget.layout.clip_content) try builder.popClip();
+    if (widget.layout.flags.clip_content) try builder.popClip();
 }
 
 fn emitWidgetLayoutChildren(
@@ -707,7 +707,7 @@ fn emitWidgetLayoutScrollableChildren(
     state: WidgetRenderState,
     widget: Widget,
 ) Error!void {
-    const clip = if (widget.layout.clip_content) widgetContentClip(widget, tokens) else Clip{
+    const clip = if (widget.layout.flags.clip_content) widgetContentClip(widget, tokens) else Clip{
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
     };
@@ -834,7 +834,7 @@ fn widgetContentClip(widget: Widget, tokens: DesignTokens) Clip {
 }
 
 fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
-    if (!widget.layout.clip_content) return .{};
+    if (!widget.layout.flags.clip_content) return .{};
     return switch (widget.kind) {
         // The bubble clips at its own capsule arc so wide content (an
         // image child, a full-bleed row) shears along the chrome's
@@ -954,9 +954,9 @@ fn emitScrollViewWidget(builder: *Builder, widget: Widget, tokens: DesignTokens,
 }
 
 fn emitWidgetClippedChildren(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
-    if (widget.layout.clip_content) try builder.pushClip(widgetContentClip(widget, tokens));
+    if (widget.layout.flags.clip_content) try builder.pushClip(widgetContentClip(widget, tokens));
     try emitWidgetChildren(builder, widget.children, tokens, depth);
-    if (widget.layout.clip_content) try builder.popClip();
+    if (widget.layout.flags.clip_content) try builder.popClip();
 }
 
 fn widgetScrollSemantics(layout: anytype, node_index: usize) widget_semantics.WidgetScrollSemantics {
@@ -971,9 +971,9 @@ fn emitWidgetLayoutClippedChildren(
     state: WidgetRenderState,
     widget: Widget,
 ) Error!void {
-    if (widget.layout.clip_content) try builder.pushClip(widgetContentClip(widget, tokens));
+    if (widget.layout.flags.clip_content) try builder.pushClip(widgetContentClip(widget, tokens));
     try emitWidgetLayoutChildren(builder, layout, parent_index, tokens, state);
-    if (widget.layout.clip_content) try builder.popClip();
+    if (widget.layout.flags.clip_content) try builder.popClip();
 }
 
 fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {

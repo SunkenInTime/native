@@ -494,8 +494,10 @@ pub fn Ui(comptime Msg: type) type {
             /// clamp band derives from both panes' floors).
             min_width: f32 = 0,
             min_height: f32 = 0,
-            max_width: f32 = 0,
-            max_height: f32 = 0,
+            /// Optional upper bounds. `null` is unbounded; zero is an
+            /// authored clamp and remains distinct through layout.
+            max_width: ?f32 = null,
+            max_height: ?f32 = null,
             /// Percentage sizes use 0 as the unset sentinel. The Weaver
             /// projection keeps these mutually exclusive with width/height.
             width_percent: f32 = 0,
@@ -2316,8 +2318,8 @@ pub fn Ui(comptime Msg: type) type {
                 child_widgets[0] = try self.finalizeNode(node.nodes[0], widget.id, node.nodes[0].key orelse UiKey{ .index = 0 }, handlers, handler_len, tokens, key_trail);
                 child_widgets[1] = splitDividerWidget(widget);
                 child_widgets[2] = try self.finalizeNode(node.nodes[1], widget.id, node.nodes[1].key orelse UiKey{ .index = 1 }, handlers, handler_len, tokens, key_trail);
-                child_widgets[0].layout.clip_content = true;
-                child_widgets[2].layout.clip_content = true;
+                child_widgets[0].layout.flags.clip_content = true;
+                child_widgets[2].layout.flags.clip_content = true;
                 widget.children = child_widgets;
             } else if (node.nodes.len > 0) {
                 const child_widgets = try self.arena.alloc(Widget, node.nodes.len);
@@ -2584,10 +2586,15 @@ pub fn Ui(comptime Msg: type) type {
                     .virtual_anchor_index = options.virtual_anchor_index,
                     .virtual_anchor_extent = options.virtual_anchor_extent,
                     .virtual_total_extent = options.virtual_total_extent,
-                    .preferred_width_set = options.width != null,
-                    .preferred_height_set = options.height != null,
+                    .flags = .{
+                        .preferred_width_set = options.width != null,
+                        .preferred_height_set = options.height != null,
+                    },
                     .min_size = .{ .width = options.min_width, .height = options.min_height },
-                    .max_size = .{ .width = options.max_width, .height = options.max_height },
+                    .max_size = .{
+                        .width = encodedOptionalMax(options.max_width),
+                        .height = encodedOptionalMax(options.max_height),
+                    },
                     .percent_size = .{
                         .width = options.width_percent,
                         .height = options.height_percent,
@@ -2670,6 +2677,12 @@ fn findWidgetIn(widget: Widget, id: ObjectId) ?Widget {
         if (findWidgetIn(child, id)) |found| return found;
     }
     return null;
+}
+
+fn encodedOptionalMax(value: ?f32) f32 {
+    const authored = value orelse return 0;
+    if (!std.math.isFinite(authored) or authored < 0) return 0;
+    return if (authored == 0) -0.0 else authored;
 }
 
 fn isTextEntryWidget(widget: Widget) bool {

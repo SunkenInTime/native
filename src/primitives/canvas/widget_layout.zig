@@ -421,8 +421,8 @@ fn explicitMainExtent(child: Widget, axis: LayoutAxis) f32 {
 
 fn hasExplicitMainExtent(child: Widget, axis: LayoutAxis) bool {
     return switch (axis) {
-        .horizontal => child.layout.preferred_width_set or child.frame.width > 0,
-        .vertical => child.layout.preferred_height_set or child.frame.height > 0,
+        .horizontal => child.layout.flags.preferred_width_set or child.frame.width > 0,
+        .vertical => child.layout.flags.preferred_height_set or child.frame.height > 0,
     };
 }
 
@@ -435,8 +435,8 @@ fn explicitCrossExtent(child: Widget, axis: LayoutAxis) f32 {
 
 fn hasExplicitCrossExtent(child: Widget, axis: LayoutAxis) bool {
     return switch (axis) {
-        .horizontal => child.layout.preferred_height_set or child.frame.height > 0,
-        .vertical => child.layout.preferred_width_set or child.frame.width > 0,
+        .horizontal => child.layout.flags.preferred_height_set or child.frame.height > 0,
+        .vertical => child.layout.flags.preferred_width_set or child.frame.width > 0,
     };
 }
 
@@ -604,7 +604,14 @@ fn maxMainExtent(widget: Widget, axis: LayoutAxis) f32 {
 }
 
 fn boundedByMax(value: f32, max: f32) f32 {
-    return if (max > 0) @min(value, max) else value;
+    return if (maxIsSet(max)) @min(value, @max(max, 0)) else value;
+}
+
+/// Direct `Widget` construction historically uses +0 as the unbounded
+/// sentinel. The typed builder encodes an authored zero maximum as -0 so
+/// it remains explicit without growing the retained widget layout.
+fn maxIsSet(max: f32) bool {
+    return max > 0 or (max == 0 and (@as(u32, @bitCast(max)) & 0x8000_0000) != 0);
 }
 
 /// Main extent of a non-growing flex child, given the cross-axis space it
@@ -2062,7 +2069,7 @@ fn mainExtentWithBubbleCap(child: Widget, axis: LayoutAxis, available: f32, valu
 
 fn bubbleThreadCapEligible(child: Widget) bool {
     if (child.kind != .bubble or child.variant == .ghost) return false;
-    return !child.layout.preferred_width_set and child.frame.width <= 0 and child.layout.max_size.width <= 0;
+    return !child.layout.flags.preferred_width_set and child.frame.width <= 0 and !maxIsSet(child.layout.max_size.width);
 }
 
 fn bubbleThreadWidthCap(child: Widget, available: f32, value: f32) f32 {

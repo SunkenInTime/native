@@ -132,7 +132,7 @@ test "a focusable widget fully clipped out of a clipping surface is unreachable"
     // A clip_content panel with a button positioned past its right edge:
     // the routing layer skips invisible frames, so Tab never lands there.
     var panel_layout = canvas.WidgetLayoutStyle{};
-    panel_layout.clip_content = true;
+    panel_layout.flags.clip_content = true;
     const root = Widget{ .kind = .column, .children = &.{
         .{ .kind = .panel, .id = 2, .layout = panel_layout, .frame = geometry.RectF.init(0, 0, 100, 100), .children = &.{
             .{ .kind = .button, .id = 3, .text = "Ghost", .frame = geometry.RectF.init(200, 10, 80, 30) },
@@ -175,7 +175,7 @@ test "below-the-fold scroll content stays reachable through OUTER clip scopes" {
     // past the pane's RIGHT edge stays a finding (scrolling is
     // vertical; nothing ever brings it into view).
     var pane_layout = canvas.WidgetLayoutStyle{};
-    pane_layout.clip_content = true;
+    pane_layout.flags.clip_content = true;
     const root = Widget{ .kind = .column, .id = 1, .layout = pane_layout, .frame = geometry.RectF.init(0, 0, 400, 100), .children = &.{
         .{ .kind = .scroll_view, .id = 2, .frame = geometry.RectF.init(0, 0, 400, 80), .children = &.{
             .{ .kind = .column, .children = &.{

@@ -677,25 +677,30 @@ test "explicit sizes are preferred while authored min and max stay independent" 
         ui.el(.panel, .{ .width = 240, .height = 40, .min_width = 80, .max_width = 320 }, .{}),
         ui.el(.resizable, .{ .width = 240 }, .{}),
         ui.el(.panel, .{ .width = 0 }, .{}),
+        ui.el(.panel, .{ .max_width = 0 }, .{}),
     }));
 
     const panel = tree.root.children[0];
-    try testing.expect(panel.layout.preferred_width_set);
-    try testing.expect(panel.layout.preferred_height_set);
+    try testing.expect(panel.layout.flags.preferred_width_set);
+    try testing.expect(panel.layout.flags.preferred_height_set);
     try testing.expectEqual(@as(f32, 240), panel.frame.width);
     try testing.expectEqual(@as(f32, 40), panel.frame.height);
     try testing.expectEqual(@as(f32, 80), panel.layout.min_size.width);
     try testing.expectEqual(@as(f32, 320), panel.layout.max_size.width);
 
     const resizable = tree.root.children[1];
-    try testing.expect(resizable.layout.preferred_width_set);
+    try testing.expect(resizable.layout.flags.preferred_width_set);
     try testing.expectEqual(@as(f32, 240), resizable.frame.width);
     try testing.expectEqual(@as(f32, 0), resizable.layout.min_size.width);
     try testing.expectEqual(@as(f32, 0), resizable.layout.max_size.width);
 
     const zero = tree.root.children[2];
-    try testing.expect(zero.layout.preferred_width_set);
+    try testing.expect(zero.layout.flags.preferred_width_set);
     try testing.expectEqual(@as(f32, 0), zero.frame.width);
+
+    const zero_max = tree.root.children[3];
+    try testing.expectEqual(@as(f32, 0), zero_max.layout.max_size.width);
+    try testing.expect((@as(u32, @bitCast(zero_max.layout.max_size.width)) & 0x8000_0000) != 0);
 }
 
 test "opacity and transform flow to the widget with identity defaults" {
@@ -865,7 +870,7 @@ test "timeline items compose indicator, content, chevron, and a root press" {
     // trailing chevron.
     const badge = findByKind(first, .badge).?;
     try testing.expectEqual(canvas.WidgetVariant.primary, badge.variant);
-    try testing.expect(badge.layout.preferred_width_set);
+    try testing.expect(badge.layout.flags.preferred_width_set);
     try testing.expectEqual(@as(f32, 10), badge.frame.width);
     try testing.expectEqual(@as(usize, 1), countKindIn(first, .separator));
     try testing.expect(findSemanticsLabel(first, "Coder finished") != null);

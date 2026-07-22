@@ -359,7 +359,7 @@ pub fn canvasWidgetLayoutNodeClippedBounds(layout: canvas.WidgetLayoutTree, node
 }
 
 pub fn canvasWidgetClipsContent(widget: canvas.Widget) bool {
-    return widget.kind == .scroll_view or widget.layout.clip_content;
+    return widget.kind == .scroll_view or widget.layout.flags.clip_content;
 }
 
 pub fn canvasWidgetRuntimeHitTarget(widget: canvas.Widget) bool {

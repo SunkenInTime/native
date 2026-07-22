@@ -2280,7 +2280,7 @@ test "the wrap attribute builds the hand-written wrapped text leaf" {
     try testing.expectEqual(canvas.TextOverflow.clip, clipped.text_overflow);
 
     // The column width is an authored preferred size, independent of bounds.
-    try testing.expect(markup_tree.root.layout.preferred_width_set);
+    try testing.expect(markup_tree.root.layout.flags.preferred_width_set);
     try testing.expectEqual(@as(f32, 360), markup_tree.root.frame.width);
     try testing.expectEqual(@as(f32, 0), markup_tree.root.layout.min_size.width);
     try testing.expectEqual(@as(f32, 0), markup_tree.root.layout.max_size.width);

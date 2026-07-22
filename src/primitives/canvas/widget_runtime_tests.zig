@@ -1091,13 +1091,13 @@ test "widget layout diff clips paint dirtiness to clip content ancestors" {
     const previous_stack = Widget{
         .id = 1,
         .kind = .stack,
-        .layout = .{ .clip_content = true },
+        .layout = .{ .flags = .{ .clip_content = true } },
         .children = &previous_children,
     };
     const next_stack = Widget{
         .id = 1,
         .kind = .stack,
-        .layout = .{ .clip_content = true },
+        .layout = .{ .flags = .{ .clip_content = true } },
         .children = &next_children,
     };
 

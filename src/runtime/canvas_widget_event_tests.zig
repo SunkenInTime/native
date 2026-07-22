@@ -1527,7 +1527,7 @@ test "runtime rejects automation canvas widget actions for clip content clipped 
     };
     var nodes: [3]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(
-        .{ .id = 1, .kind = .stack, .layout = .{ .clip_content = true }, .children = &children },
+        .{ .id = 1, .kind = .stack, .layout = .{ .flags = .{ .clip_content = true } }, .children = &children },
         geometry.RectF.init(0, 0, 48, 40),
         &nodes,
     );
