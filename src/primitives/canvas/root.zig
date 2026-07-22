@@ -543,6 +543,7 @@ pub const WidgetLayoutNode = event_model.WidgetLayoutNode;
 pub const WidgetHit = event_model.WidgetHit;
 pub const WidgetPointerPhase = event_model.WidgetPointerPhase;
 pub const WidgetPointerEvent = event_model.WidgetPointerEvent;
+pub const WidgetPressEvent = event_model.WidgetPressEvent;
 pub const WidgetKeyboardPhase = event_model.WidgetKeyboardPhase;
 pub const WidgetKeyboardModifiers = event_model.WidgetKeyboardModifiers;
 pub const WidgetKeyboardEvent = event_model.WidgetKeyboardEvent;

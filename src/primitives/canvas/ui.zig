@@ -264,6 +264,9 @@ pub const UiHandlerEvent = enum {
     /// (select, then open/play), the way list selection conventions
     /// expect.
     double_press,
+    /// Secondary-button press (right/ctrl-click) when no native context
+    /// menu consumes the gesture.
+    right_press,
     toggle,
     change,
     submit,
@@ -675,6 +678,11 @@ pub fn Ui(comptime Msg: type) type {
             /// click). Like `on_press`, binding it makes the element a
             /// hit target and press claimer.
             on_double_press: ?Msg = null,
+            /// Payload-producing alternatives for press-family handlers.
+            /// A callback wins over the matching plain Msg when both are set.
+            on_press_event: ?PressMsgFn = null,
+            on_double_press_event: ?PressMsgFn = null,
+            on_right_press_event: ?PressMsgFn = null,
             on_toggle: ?Msg = null,
             on_change: ?Msg = null,
             on_submit: ?Msg = null,
@@ -771,6 +779,57 @@ pub fn Ui(comptime Msg: type) type {
         pub const LinkMsgFn = *const fn (link: []const u8) Msg;
         pub const ScrollMsgFn = *const fn (scroll: canvas.ScrollState) Msg;
 
+        /// Node-local pointer coordinates plus the laid-out target size. The
+        /// normalized SDK-facing values are `x / width` and `y / height`.
+        pub const PressEvent = canvas.WidgetPressEvent;
+
+        pub const PressMsgFn = *const fn (press: PressEvent) Msg;
+
+        /// Internal compact carrier: replacing the old `?Msg` slot keeps the
+        /// arena-resident Node size stable while accepting either the classic
+        /// message or the new payload constructor.
+        const PressHandler = union(enum) {
+            none,
+            message: Msg,
+            event: PressMsgFn,
+
+            fn from(make: ?PressMsgFn, msg: ?Msg) PressHandler {
+                if (make) |value| return .{ .event = value };
+                if (msg) |value| return .{ .message = value };
+                return .none;
+            }
+
+            fn isBound(self: PressHandler) bool {
+                return self != .none;
+            }
+
+            fn messageValue(self: PressHandler) ?Msg {
+                return switch (self) {
+                    .message => |value| value,
+                    else => null,
+                };
+            }
+        };
+
+        /// The historical hold Msg and the new right-press payload share one
+        /// secondary-gesture slot. A dedicated right handler takes precedence
+        /// when both are authored; otherwise right press falls back to hold.
+        const SecondaryHandler = union(enum) {
+            none,
+            hold: Msg,
+            right: PressMsgFn,
+
+            fn from(make: ?PressMsgFn, msg: ?Msg) SecondaryHandler {
+                if (make) |value| return .{ .right = value };
+                if (msg) |value| return .{ .hold = value };
+                return .none;
+            }
+
+            fn isBound(self: SecondaryHandler) bool {
+                return self != .none;
+            }
+        };
+
         pub const Node = struct {
             widget: Widget = .{ .kind = .stack },
             key: ?UiKey = null,
@@ -782,13 +841,13 @@ pub fn Ui(comptime Msg: type) type {
             /// when the text is final.
             wrap: ?bool = null,
             style_tokens: StyleTokenRefs = .{},
-            on_press: ?Msg = null,
-            on_double_press: ?Msg = null,
+            on_press: PressHandler = .none,
+            on_double_press: PressHandler = .none,
             on_toggle: ?Msg = null,
             on_change: ?Msg = null,
             on_submit: ?Msg = null,
             on_dismiss: ?Msg = null,
-            on_hold: ?Msg = null,
+            on_hold: SecondaryHandler = .none,
             on_reach_end: ?Msg = null,
             on_reach_start: ?Msg = null,
             on_input: ?InputMsgFn = null,
@@ -814,6 +873,7 @@ pub fn Ui(comptime Msg: type) type {
                 input: InputMsgFn,
                 value: ValueMsgFn,
                 scroll: ScrollMsgFn,
+                press: PressMsgFn,
                 /// Per-item context-menu messages, indexed like the
                 /// widget's `context_menu` items (null = inert entry:
                 /// separator or msg-less item).
@@ -849,6 +909,15 @@ pub fn Ui(comptime Msg: type) type {
             return struct {
                 fn make(scroll_state: canvas.ScrollState) Msg {
                     return @unionInit(Msg, @tagName(tag), scroll_state);
+                }
+            }.make;
+        }
+
+        /// Comptime message constructor for a press payload.
+        pub fn pressMsg(comptime tag: std.meta.Tag(Msg)) PressMsgFn {
+            return struct {
+                fn make(press: PressEvent) Msg {
+                    return @unionInit(Msg, @tagName(tag), press);
                 }
             }.make;
         }
@@ -1042,6 +1111,58 @@ pub fn Ui(comptime Msg: type) type {
                 return self.msgForPointer(target_id, phase);
             }
 
+            /// Pointer dispatch with geometry. Pressed/double-pressed event
+            /// factories receive node-local logical pixels and target size;
+            /// plain Msg handlers retain their established behavior.
+            pub fn msgForPointerEvent(self: Tree, target: canvas.WidgetHit, pointer: canvas.WidgetPointerEvent) ?Msg {
+                if (pointer.phase != .up) return null;
+                const press = pressEvent(target, pointer);
+                if (pointer.click_count >= 2) {
+                    if (self.msgForPress(target.id, .double_press, press)) |msg| return msg;
+                }
+                const widget = self.findWidget(target.id) orelse return null;
+                const semantic_actions = [_]canvas.WidgetSemanticAction{ .press, .toggle, .select };
+                for (semantic_actions) |action| {
+                    const intent = canvas.widgetSemanticControlIntent(widget, action) orelse continue;
+                    switch (intent.kind) {
+                        .press, .select => if (self.msgForPress(target.id, .press, press)) |msg| return msg,
+                        else => if (self.msgForIntent(target.id, intent)) |msg| return msg,
+                    }
+                }
+                return null;
+            }
+
+            /// Secondary press prefers its dedicated handler and preserves
+            /// the historical `on_hold` fallback for existing applications.
+            pub fn msgForRightPress(self: Tree, target: canvas.WidgetHit, pointer: canvas.WidgetPointerEvent) ?Msg {
+                const press = pressEvent(target, pointer);
+                return self.msgForPress(target.id, .right_press, press) orelse self.msgForHold(target.id);
+            }
+
+            fn msgForPress(self: Tree, id: ObjectId, event: UiHandlerEvent, press: PressEvent) ?Msg {
+                for (self.handlers) |handler| {
+                    if (handler.id != id or handler.event != event) continue;
+                    return switch (handler.action) {
+                        .message => |msg| msg,
+                        .press => |make| make(press),
+                        else => null,
+                    };
+                }
+                return null;
+            }
+
+            fn pressEvent(target: canvas.WidgetHit, pointer: canvas.WidgetPointerEvent) PressEvent {
+                const bounds = target.bounds.normalized();
+                return .{
+                    .target_id = target.id,
+                    .x = pointer.point.x - bounds.x,
+                    .y = pointer.point.y - bounds.y,
+                    .width = bounds.width,
+                    .height = bounds.height,
+                    .click_count = pointer.click_count,
+                };
+            }
+
             /// Typed dispatch for keyboard events: engine control intents
             /// (activation keys, slider steps) plus enter-to-submit on text
             /// entry widgets.
@@ -1121,13 +1242,13 @@ pub fn Ui(comptime Msg: type) type {
                 .global_key = options.global_key,
                 .wrap = options.wrap,
                 .style_tokens = options.style_tokens,
-                .on_press = options.on_press,
-                .on_double_press = options.on_double_press,
+                .on_press = PressHandler.from(options.on_press_event, options.on_press),
+                .on_double_press = PressHandler.from(options.on_double_press_event, options.on_double_press),
                 .on_toggle = options.on_toggle,
                 .on_change = options.on_change,
                 .on_submit = options.on_submit,
                 .on_dismiss = options.on_dismiss,
-                .on_hold = options.on_hold,
+                .on_hold = SecondaryHandler.from(options.on_right_press_event, options.on_hold),
                 .on_reach_end = options.on_reach_end,
                 .on_reach_start = options.on_reach_start,
                 .on_input = options.on_input,
@@ -1159,7 +1280,7 @@ pub fn Ui(comptime Msg: type) type {
                 else
                     .{
                         .label = node.widget.text,
-                        .msg = node.on_press,
+                        .msg = node.on_press.messageValue(),
                         .enabled = !node.widget.state.disabled,
                     };
             }
@@ -2344,18 +2465,18 @@ pub fn Ui(comptime Msg: type) type {
             }
             // Typed handlers imply the matching accessibility actions, the
             // same way a stringly `command` does for engine-owned dispatch.
-            if (node.on_press != null) widget.semantics.actions.press = true;
+            if (node.on_press.isBound()) widget.semantics.actions.press = true;
             // A double-press handler makes the element pressable too:
             // the double-click's first release must land somewhere, and
             // an element that acts on double click without claiming
             // presses would be unreachable by pointer at all.
-            if (node.on_double_press != null) widget.semantics.actions.press = true;
+            if (node.on_double_press.isBound()) widget.semantics.actions.press = true;
             if (node.on_toggle != null) widget.semantics.actions.toggle = true;
             // A hold handler makes the element pressable (hit target +
             // press claimer), like on_press: the hold gesture starts as a
             // press, and the classic list-row shape (press to open, hold
             // for the menu) pairs the two on one element.
-            if (node.on_hold != null) widget.semantics.actions.press = true;
+            if (node.on_hold.isBound()) widget.semantics.actions.press = true;
             if (node.on_input != null) widget.semantics.actions.set_text = true;
             if (widget.kind == .slider and (node.on_value != null or node.on_change != null)) {
                 widget.semantics.actions.increment = true;
@@ -2385,13 +2506,13 @@ pub fn Ui(comptime Msg: type) type {
                 }
                 widget.children = child_widgets;
             }
-            appendHandler(handlers, handler_len, widget.id, .press, node.on_press);
-            appendHandler(handlers, handler_len, widget.id, .double_press, node.on_double_press);
+            appendPressHandler(handlers, handler_len, widget.id, .press, node.on_press);
+            appendPressHandler(handlers, handler_len, widget.id, .double_press, node.on_double_press);
             appendHandler(handlers, handler_len, widget.id, .toggle, node.on_toggle);
             appendHandler(handlers, handler_len, widget.id, .change, node.on_change);
             appendHandler(handlers, handler_len, widget.id, .submit, node.on_submit);
             appendHandler(handlers, handler_len, widget.id, .dismiss, node.on_dismiss);
-            appendHandler(handlers, handler_len, widget.id, .hold, node.on_hold);
+            appendSecondaryHandler(handlers, handler_len, widget.id, node.on_hold);
             appendHandler(handlers, handler_len, widget.id, .reach_end, node.on_reach_end);
             appendHandler(handlers, handler_len, widget.id, .reach_start, node.on_reach_start);
             if (node.on_input) |make| {
@@ -2495,15 +2616,37 @@ pub fn Ui(comptime Msg: type) type {
             handler_len.* += 1;
         }
 
+        fn appendPressHandler(handlers: []Handler, handler_len: *usize, id: ObjectId, event: UiHandlerEvent, handler: PressHandler) void {
+            switch (handler) {
+                .none => {},
+                .message => |value| appendHandler(handlers, handler_len, id, event, value),
+                .event => |value| {
+                    handlers[handler_len.*] = .{ .id = id, .event = event, .action = .{ .press = value } };
+                    handler_len.* += 1;
+                },
+            }
+        }
+
+        fn appendSecondaryHandler(handlers: []Handler, handler_len: *usize, id: ObjectId, handler: SecondaryHandler) void {
+            switch (handler) {
+                .none => {},
+                .hold => |value| appendHandler(handlers, handler_len, id, .hold, value),
+                .right => |value| {
+                    handlers[handler_len.*] = .{ .id = id, .event = .right_press, .action = .{ .press = value } };
+                    handler_len.* += 1;
+                },
+            }
+        }
+
         fn countHandlers(node: Node) usize {
             var total: usize = 0;
-            if (node.on_press != null) total += 1;
-            if (node.on_double_press != null) total += 1;
+            if (node.on_press.isBound()) total += 1;
+            if (node.on_double_press.isBound()) total += 1;
             if (node.on_toggle != null) total += 1;
             if (node.on_change != null) total += 1;
             if (node.on_submit != null) total += 1;
             if (node.on_dismiss != null) total += 1;
-            if (node.on_hold != null) total += 1;
+            if (node.on_hold.isBound()) total += 1;
             if (node.on_reach_end != null) total += 1;
             if (node.on_reach_start != null) total += 1;
             if (node.on_input != null) total += 1;

@@ -3139,7 +3139,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // `on_double_press` handler (falling back to the ordinary
             // press), while its first release already dispatched the
             // single press — select-then-act, the list convention.
-            if (tree.msgForPointerClick(target.id, pointer_event.pointer.phase, pointer_event.pointer.click_count)) |msg| {
+            if (tree.msgForPointerEvent(target, pointer_event.pointer)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
             }
         }
@@ -3197,7 +3197,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn handleContextPress(self: *Self, runtime: *Runtime, press_event: core.CanvasWidgetContextPressEvent) anyerror!void {
             const tree = self.treeForViewLabel(press_event.view_label) orelse return;
             const target = press_event.press_target orelse return;
-            if (tree.msgForHold(target.id)) |msg| {
+            if (tree.msgForRightPress(target, press_event.pointer)) |msg| {
                 try self.dispatch(runtime, press_event.window_id, msg);
             }
         }

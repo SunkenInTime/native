@@ -192,6 +192,7 @@ pub const CanvasWidgetContextPressEvent = struct {
     /// The deepest press-claiming widget on the hit route (the same
     /// resolution primary presses use).
     press_target: ?canvas.WidgetHit = null,
+    pointer: canvas.WidgetPointerEvent = .{ .phase = .down, .point = .{} },
 };
 
 /// The user selected an item from a widget's app-declared native context

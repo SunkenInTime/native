@@ -42,6 +42,7 @@ fn expectSameTree(comptime MsgT: type, expected: canvas.Ui(MsgT).Tree, actual: c
             .input => |make| try testing.expectEqual(make, actual_handler.action.input),
             .value => |make| try testing.expectEqual(make, actual_handler.action.value),
             .scroll => |make| try testing.expectEqual(make, actual_handler.action.scroll),
+            .press => |make| try testing.expectEqual(make, actual_handler.action.press),
             // Context-menu handler entries carry one ?Msg per declared
             // item (separators are null slots); markup `<context-menu>`
             // and the Zig builder both produce them.

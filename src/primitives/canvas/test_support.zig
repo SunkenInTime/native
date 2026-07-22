@@ -265,6 +265,7 @@ pub const WidgetLayoutNode = canvas.WidgetLayoutNode;
 pub const WidgetHit = canvas.WidgetHit;
 pub const WidgetPointerPhase = canvas.WidgetPointerPhase;
 pub const WidgetPointerEvent = canvas.WidgetPointerEvent;
+pub const WidgetPressEvent = canvas.WidgetPressEvent;
 pub const WidgetKeyboardPhase = canvas.WidgetKeyboardPhase;
 pub const WidgetKeyboardModifiers = canvas.WidgetKeyboardModifiers;
 pub const WidgetKeyboardEvent = canvas.WidgetKeyboardEvent;
