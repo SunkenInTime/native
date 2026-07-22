@@ -30,10 +30,11 @@ fn measuredTextWidth(tokens: DesignTokens, text: []const u8, size: f32) f32 {
 
 fn styledWidgetTextWidth(widget: Widget, tokens: DesignTokens, size: f32) f32 {
     const font_id = widget_metrics.widgetTextFontId(widget, tokens);
-    if (widget.text_letter_spacing == 0 and !widget.text_tabular_numbers) return measureTextWidthForFont(tokens.text_measure, font_id, widget.text, size);
+    const text_style = widget.textStyle();
+    if (text_style.letter_spacing == 0 and !text_style.tabular_numbers) return measureTextWidthForFont(tokens.text_measure, font_id, widget.text, size);
     const options = text_model.TextLayoutOptions{
-        .letter_spacing = widget.text_letter_spacing,
-        .tabular_numbers = widget.text_tabular_numbers,
+        .letter_spacing = text_style.letter_spacing,
+        .tabular_numbers = text_style.tabular_numbers,
         .measure = tokens.text_measure,
     };
     var width: f32 = 0;
@@ -882,7 +883,7 @@ fn widgetIsSpanParagraph(widget: Widget) bool {
 
 fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize) bool {
     if (depth >= max_widget_depth) return false;
-    if (widgetIsSpanParagraph(widget) or (widget.kind == .text and widget.text_max_lines > 0)) return true;
+    if (widgetIsSpanParagraph(widget) or (widget.kind == .text and widget.textStyle().max_lines > 0)) return true;
     for (widget.children) |child| {
         if (widgetSubtreeHasTextSpans(child, depth + 1)) return true;
     }
@@ -902,7 +903,7 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
     const content_height: f32 = switch (widget.kind) {
         .text, .data_cell => if (widget.spans.len > 0)
             spanParagraphHeight(widget, inner_width, tokens)
-        else if (widget.kind == .text and widget.text_max_lines > 0)
+        else if (widget.kind == .text and widget.textStyle().max_lines > 0)
             clampedTextHeight(widget, inner_width, tokens)
         else
             return preferredMainExtent(widget, .vertical, tokens),
@@ -1049,7 +1050,8 @@ fn spanParagraphHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
 
 fn clampedTextHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
     const size = widgetBodyTextSize(widget, tokens);
-    const line_height = if (widget.text_line_height > 0) widget.text_line_height else widgetLineHeight(size);
+    const text_style = widget.textStyle();
+    const line_height = if (text_style.line_height > 0) text_style.line_height else widgetLineHeight(size);
     const draw = text_model.DrawText{
         .font_id = widget_metrics.widgetTextFontId(widget, tokens),
         .size = size,
@@ -1061,12 +1063,12 @@ fn clampedTextHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
     const layout = text_model.layoutTextRun(draw, .{
         .max_width = width,
         .line_height = line_height,
-        .letter_spacing = widget.text_letter_spacing,
-        .tabular_numbers = widget.text_tabular_numbers,
-        .max_lines = widget.text_max_lines,
+        .letter_spacing = text_style.letter_spacing,
+        .tabular_numbers = text_style.tabular_numbers,
+        .max_lines = text_style.max_lines,
         .wrap = .word,
         .measure = tokens.text_measure,
-    }, &lines) catch return line_height * @as(f32, @floatFromInt(widget.text_max_lines));
+    }, &lines) catch return line_height * @as(f32, @floatFromInt(text_style.max_lines));
     return line_height * @as(f32, @floatFromInt(layout.lineCount()));
 }
 
@@ -2011,7 +2013,7 @@ fn intrinsicTextWidgetSize(widget: Widget, tokens: DesignTokens, text_size: f32)
     }
     return geometry.SizeF.init(
         styledWidgetTextWidth(widget, tokens, text_size),
-        if (widget.text_line_height > 0) widget.text_line_height else widgetLineHeight(text_size),
+        if (widget.textStyle().line_height > 0) widget.textStyle().line_height else widgetLineHeight(text_size),
     );
 }
 

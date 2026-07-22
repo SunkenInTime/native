@@ -47,14 +47,15 @@ pub fn widgetBodyTextSize(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 fn scaledPlainTextSize(widget: Widget, base: f32) f32 {
-    if (!std.math.isFinite(widget.text_scale) or widget.text_scale <= 0) return base;
-    return @max(1, base * widget.text_scale);
+    const scale = widget.textStyle().scale;
+    if (!std.math.isFinite(scale) or scale <= 0) return base;
+    return @max(1, base * scale);
 }
 
 /// Face used by a plain text leaf. It mirrors span weight resolution so
 /// clamped text can retain the same font styling without becoming a paragraph.
 pub fn widgetTextFontId(widget: Widget, tokens: DesignTokens) canvas.FontId {
-    return text_spans_model.textSpanFontId(.{ .weight = widget.text_weight }, tokens.typography);
+    return text_spans_model.textSpanFontId(.{ .weight = widget.textStyle().weight }, tokens.typography);
 }
 
 pub fn widgetLabelTextSize(widget: Widget, tokens: DesignTokens) f32 {
@@ -105,11 +106,12 @@ pub fn textWrapMaxWidth(tokens: DesignTokens, width: f32) f32 {
 /// a snapped paint frame never wraps a line the layout frame fit —
 /// painted lines are therefore always <= the reserved line count.
 pub fn widgetTextSpanLayoutOptions(widget: Widget, tokens: DesignTokens, max_width: f32) text_spans_model.TextSpanLayoutOptions {
+    const text_style = widget.textStyle();
     return .{
         .size = widgetBodyTextSize(widget, tokens),
-        .line_height = widget.text_line_height,
-        .letter_spacing = widget.text_letter_spacing,
-        .tabular_numbers = widget.text_tabular_numbers,
+        .line_height = text_style.line_height,
+        .letter_spacing = text_style.letter_spacing,
+        .tabular_numbers = text_style.tabular_numbers,
         .max_width = max_width,
         .wrap = .word,
         .alignment = widget.text_alignment,

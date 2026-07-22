@@ -1085,7 +1085,7 @@ pub fn Ui(comptime Msg: type) type {
             if (options.on_dismiss != null) warnDismissHandlerKind(kind);
             if (options.on_resize != null) warnResizeHandlerKind(kind);
             return .{
-                .widget = widgetFromOptions(kind, options),
+                .widget = self.widgetFromOptions(kind, options),
                 .key = options.key,
                 .global_key = options.global_key,
                 .wrap = options.wrap,
@@ -2267,7 +2267,7 @@ pub fn Ui(comptime Msg: type) type {
             // `widget.text`), so wrapping, intrinsic sizing, wrapped
             // height reservation, and rendering are all the existing span
             // path — no forked text pipeline.
-            if (node.wrap == true and widget.text_max_lines == 0 and widget.kind == .text and widget.spans.len == 0 and widget.text.len > 0) {
+            if (node.wrap == true and widget.textStyle().max_lines == 0 and widget.kind == .text and widget.spans.len == 0 and widget.text.len > 0) {
                 const spans = try self.arena.alloc(canvas.TextSpan, 1);
                 spans[0] = .{ .text = widget.text };
                 widget.spans = spans;
@@ -2543,7 +2543,7 @@ pub fn Ui(comptime Msg: type) type {
             }
         }
 
-        fn widgetFromOptions(kind: WidgetKind, options: ElementOptions) Widget {
+        fn widgetFromOptions(self: *Self, kind: WidgetKind, options: ElementOptions) Widget {
             warnStackContainerGap(kind, options.gap);
             warnUnknownIconName(options.icon);
             var authored_frame = options.frame;
@@ -2559,12 +2559,6 @@ pub fn Ui(comptime Msg: type) type {
                 .icon = options.icon,
                 .icon_placement = options.icon_placement,
                 .text_alignment = options.text_alignment,
-                .text_scale = options.text_scale,
-                .text_weight = options.text_weight,
-                .text_line_height = options.text_line_height,
-                .text_letter_spacing = options.text_letter_spacing,
-                .text_tabular_numbers = options.text_tabular_numbers,
-                .text_max_lines = options.text_max_lines,
                 .text_overflow = options.overflow,
                 .autofocus = options.autofocus,
                 .image_id = options.image,
@@ -2633,6 +2627,22 @@ pub fn Ui(comptime Msg: type) type {
                 .resize_easing = options.resize_easing,
                 .resize_origin = options.resize_origin,
             };
+            const text_style: canvas.WidgetTextStyle = .{
+                .scale = options.text_scale,
+                .weight = options.text_weight,
+                .line_height = options.text_line_height,
+                .letter_spacing = options.text_letter_spacing,
+                .tabular_numbers = options.text_tabular_numbers,
+                .max_lines = options.text_max_lines,
+            };
+            if (!text_style.isDefault()) {
+                const metadata = self.arena.alloc(canvas.ImmediateCanvasCommand, 1) catch {
+                    self.failed = true;
+                    return widget;
+                };
+                metadata[0] = .{ .text_style = text_style };
+                widget.immediate_commands = metadata;
+            }
             applyKindDefaultLayout(kind, options, &widget.layout);
             return widget;
         }

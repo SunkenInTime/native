@@ -266,12 +266,7 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         previous.widget.backdrop_blur_token != next.widget.backdrop_blur_token or
         previous.widget.scrim != next.widget.scrim or
         previous.widget.text_alignment != next.widget.text_alignment or
-        previous.widget.text_scale != next.widget.text_scale or
-        previous.widget.text_weight != next.widget.text_weight or
-        previous.widget.text_line_height != next.widget.text_line_height or
-        previous.widget.text_letter_spacing != next.widget.text_letter_spacing or
-        previous.widget.text_tabular_numbers != next.widget.text_tabular_numbers or
-        previous.widget.text_max_lines != next.widget.text_max_lines or
+        !widgetTextStylesEqual(previous.widget.textStyle(), next.widget.textStyle()) or
         previous.widget.text_no_wrap != next.widget.text_no_wrap or
         previous.widget.text_overflow != next.widget.text_overflow or
         previous.widget.variant != next.widget.variant or
@@ -682,6 +677,15 @@ fn widgetStatesEqual(a: WidgetState, b: WidgetState) bool {
         a.required == b.required and
         a.read_only == b.read_only and
         a.invalid == b.invalid;
+}
+
+fn widgetTextStylesEqual(a: widget_model.WidgetTextStyle, b: widget_model.WidgetTextStyle) bool {
+    return a.scale == b.scale and
+        a.weight == b.weight and
+        a.line_height == b.line_height and
+        a.letter_spacing == b.letter_spacing and
+        a.tabular_numbers == b.tabular_numbers and
+        a.max_lines == b.max_lines;
 }
 
 fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {

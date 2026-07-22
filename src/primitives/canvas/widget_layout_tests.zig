@@ -779,12 +779,14 @@ test "widget text alignment emits local text layout options" {
         .frame = geometry.RectF.init(10, 20, 100, 20),
         .text = "Hi",
         .text_alignment = .center,
-        .text_scale = 1.3,
-        .text_weight = .bold,
-        .text_line_height = 18,
-        .text_letter_spacing = 1.5,
-        .text_tabular_numbers = true,
-        .text_max_lines = 2,
+        .immediate_commands = &.{.{ .text_style = .{
+            .scale = 1.3,
+            .weight = .bold,
+            .line_height = 18,
+            .letter_spacing = 1.5,
+            .tabular_numbers = true,
+            .max_lines = 2,
+        } }},
     };
     var center_commands: [3]CanvasCommand = undefined;
     var center_builder = Builder.init(&center_commands);
@@ -827,6 +829,12 @@ test "widget text alignment emits local text layout options" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "text-only styling does not grow the common retained Widget" {
+    // N3's compact common shape: future text-only metadata belongs in the
+    // existing rare-command side channel, not on every retained widget.
+    try std.testing.expectEqual(@as(usize, 728), @sizeOf(Widget));
 }
 
 test "widget opacity wraps subtree display list commands" {

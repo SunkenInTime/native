@@ -112,17 +112,18 @@ pub fn staticTextDrawText(widget: Widget, tokens: DesignTokens) DrawText {
 }
 
 fn staticTextLayoutOptions(widget: Widget, tokens: DesignTokens, text_size: f32) TextLayoutOptions {
+    const text_style = widget.textStyle();
     return .{
         .max_width = widget.frame.width,
-        .line_height = if (widget.text_line_height > 0) widget.text_line_height else text_size * 1.25,
-        .letter_spacing = widget.text_letter_spacing,
-        .tabular_numbers = widget.text_tabular_numbers,
-        .max_lines = widget.text_max_lines,
+        .line_height = if (text_style.line_height > 0) text_style.line_height else text_size * 1.25,
+        .letter_spacing = text_style.letter_spacing,
+        .tabular_numbers = text_style.tabular_numbers,
+        .max_lines = text_style.max_lines,
         // Mirrors `emitTextWidget`: plain single-line text lays out
         // (and therefore selects/hit-maps) as the one line it paints,
         // under the same overflow policy — an elided line still maps
         // every hidden byte, pinned at the painted right edge.
-        .wrap = if (widget.text_max_lines > 0) .word else .none,
+        .wrap = if (text_style.max_lines > 0) .word else .none,
         .alignment = widget.text_alignment,
         .overflow = widget.text_overflow,
         .measure = tokens.text_measure,

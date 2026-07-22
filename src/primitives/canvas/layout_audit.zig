@@ -265,13 +265,14 @@ fn auditSpanParagraphOverflow(widget: Widget, frame: geometry.RectF, node_index:
 
 fn auditPlainTextOverflow(widget: Widget, frame: geometry.RectF, node_index: usize, tokens: DesignTokens, sink: *FindingSink) void {
     if (widget.text.len == 0) return;
+    const text_style = widget.textStyle();
     // The default policy elides: an ellipsized line is correct rendering
     // — the painted extent never exceeds the frame by construction, so
     // there is nothing to report on the horizontal axis. Only explicit
     // newlines can still overrun (vertically), checked below.
     const text_size = widget_metrics.widgetBodyTextSize(widget, tokens);
     const font_id = widget_metrics.widgetTextFontId(widget, tokens);
-    const line_height = if (widget.text_line_height > 0) widget.text_line_height else widget_metrics.widgetLineHeight(text_size);
+    const line_height = if (text_style.line_height > 0) text_style.line_height else widget_metrics.widgetLineHeight(text_size);
 
     // Replay the paint-time single-line breaker (`wrap = .none`: lines
     // split only at explicit newlines) without a line buffer: the audit
@@ -283,17 +284,17 @@ fn auditPlainTextOverflow(widget: Widget, frame: geometry.RectF, node_index: usi
         const end = text_model.nextTextLineEnd(widget.text, start, font_id, text_size, .{
             .max_width = frame.width + layout_audit_wrap_slack,
             .line_height = line_height,
-            .letter_spacing = widget.text_letter_spacing,
-            .tabular_numbers = widget.text_tabular_numbers,
-            .max_lines = widget.text_max_lines,
+            .letter_spacing = text_style.letter_spacing,
+            .tabular_numbers = text_style.tabular_numbers,
+            .max_lines = text_style.max_lines,
             .wrap = .none,
             .alignment = widget.text_alignment,
             .measure = tokens.text_measure,
         });
         line_count += 1;
         const line_width = text_model.styledTextWidthForRange(widget.text, start, end, font_id, text_size, .{
-            .letter_spacing = widget.text_letter_spacing,
-            .tabular_numbers = widget.text_tabular_numbers,
+            .letter_spacing = text_style.letter_spacing,
+            .tabular_numbers = text_style.tabular_numbers,
             .measure = tokens.text_measure,
         });
         max_line_width = @max(max_line_width, line_width);

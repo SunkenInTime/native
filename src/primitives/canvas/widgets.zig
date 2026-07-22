@@ -740,18 +740,38 @@ pub const WidgetOverscroll = enum {
     rubber_band,
 };
 
-/// One local-space immediate drawing command attached to a retained widget.
-/// The widget renderer translates these coordinates into the laid-out frame,
-/// clips them to that frame, and assigns stable display-list ids by command
-/// ordinal. This keeps immediate islands on the ordinary retained damage path:
-/// changing one command dirties its old/new bounds without invalidating the
-/// surrounding widget tree.
+/// Text-only retained metadata. It rides in `immediate_commands` so the
+/// overwhelmingly common non-text widgets do not pay for six rare fields.
+/// This is metadata, not a drawing command; renderers deliberately skip it.
+pub const WidgetTextStyle = struct {
+    scale: f32 = 0,
+    weight: TextSpanWeight = .regular,
+    line_height: f32 = 0,
+    letter_spacing: f32 = 0,
+    tabular_numbers: bool = false,
+    max_lines: usize = 0,
+
+    pub fn isDefault(self: WidgetTextStyle) bool {
+        return self.scale == 0 and
+            self.weight == .regular and
+            self.line_height == 0 and
+            self.letter_spacing == 0 and
+            !self.tabular_numbers and
+            self.max_lines == 0;
+    }
+};
+
+/// One local-space immediate drawing command attached to a retained widget,
+/// or rare metadata sharing the same retained side channel. The renderer
+/// translates drawing coordinates into the laid-out frame and skips metadata.
 pub const ImmediateCanvasCommand = union(enum) {
     fill_rect: struct { rect: geometry.RectF, color: Color },
     fill_rounded_rect: struct { rect: geometry.RectF, radius: f32, color: Color },
     fill_circle: struct { center: geometry.PointF, radius: f32, color: Color },
     line: struct { from: geometry.PointF, to: geometry.PointF, width: f32, color: Color },
     polyline: struct { points: []const geometry.PointF, width: f32, color: Color },
+    /// Rare retained metadata; never emitted as immediate paint.
+    text_style: WidgetTextStyle,
 };
 
 /// Where a control sits inside a FLUSH button group (`button_group`
@@ -806,14 +826,6 @@ pub const Widget = struct {
     /// Icon-only buttons center the glyph regardless.
     icon_placement: WidgetIconPlacement = .leading,
     text_alignment: TextAlign = .start,
-    /// Relative size multiplier for plain text leaves; 0 means inherit.
-    text_scale: f32 = 0,
-    /// Font weight for plain text leaves.
-    text_weight: TextSpanWeight = .regular,
-    text_line_height: f32 = 0,
-    text_letter_spacing: f32 = 0,
-    text_tabular_numbers: bool = false,
-    text_max_lines: usize = 0,
     /// Explicit single-line mode for plain `.text` leaves
     /// (`ElementOptions.wrap = false` / markup `wrap="false"`). Plain
     /// leaves paint one line either way (measurement treats them as one
@@ -844,6 +856,7 @@ pub const Widget = struct {
     /// existing widget byte-for-byte at emission; `Ui.immediateCanvas` is the intended
     /// authoring seam for this field.
     immediate_commands: []const ImmediateCanvasCommand = &.{},
+
     image_id: ImageId = 0,
     image_src: ?geometry.RectF = null,
     image_fit: ImageFit = .stretch,
@@ -928,6 +941,17 @@ pub const Widget = struct {
     /// serialization, or equality decisions.
     group_segment: WidgetGroupSegment = .none,
     children: []const Widget = &.{},
+
+    /// Resolve the text-only metadata attached by `Ui.el`. Old/default
+    /// widgets have an empty command slice and therefore remain allocation-
+    /// and size-neutral.
+    pub fn textStyle(self: Widget) WidgetTextStyle {
+        for (self.immediate_commands) |command| switch (command) {
+            .text_style => |style| return style,
+            else => {},
+        };
+        return .{};
+    }
 };
 
 pub const BuiltinComponentOptions = struct {

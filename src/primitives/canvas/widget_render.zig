@@ -687,6 +687,7 @@ fn emitImmediateCanvas(builder: *Builder, widget: Widget) Error!void {
                     .stroke = .{ .fill = .{ .color = value.color }, .width = @max(0, value.width) },
                 });
             },
+            .text_style => {},
         }
     }
     try builder.popClip();
@@ -981,6 +982,7 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
     // Empty text leaves are hit/semantics-only: paragraph link hotspots
     // and composite press overlays (timeline items) draw nothing.
     if (widget.text.len == 0) return;
+    const text_style = widget.textStyle();
     // Plain leaves paint the single line layout measured (wrapping is
     // the span-paragraph path, `wrap="true"`), so a width-constrained
     // title never paints a second line over the row below. Content past
@@ -989,7 +991,7 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
     // stays the selection/copy source of truth — or the explicit clip
     // opt-in (`overflow="clip"`), which keeps the historical hard-cut
     // behind a frame clip for fixed-format content.
-    const clip_overflow = widget.text_overflow == .clip or widget.text_max_lines > 0;
+    const clip_overflow = widget.text_overflow == .clip or text_style.max_lines > 0;
     if (clip_overflow) {
         try builder.pushClip(.{ .id = widgetPartId(widget.id, 9), .rect = widget.frame });
     }
@@ -1004,11 +1006,11 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
         .text = widget.text,
         .text_layout = .{
             .max_width = textWrapMaxWidth(tokens, widget.frame.width),
-            .line_height = if (widget.text_line_height > 0) widget.text_line_height else text_size * 1.25,
-            .letter_spacing = widget.text_letter_spacing,
-            .tabular_numbers = widget.text_tabular_numbers,
-            .max_lines = widget.text_max_lines,
-            .wrap = if (widget.text_max_lines > 0) .word else .none,
+            .line_height = if (text_style.line_height > 0) text_style.line_height else text_size * 1.25,
+            .letter_spacing = text_style.letter_spacing,
+            .tabular_numbers = text_style.tabular_numbers,
+            .max_lines = text_style.max_lines,
+            .wrap = if (text_style.max_lines > 0) .word else .none,
             .alignment = widget.text_alignment,
             .overflow = widget.text_overflow,
             .measure = tokens.text_measure,
@@ -1045,6 +1047,7 @@ fn emitStaticTextSelection(builder: *Builder, widget: Widget, tokens: DesignToke
 /// decorations get stable hashed command ids derived from the widget id
 /// and their ordinal, so retained diffing works across frames.
 fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const text_style = widget.textStyle();
     const content = widget.frame.inset(widget.layout.padding);
     var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
     const layout = text_spans_model.layoutTextSpans(
@@ -1107,8 +1110,8 @@ fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
             .text_layout = .{
                 .max_width = 0,
                 .line_height = layout.line_height,
-                .letter_spacing = widget.text_letter_spacing,
-                .tabular_numbers = widget.text_tabular_numbers,
+                .letter_spacing = text_style.letter_spacing,
+                .tabular_numbers = text_style.tabular_numbers,
                 .wrap = .none,
                 .alignment = .start,
                 .measure = tokens.text_measure,
