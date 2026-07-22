@@ -992,6 +992,46 @@ test "reference renderer applies clip transform and opacity" {
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 3, 3);
 }
 
+test "reference renderer preserves rounded clip corners after render planning" {
+    const commands = [_]CanvasCommand{
+        .{ .push_clip = .{ .rect = geometry.RectF.init(1, 1, 4, 4), .radius = Radius.all(2) } },
+        .{ .fill_rect = .{
+            .id = 1,
+            .rect = geometry.RectF.init(0, 0, 6, 6),
+            .fill = .{ .color = Color.rgb8(255, 255, 255) },
+        } },
+        .pop_clip,
+    };
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [0]RenderResource = .{};
+    var resource_cache_entries: [0]RenderResourceCacheEntry = .{};
+    var resource_cache_actions: [0]RenderResourceCacheAction = .{};
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(6, 6),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    try std.testing.expectEqualDeep(Radius.all(2), frame.render_plan.commands[0].clip_radius);
+    var pixels: [6 * 6 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(6, 6, &pixels);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 1, 1);
+    try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 2, 1);
+    try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 3, 3);
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 4, 4);
+}
+
 test "reference renderer samples transformed clipped linear gradients" {
     const stops = [_]GradientStop{
         .{ .offset = 0, .color = Color.rgb8(255, 0, 0) },

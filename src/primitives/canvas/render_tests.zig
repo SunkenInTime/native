@@ -530,7 +530,7 @@ test "affine transforms points and conservative rect bounds" {
 
 test "render plan resolves transform clip and opacity state" {
     const commands = [_]CanvasCommand{
-        .{ .push_clip = .{ .id = 90, .rect = geometry.RectF.init(10, 10, 50, 50) } },
+        .{ .push_clip = .{ .id = 90, .rect = geometry.RectF.init(10, 10, 50, 50), .radius = .{ .top_left = 8, .top_right = 6, .bottom_right = 4, .bottom_left = 2 } } },
         .{ .push_opacity = 0.5 },
         .{ .transform = Affine.translate(10, 0) },
         .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 30, 30), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
@@ -547,6 +547,7 @@ test "render plan resolves transform clip and opacity state" {
     try std.testing.expectEqual(@as(?ObjectId, 1), plan.commands[0].id);
     try std.testing.expectEqual(@as(f32, 0.5), plan.commands[0].opacity);
     try expectRect(geometry.RectF.init(10, 10, 50, 50), plan.commands[0].clip);
+    try std.testing.expectEqualDeep(Radius{ .top_left = 8, .top_right = 6, .bottom_right = 4, .bottom_left = 2 }, plan.commands[0].clip_radius);
     try std.testing.expectEqualDeep(Affine.translate(10, 0), plan.commands[0].transform);
     try expectRect(geometry.RectF.init(0, 0, 30, 30), plan.commands[0].local_bounds);
     try std.testing.expectEqualDeep(geometry.RectF.init(10, 10, 30, 20), plan.commands[0].bounds);
@@ -1895,7 +1896,7 @@ test "canvas frame plan builds first frame renderer packet" {
     const render_pass_json = render_pass_json_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"loadAction\":\"clear\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"scissorBounds\":[0,0,320,200]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"commands\":[{\"index\":0,\"id\":1,\"opacity\":1,\"clip\":null,\"transform\":[1,0,0,1,0,0],\"localBounds\":[16,16,160,72],\"bounds\":[16,16,160,72],\"command\":{\"op\":\"fill_rounded_rect\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"commands\":[{\"index\":0,\"id\":1,\"opacity\":1,\"clip\":null,\"clipRadius\":[0,0,0,0],\"transform\":[1,0,0,1,0,0],\"localBounds\":[16,16,160,72],\"bounds\":[16,16,160,72],\"command\":{\"op\":\"fill_rounded_rect\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"batches\":[{\"pipeline\":\"linear_gradient\",\"commandStart\":0,\"commandCount\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"pipelineActions\":[{\"kind\":\"upload\",\"pipeline\":\"linear_gradient\",\"batchIndex\":0,\"cacheIndex\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_pass_json, "\"pathGeometries\":[],\"pathGeometryActions\":[]") != null);

@@ -13,11 +13,13 @@ const ReferenceImage = canvas.ReferenceImage;
 const Affine = drawing_model.Affine;
 const Fill = drawing_model.Fill;
 const Stroke = drawing_model.Stroke;
+const Radius = drawing_model.Radius;
 const PresentationLayer = drawing_model.PresentationLayer;
 const Easing = token_model.Easing;
 const SpringToken = token_model.SpringToken;
 
 const optionalRectsEqual = equality_model.optionalRectsEqual;
+const radiiEqual = equality_model.radiiEqual;
 const optionalF32Equal = equality_model.optionalF32Equal;
 
 const render_resources = @import("render_resources.zig");
@@ -84,6 +86,7 @@ pub const max_render_state_stack: usize = 32;
 pub const RenderState = struct {
     opacity: f32 = 1,
     clip: ?geometry.RectF = null,
+    clip_radius: Radius = .{},
     transform: Affine = .{},
     presentation_layer: PresentationLayer = .retained,
 };
@@ -93,6 +96,7 @@ pub const RenderCommand = struct {
     id: ?ObjectId = null,
     opacity: f32 = 1,
     clip: ?geometry.RectF = null,
+    clip_radius: Radius = .{},
     transform: Affine = .{},
     local_bounds: geometry.RectF,
     bounds: geometry.RectF,
@@ -413,6 +417,7 @@ pub const RenderPlanner = struct {
     state: RenderState = .{},
     bounds_value: ?geometry.RectF = null,
     clip_stack: [max_render_state_stack]?geometry.RectF = undefined,
+    clip_radius_stack: [max_render_state_stack]Radius = undefined,
     layer_stack: [max_render_state_stack]PresentationLayer = undefined,
     clip_stack_len: usize = 0,
     opacity_stack: [max_render_state_stack]f32 = undefined,
@@ -455,14 +460,27 @@ pub const RenderPlanner = struct {
     fn pushClip(self: *RenderPlanner, clip: drawing_model.Clip) Error!void {
         if (self.clip_stack_len >= self.clip_stack.len) return error.RenderStackOverflow;
         self.clip_stack[self.clip_stack_len] = self.state.clip;
+        self.clip_radius_stack[self.clip_stack_len] = self.state.clip_radius;
         self.layer_stack[self.clip_stack_len] = self.state.presentation_layer;
         self.clip_stack_len += 1;
 
-        const transformed_clip = self.state.transform.transformRect(clip.rect);
-        self.state.clip = if (self.state.clip) |existing|
-            geometry.RectF.intersection(existing, transformed_clip)
-        else
-            transformed_clip;
+        const transformed_clip = self.state.transform.transformRect(clip.rect).normalized();
+        const transformed_radius = transformRadius(clip.radius, self.state.transform);
+        if (self.state.clip) |existing| {
+            const intersection = geometry.RectF.intersection(existing, transformed_clip);
+            if (rectsEqual(intersection, transformed_clip)) {
+                self.state.clip_radius = transformed_radius;
+            } else if (!rectsEqual(intersection, existing)) {
+                // One rounded rect cannot encode the lens formed by two
+                // partially overlapping rounded clips. Keep the exact
+                // rectangular intersection and drop only the ambiguous arcs.
+                self.state.clip_radius = .{};
+            }
+            self.state.clip = intersection;
+        } else {
+            self.state.clip = transformed_clip;
+            self.state.clip_radius = transformed_radius;
+        }
         self.state.presentation_layer = clip.presentation_layer;
     }
 
@@ -470,6 +488,7 @@ pub const RenderPlanner = struct {
         if (self.clip_stack_len == 0) return error.RenderStackUnderflow;
         self.clip_stack_len -= 1;
         self.state.clip = self.clip_stack[self.clip_stack_len];
+        self.state.clip_radius = self.clip_radius_stack[self.clip_stack_len];
         self.state.presentation_layer = self.layer_stack[self.clip_stack_len];
     }
 
@@ -502,6 +521,7 @@ pub const RenderPlanner = struct {
             .id = command.objectId(),
             .opacity = self.state.opacity,
             .clip = self.state.clip,
+            .clip_radius = self.state.clip_radius,
             .transform = self.state.transform,
             .local_bounds = command_bounds,
             .bounds = clipped_bounds,
@@ -528,6 +548,7 @@ pub const RenderBatch = struct {
     command_count: usize = 0,
     opacity: f32 = 1,
     clip: ?geometry.RectF = null,
+    clip_radius: Radius = .{},
     bounds: geometry.RectF = .{},
 };
 
@@ -584,6 +605,7 @@ pub const RenderBatchPlanner = struct {
             .command_count = 1,
             .opacity = command.opacity,
             .clip = command.clip,
+            .clip_radius = command.clip_radius,
             .bounds = command.bounds,
         };
         self.len += 1;
@@ -713,7 +735,24 @@ fn renderBatchCanExtend(batch: RenderBatch, command: RenderCommand, pipeline: Re
     return batch.pipeline == pipeline and
         batch.command_start + batch.command_count == index and
         batch.opacity == command.opacity and
-        optionalRectsEqual(batch.clip, command.clip);
+        optionalRectsEqual(batch.clip, command.clip) and
+        radiiEqual(batch.clip_radius, command.clip_radius);
+}
+
+fn rectsEqual(a: geometry.RectF, b: geometry.RectF) bool {
+    return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
+}
+
+fn transformRadius(radius: Radius, transform: Affine) Radius {
+    const scale_x = @sqrt(transform.a * transform.a + transform.b * transform.b);
+    const scale_y = @sqrt(transform.c * transform.c + transform.d * transform.d);
+    const scale = if (std.math.isFinite(scale_x) and std.math.isFinite(scale_y)) @min(scale_x, scale_y) else 1;
+    return .{
+        .top_left = @max(0, radius.top_left * scale),
+        .top_right = @max(0, radius.top_right * scale),
+        .bottom_right = @max(0, radius.bottom_right * scale),
+        .bottom_left = @max(0, radius.bottom_left * scale),
+    };
 }
 
 fn renderPipelineKind(command: CanvasCommand) RenderPipelineKind {

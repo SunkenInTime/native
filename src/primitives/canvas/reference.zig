@@ -292,6 +292,7 @@ pub const ReferenceRenderSurface = struct {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const point = referencePixelCenter(x, y);
+                if (!referencePointInCommandClip(command, point)) continue;
                 self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
             }
         }
@@ -316,6 +317,7 @@ pub const ReferenceRenderSurface = struct {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const point = referencePixelCenter(x, y);
+                if (!referencePointInCommandClip(command, point)) continue;
                 if (binary) {
                     if (referencePointInRoundedRect(point, rect, radius)) self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.fill, command.transform, point), command.opacity);
                     continue;
@@ -357,6 +359,7 @@ pub const ReferenceRenderSurface = struct {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const point = referencePixelCenter(x, y);
+                if (!referencePointInCommandClip(command, point)) continue;
                 if (binary) {
                     if (referencePointInRoundedRect(point, outer, outer_radius) and !referencePointInRoundedRect(point, inner, inner_radius)) {
                         self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.stroke.fill, command.transform, point), command.opacity);
@@ -384,6 +387,7 @@ pub const ReferenceRenderSurface = struct {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const point = referencePixelCenter(x, y);
+                if (!referencePointInCommandClip(command, point)) continue;
                 if (referenceDistanceToSegment(point, from, to) <= half_width) {
                     self.blendPixel(@intCast(x), @intCast(y), referenceSampleFill(value.stroke.fill, command.transform, point), command.opacity);
                 }
@@ -402,6 +406,8 @@ pub const ReferenceRenderSurface = struct {
             .transform = command.transform,
             .opacity = command.opacity,
             .coverage_blend = .linear_light,
+            .clip = command.clip,
+            .clip_radius = command.clip_radius,
         };
         vector.fillPath(
             value.elements,
@@ -430,6 +436,8 @@ pub const ReferenceRenderSurface = struct {
             .transform = command.transform,
             .opacity = command.opacity,
             .coverage_blend = .linear_light,
+            .clip = command.clip,
+            .clip_radius = command.clip_radius,
         };
         vector.strokePath(
             value.elements,
@@ -487,6 +495,7 @@ pub const ReferenceRenderSurface = struct {
                 var x = pixel_rect.x;
                 while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                     const point = referencePixelCenter(x, y);
+                    if (!referencePointInCommandClip(command, point)) continue;
                     if (!dst_rect.containsPoint(point)) continue;
                     if (has_mask and !referencePointInRoundedRect(point, mask_rect, mask_radius)) continue;
                     const column: usize = @intCast(@as(i64, @intCast(x)) - dst_x0);
@@ -514,6 +523,7 @@ pub const ReferenceRenderSurface = struct {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const point = referencePixelCenter(x, y);
+                if (!referencePointInCommandClip(command, point)) continue;
                 if (!dst_rect.containsPoint(point)) continue;
                 if (has_mask and !referencePointInRoundedRect(point, mask_rect, mask_radius)) continue;
                 const u = std.math.clamp((point.x - dst_rect.x) / dst_rect.width, 0, 1);
@@ -632,6 +642,7 @@ pub const ReferenceRenderSurface = struct {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
                 const point = referencePixelCenter(x, y);
+                if (!referencePointInCommandClip(command, point)) continue;
                 const alpha = if (value.inset) block: {
                     const coverage = referenceRoundedRectCoverage(point, clip_rect, clip_radius);
                     if (coverage <= 0) break :block 0;
@@ -675,6 +686,7 @@ pub const ReferenceRenderSurface = struct {
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
+                if (!referencePointInCommandClip(command, referencePixelCenter(x, y))) continue;
                 const x_i: i64 = @intCast(x);
                 const y_i: i64 = @intCast(y);
                 const blurred = if (kernel) |weights|
@@ -839,7 +851,7 @@ pub const ReferenceRenderSurface = struct {
         if (codepoint) |cp| {
             if (self.drawGlyphOutline(command, value, draw_bounds, cp, pen_x, baseline, block_rect.width)) return;
         }
-        self.fillTextRect(command.transform.transformRect(block_rect).normalized(), draw_bounds, value.color, command.opacity);
+        self.fillTextRect(command, command.transform.transformRect(block_rect).normalized(), draw_bounds, value.color, command.opacity);
     }
 
     /// True when the glyph was handled (drawn, or intentionally empty
@@ -888,6 +900,8 @@ pub const ReferenceRenderSurface = struct {
             .transform = command.transform,
             .opacity = command.opacity,
             .coverage_blend = .srgb,
+            .clip = command.clip,
+            .clip_radius = command.clip_radius,
         };
         // The outline is already in device space; TrueType interiorness
         // is the nonzero rule.
@@ -902,13 +916,14 @@ pub const ReferenceRenderSurface = struct {
         return true;
     }
 
-    fn fillTextRect(self: ReferenceRenderSurface, rect: geometry.RectF, draw_bounds: geometry.RectF, color: Color, opacity: f32) void {
+    fn fillTextRect(self: ReferenceRenderSurface, command: RenderCommand, rect: geometry.RectF, draw_bounds: geometry.RectF, color: Color, opacity: f32) void {
         const clipped = geometry.RectF.intersection(rect, draw_bounds.normalized());
         const pixel_rect = referencePixelRect(clipped, self.width, self.height) orelse return;
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
             while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
+                if (!referencePointInCommandClip(command, referencePixelCenter(x, y))) continue;
                 self.blendPixel(@intCast(x), @intCast(y), color, opacity);
             }
         }
@@ -989,6 +1004,8 @@ const ReferenceCoverageSink = struct {
     transform: Affine,
     opacity: f32,
     coverage_blend: CoverageBlend,
+    clip: ?geometry.RectF = null,
+    clip_radius: Radius = .{},
 
     pub fn pixel(self: *ReferenceCoverageSink, x: i32, y: i32, coverage: f32) void {
         if (x < 0 or y < 0) return;
@@ -996,6 +1013,7 @@ const ReferenceCoverageSink = struct {
         const py: usize = @intCast(y);
         if (px >= self.surface.width or py >= self.surface.height) return;
         const point = referencePixelCenter(px, py);
+        if (self.clip) |clip| if (!referencePointInRoundedRect(point, clip, self.clip_radius)) return;
         const color = referenceSampleFill(self.fill, self.transform, point);
         self.surface.blendPixelCoverage(px, py, color, coverage, self.opacity, self.coverage_blend);
     }
@@ -1036,14 +1054,15 @@ const ReferencePixelRect = struct {
 /// Hash a command's parameters for the render memo key: the kind tag
 /// keeps different command types with coincidentally equal fields apart,
 /// and `command.opacity` + `command.transform` join the value struct
-/// because the pixel loops read all three. Clip needs no hashing — the
-/// planner folds it into `command.bounds`, which reaches the key through
-/// the pixel rect.
+/// because the pixel loops read all three. The clip rect is folded into
+/// `command.bounds`; its radius joins explicitly because equal bounds with
+/// different corner masks produce different pixels.
 fn referenceMemoParamsHash(kind: u8, command: RenderCommand, value: anytype) u64 {
     var hasher = std.hash.Wyhash.init(0x9e37_79b9);
     referenceMemoHashValue(&hasher, kind);
     referenceMemoHashValue(&hasher, command.opacity);
     referenceMemoHashValue(&hasher, command.transform);
+    referenceMemoHashValue(&hasher, command.clip_radius);
     referenceMemoHashValue(&hasher, value);
     return hasher.final();
 }
@@ -1117,7 +1136,15 @@ fn referenceScaleCommand(command: RenderCommand, scale: f32) RenderCommand {
     scaled.transform = transform.multiply(command.transform);
     scaled.local_bounds = referenceScaleRect(command.local_bounds, scale);
     scaled.bounds = referenceScaleRect(command.bounds, scale);
-    if (command.clip) |clip| scaled.clip = referenceScaleRect(clip, scale);
+    if (command.clip) |clip| {
+        scaled.clip = referenceScaleRect(clip, scale);
+        scaled.clip_radius = .{
+            .top_left = command.clip_radius.top_left * scale,
+            .top_right = command.clip_radius.top_right * scale,
+            .bottom_right = command.clip_radius.bottom_right * scale,
+            .bottom_left = command.clip_radius.bottom_left * scale,
+        };
+    }
     return scaled;
 }
 
@@ -1532,6 +1559,11 @@ fn referencePointInRoundedRect(point: geometry.PointF, rect: geometry.RectF, rad
         return referencePointInCorner(point, geometry.PointF.init(normalized.x + bottom_left, normalized.maxY() - bottom_left), bottom_left);
     }
     return true;
+}
+
+fn referencePointInCommandClip(command: RenderCommand, point: geometry.PointF) bool {
+    const clip = command.clip orelse return true;
+    return referencePointInRoundedRect(point, clip, command.clip_radius);
 }
 
 /// True when every corner is square — the gate for the legacy binary

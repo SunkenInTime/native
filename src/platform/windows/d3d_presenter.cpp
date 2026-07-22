@@ -49,7 +49,7 @@ struct RetainedCommand {
 
 // Must match serialization.zig `binary_packet_version`; the build-time
 // wire-format ratchet checks this independently of the macOS decoder.
-static constexpr uint8_t kBinaryPacketVersion = 5;
+static constexpr uint8_t kBinaryPacketVersion = 6;
 
 struct PacketReader {
     const uint8_t *cursor;
@@ -99,7 +99,14 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     if (!reader.u8(&kind) || !reader.u8(&flags) || !reader.rect(&bounds) ||
         !reader.f32(&opacity) || !reader.f32(&stroke_width) || !reader.u8(&cap)) return false;
     if (flags & 0x01) { uint64_t id; if (!reader.u64(&id)) return false; }
-    if (flags & 0x02) { if (!reader.rect(&clip)) return false; }
+    if (flags & 0x02) {
+        F4 clip_radius = {};
+        if (!reader.rect(&clip) || !readRadius(reader, &clip_radius)) return false;
+        // Per-command rounded clipping is not represented in the instance
+        // pipeline yet. Reject it so the established CPU fallback paints it
+        // correctly instead of silently drawing outside the clip.
+        return false;
+    }
     if (flags & 0x04) {
         float transform[6];
         for (float &part : transform) if (!reader.f32(&part)) return false;

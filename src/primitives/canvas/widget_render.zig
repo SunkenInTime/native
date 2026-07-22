@@ -852,12 +852,12 @@ fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
         // image child, a full-bleed row) shears along the chrome's
         // corners instead of the generic surface radius.
         .bubble => widget_render_surfaces.bubbleWidgetRadius(widget, tokens),
-        .alert, .card, .resizable, .panel, .menu_surface, .dropdown_menu => Radius.all(tokens.radius.lg),
+        .alert, .card, .resizable, .panel, .menu_surface, .dropdown_menu => widgetRadius(widget, tokens.radius.lg),
         .accordion => .{},
-        .dialog, .popover => Radius.all(tokens.radius.xl),
-        .drawer, .sheet => Radius.all(tokens.radius.lg),
-        .tooltip => Radius.all(tokens.radius.md),
-        else => .{},
+        .dialog, .popover => widgetRadius(widget, tokens.radius.xl),
+        .drawer, .sheet => widgetRadius(widget, tokens.radius.lg),
+        .tooltip => widgetRadius(widget, tokens.radius.md),
+        else => widgetRadius(widget, 0),
     };
 }
 

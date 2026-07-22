@@ -1,0 +1,1 @@
+feature: **Rounded stack overflow clipping**: canvas stacks can bound child painting to authored asymmetric corner radii, with the mask preserved through render planning, reference rendering, binary transport, and the macOS host.

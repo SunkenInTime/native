@@ -7,7 +7,9 @@ const fingerprints = @import("render_fingerprints.zig");
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
 const Affine = drawing_model.Affine;
+const Radius = drawing_model.Radius;
 const optionalRectsEqual = equality_model.optionalRectsEqual;
+const radiiEqual = equality_model.radiiEqual;
 
 const affinesEqual = fingerprints.affinesEqual;
 const renderLayerFingerprint = fingerprints.renderLayerFingerprint;
@@ -20,6 +22,7 @@ pub const RenderLayer = struct {
     bounds: geometry.RectF = .{},
     opacity: f32 = 1,
     clip: ?geometry.RectF = null,
+    clip_radius: Radius = .{},
     transform: Affine = .{},
     fingerprint: u64 = 0,
 };
@@ -101,6 +104,7 @@ pub const RenderLayerPlanner = struct {
             .bounds = command.bounds,
             .opacity = command.opacity,
             .clip = command.clip,
+            .clip_radius = command.clip_radius,
             .transform = command.transform,
             .fingerprint = renderLayerFingerprint(command),
         };
@@ -235,6 +239,7 @@ fn renderLayerCanExtend(layer: RenderLayer, command: anytype, index: usize) bool
     return layer.command_start + layer.command_count == index and
         layer.opacity == command.opacity and
         optionalRectsEqual(layer.clip, command.clip) and
+        radiiEqual(layer.clip_radius, command.clip_radius) and
         affinesEqual(layer.transform, command.transform);
 }
 
