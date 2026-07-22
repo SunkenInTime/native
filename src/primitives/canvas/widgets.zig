@@ -380,9 +380,6 @@ pub const WidgetLayoutStyle = struct {
     /// Anchored floating placement: non-null makes this widget a floating
     /// surface positioned against its parent (see `WidgetAnchor`).
     anchor: ?WidgetAnchor = null,
-    /// Whether the matching `Widget.frame` axis is an authored preferred
-    /// size. The bit is separate from the value so an explicit zero remains
-    /// distinct from an intrinsic/unset axis.
     min_size: geometry.SizeF = .{},
     /// Per-axis upper bound; 0 leaves the axis unbounded. Authored preferred
     /// sizes are independent of min/max and participate as flex bases.

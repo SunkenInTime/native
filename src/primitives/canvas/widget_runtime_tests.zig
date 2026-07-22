@@ -571,6 +571,36 @@ test "widget render state dirty bounds tracks changed runtime states" {
     try std.testing.expect(layout.renderStateDirtyBounds(.{ .focused_id = 99 }, .{ .focused_id = 100 }) == null);
 }
 
+test "non-layout shadow changes invalidate the complete old and new halos" {
+    const shadow_commands = [_]canvas.ImmediateCanvasCommand{.{ .box_shadow = .{
+        .offset = .{ .dx = 8, .dy = 6 },
+        .blur = 5,
+        .spread = 2,
+        .color = Color.rgba8(0, 0, 0, 128),
+    } }};
+    const previous_children = [_]Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(20, 20, 80, 30),
+        .immediate_commands = &shadow_commands,
+    }};
+    const next_children = [_]Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(20, 20, 80, 30),
+    }};
+    var previous_nodes: [2]WidgetLayoutNode = undefined;
+    var next_nodes: [2]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(.{ .kind = .stack, .children = &previous_children }, geometry.RectF.init(0, 0, 140, 100), &previous_nodes);
+    const next = try layoutWidgetTree(.{ .kind = .stack, .children = &next_children }, geometry.RectF.init(0, 0, 140, 100), &next_nodes);
+    var changes: [2]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, next, &changes);
+    try std.testing.expectEqual(@as(usize, 1), invalidations.len);
+    const dirty = invalidations[0].dirty_bounds.?;
+    try std.testing.expect(dirty.maxX() > previous.findById(2).?.frame.maxX());
+    try std.testing.expect(dirty.maxY() > previous.findById(2).?.frame.maxY());
+}
+
 test "widget render state dirty bounds uses custom focus stroke tokens" {
     const children = [_]Widget{.{
         .id = 2,

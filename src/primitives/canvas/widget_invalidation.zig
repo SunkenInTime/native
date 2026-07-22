@@ -520,6 +520,8 @@ fn widgetPaintChangeBounds(previous: Widget, next: Widget, tokens: DesignTokens)
     }
     bounds = unionOptionalBounds(bounds, widgetFocusPaintBounds(previous, tokens));
     bounds = unionOptionalBounds(bounds, widgetFocusPaintBounds(next, tokens));
+    bounds = unionOptionalBounds(bounds, widgetShadowPaintBounds(previous, tokens));
+    bounds = unionOptionalBounds(bounds, widgetShadowPaintBounds(next, tokens));
     bounds = unionOptionalBounds(bounds, widgetBackdropBlurPaintBounds(previous, tokens));
     bounds = unionOptionalBounds(bounds, widgetBackdropBlurPaintBounds(next, tokens));
     return bounds;
@@ -538,6 +540,8 @@ fn widgetRenderStatePaintChangeBounds(previous: Widget, next: Widget, tokens: De
     if (previous.state.hovered != next.state.hovered or previous.state.pressed != next.state.pressed) {
         bounds = unionOptionalBounds(bounds, widgetInteractiveStatePaintBounds(previous, tokens));
         bounds = unionOptionalBounds(bounds, widgetInteractiveStatePaintBounds(next, tokens));
+        bounds = unionOptionalBounds(bounds, widgetShadowPaintBounds(previous, tokens));
+        bounds = unionOptionalBounds(bounds, widgetShadowPaintBounds(next, tokens));
     }
     return bounds;
 }

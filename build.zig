@@ -695,6 +695,7 @@ pub fn build(b: *std.Build) void {
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-wire-format-version-prose", "Verify wire-format version prose matches the packet version constant", &.{
         .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "pub const binary_packet_version: u8 = 5;" },
         .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "Compact binary gpu-surface packet encoding (wire format v5)." },
+        .{ .path = "src/platform/windows/d3d_presenter.cpp", .pattern = "static constexpr uint8_t kBinaryPacketVersion = 5;" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Compact binary gpu-surface packet decoding (wire format v5)." },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-blur-effects", "Verify AppKit GPU packet presenter applies blur effects", &.{
