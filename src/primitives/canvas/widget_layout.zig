@@ -1711,8 +1711,10 @@ fn stackChildFrame(content: geometry.RectF, child: Widget, parent_layout: Widget
     });
     const width_percent = clampedPercent(child.layout.percent_size.width);
     const height_percent = clampedPercent(child.layout.percent_size.height);
-    var width = if (width_percent) |fraction| inner.width * fraction else if (child.frame.width > 0) child.frame.width else inner.width;
-    var height = if (height_percent) |fraction| inner.height * fraction else if (child.frame.height > 0) child.frame.height else inner.height;
+    // Percentages resolve against the parent's content box; margins are
+    // external offsets and must not shrink that percentage basis.
+    var width = if (width_percent) |fraction| content.width * fraction else if (child.frame.width > 0) child.frame.width else inner.width;
+    var height = if (height_percent) |fraction| content.height * fraction else if (child.frame.height > 0) child.frame.height else inner.height;
     const width_determined = width_percent != null or child.frame.width > 0;
     const height_determined = height_percent != null or child.frame.height > 0;
     const ratio = child.layout.aspect_ratio;
