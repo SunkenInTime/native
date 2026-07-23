@@ -43,7 +43,7 @@ pub const max_chart_points_per_series: usize = 256;
 /// anyway. A filled line series costs at most `2n + 3` elements
 /// (polyline + closed baseline polygon), so the budget holds ~7 maximal
 /// filled series — or dozens of sparkline-sized ones — per frame.
-pub const max_chart_path_elements_per_frame: usize = if (native_sdk_options.widget_profile) 256 else 2048;
+pub const max_chart_path_elements_per_frame: usize = 2048;
 
 /// Per-frame byte budget for the formatted tick/tooltip label scratch
 /// (threadlocal frame-lifetime storage: the emitted `drawText` commands
