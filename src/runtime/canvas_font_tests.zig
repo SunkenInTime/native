@@ -18,6 +18,7 @@ const core = @import("core.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const ui_app_model = @import("ui_app.zig");
 const support = @import("test_support.zig");
+const test_assets = @import("native_sdk_test_assets");
 
 const platform = support.platform;
 const App = support.App;
@@ -25,9 +26,17 @@ const TestHarness = support.TestHarness;
 
 const registered_font_id: canvas.FontId = canvas.min_registered_font_id;
 const mono_bytes = canvas.font_ttf.geist_mono_bytes;
+const geist_pixel_square_bytes = test_assets.geist_pixel_square;
 
 fn startedGpuHarness(allocator: std.mem.Allocator) !*TestHarness() {
     const harness = try TestHarness().create(allocator, .{ .size = geometry.SizeF.init(240, 140) });
+    errdefer harness.destroy(allocator);
+    harness.null_platform.gpu_surfaces = true;
+    return harness;
+}
+
+fn startedHeadlineHarness(allocator: std.mem.Allocator) !*TestHarness() {
+    const harness = try TestHarness().create(allocator, .{ .size = geometry.SizeF.init(760, 72) });
     errdefer harness.destroy(allocator);
     harness.null_platform.gpu_surfaces = true;
     return harness;
@@ -273,6 +282,91 @@ test "a registered face renders pixel-identically on the present path and the re
     const sans = try fontFixtureScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
     defer std.testing.allocator.free(sans);
     try std.testing.expect(!std.mem.eql(u8, sans, reference));
+}
+
+fn showcaseHeadlineScreenshot(harness: anytype, allocator: std.mem.Allocator, font_id: canvas.FontId) ![]u8 {
+    const effects = [_]canvas.ImmediateCanvasCommand{
+        .{ .text_style = .{
+            .line_height = 36,
+            .letter_spacing = 0.75,
+        } },
+        .{ .text_shadow = .{
+            .offset = .{ .dx = 0, .dy = 8 },
+            .blur = 10,
+            .color = canvas.Color.rgba8(0, 0, 0, 128),
+        } },
+        .{ .text_font = font_id },
+    };
+    const spans = [_]canvas.TextSpan{.{
+        .text = "SECOND NATURE",
+        .weight = .bold,
+        .scale = 30.0 / 14.0,
+    }};
+    const controls = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(8, 8, 744, 52),
+        .spans = &spans,
+        .immediate_commands = &effects,
+    }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{
+        .kind = .stack,
+        .children = &controls,
+    }, geometry.RectF.init(0, 0, 760, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", fontFixtureTokens(&harness.runtime, canvas.default_sans_font_id));
+
+    var saw_headline = false;
+    for ((try harness.runtime.canvasDisplayList(1, "canvas")).commands) |command| switch (command) {
+        .draw_text => |text| if (std.mem.eql(u8, text.text, "SECOND NATURE")) {
+            const expected_draw_font_id = if (font_id == canvas.default_sans_font_id)
+                canvas.default_sans_bold_font_id
+            else
+                font_id;
+            try std.testing.expectEqual(expected_draw_font_id, text.font_id);
+            try std.testing.expectEqual(@as(f32, 30), text.size);
+            try std.testing.expect(text.text_shadow != null);
+            saw_headline = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_headline);
+
+    const pixel_size = try harness.runtime.canvasScreenshotPixelSize(1, "canvas", null);
+    const pixels = try allocator.alloc(u8, pixel_size.byte_len);
+    defer allocator.free(pixels);
+    const scratch = try allocator.alloc(u8, pixel_size.byte_len);
+    defer allocator.free(scratch);
+    const screenshot = try harness.runtime.renderCanvasScreenshot(1, "canvas", null, pixels, scratch);
+    return allocator.dupe(u8, screenshot.rgba8);
+}
+
+test "GeistPixel showcase headline differs from built-in sans with bold and text shadow" {
+    const harness = try startedHeadlineHarness(std.testing.allocator);
+    defer harness.destroy(std.testing.allocator);
+    var app_state: RegistryApp = .{};
+    try harness.start(app_state.app());
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 760, 72),
+    });
+    try harness.runtime.registerCanvasFont(registered_font_id, geist_pixel_square_bytes);
+
+    const pixel = try showcaseHeadlineScreenshot(harness, std.testing.allocator, registered_font_id);
+    defer std.testing.allocator.free(pixel);
+    const sans = try showcaseHeadlineScreenshot(harness, std.testing.allocator, canvas.default_sans_font_id);
+    defer std.testing.allocator.free(sans);
+    try std.testing.expectEqual(pixel.len, sans.len);
+
+    var differing_pixels: usize = 0;
+    var offset: usize = 0;
+    while (offset < pixel.len) : (offset += 4) {
+        if (!std.mem.eql(u8, pixel[offset .. offset + 4], sans[offset .. offset + 4])) differing_pixels += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 10_625), differing_pixels);
 }
 
 // ------------------------------------------------ UiApp Options.fonts

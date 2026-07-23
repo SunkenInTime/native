@@ -142,6 +142,8 @@ pub fn build(b: *std.Build) void {
     desktop_mod.addImport("platform_info", platform_info_mod);
     desktop_mod.addImport("json", json_mod);
     desktop_mod.addImport("canvas", canvas_mod);
+    const native_sdk_test_assets = module(b, target, optimize, "examples/deck/src/fonts/test_assets.zig");
+    desktop_mod.addImport("native_sdk_test_assets", native_sdk_test_assets);
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
     const widget_profile_test_mod = module(b, target, optimize, "src/widget_profile_tests.zig");
