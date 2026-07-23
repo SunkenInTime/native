@@ -588,6 +588,58 @@ test "app-registered icons draw through the widget paths like built-ins" {
     }
 }
 
+test "retained icon path metadata draws fill or round stroke with current text color" {
+    const elements = [_]canvas.PathElement{
+        .{ .verb = .move_to, .points = .{ geometry.PointF.init(2, 2), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(22, 12), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(2, 22), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .close },
+    };
+    const fill_metadata = [_]canvas.ImmediateCanvasCommand{.{ .icon_path = .{
+        .view_box = geometry.RectF.init(0, 0, 24, 24),
+        .elements = &elements,
+        .stroke_width = 0,
+    } }};
+    const tokens = DesignTokens{};
+    const fill_icon = Widget{
+        .id = 73,
+        .kind = .icon,
+        .frame = geometry.RectF.init(4, 6, 48, 24),
+        .style = .{ .foreground = Color.rgb8(245, 158, 11) },
+        .immediate_commands = &fill_metadata,
+    };
+    var fill_commands: [8]CanvasCommand = undefined;
+    var fill_builder = Builder.init(&fill_commands);
+    try emitWidgetTree(&fill_builder, fill_icon, tokens);
+    switch (fill_builder.displayList().findCommandById(widgetPartId(73, 1)).?.command) {
+        .fill_path => |fill| {
+            try std.testing.expectEqual(elements[0..].ptr, fill.elements.ptr);
+            try expectFillColor(Color.rgb8(245, 158, 11), fill.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const stroke_metadata = [_]canvas.ImmediateCanvasCommand{.{ .icon_path = .{
+        .view_box = geometry.RectF.init(0, 0, 24, 24),
+        .elements = &elements,
+        .stroke_width = 2,
+    } }};
+    var stroke_icon = fill_icon;
+    stroke_icon.id = 74;
+    stroke_icon.immediate_commands = &stroke_metadata;
+    var stroke_commands: [8]CanvasCommand = undefined;
+    var stroke_builder = Builder.init(&stroke_commands);
+    try emitWidgetTree(&stroke_builder, stroke_icon, tokens);
+    switch (stroke_builder.displayList().findCommandById(widgetPartId(74, 2)).?.command) {
+        .stroke_path => |stroke| {
+            try std.testing.expectEqual(@as(f32, 2), stroke.stroke.width);
+            try std.testing.expectEqual(canvas.LineCap.round, stroke.cap);
+            try expectFillColor(Color.rgb8(245, 158, 11), stroke.stroke.fill);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "an unresolved explicit icon name draws the missing-icon fallback, never a silent gap" {
     const tokens = DesignTokens{};
     // The explicit channel (`Widget.icon`) is where bound markup names

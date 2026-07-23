@@ -301,6 +301,7 @@ pub const font_ttf = @import("font_ttf.zig");
 // parseable) and the curated built-in icon registry behind
 // `<icon name="..."/>` and `Ui.icon`.
 pub const svg_icon = @import("svg_icon.zig");
+pub const normalized_path = @import("normalized_path.zig");
 pub const icons = @import("icons.zig");
 
 // Deterministic PNG writer (stored-deflate zlib stream) lives in `png.zig`.

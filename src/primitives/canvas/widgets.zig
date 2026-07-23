@@ -759,6 +759,15 @@ pub const WidgetTextStyle = struct {
     }
 };
 
+/// Bundle-normalized path geometry for one retained icon node. Weaver owns
+/// the full SVG grammar; Native retains only already-decoded M/L/C/Z elements.
+pub const WidgetIconPath = struct {
+    view_box: geometry.RectF = geometry.RectF.init(0, 0, 24, 24),
+    elements: []const canvas.PathElement,
+    /// Zero fills the geometry; positive values stroke with round caps/joins.
+    stroke_width: f32 = 0,
+};
+
 /// One local-space immediate drawing command attached to a retained widget,
 /// or rare metadata sharing the same retained side channel. The renderer
 /// translates drawing coordinates into the laid-out frame and skips metadata.
@@ -775,6 +784,8 @@ pub const ImmediateCanvasCommand = union(enum) {
     /// Per-text registered/built-in face override. Retaining this in the
     /// existing command slice avoids enlarging every Widget for a rare style.
     text_font: FontId,
+    /// Retained vector geometry for a path-authored icon. Metadata only.
+    icon_path: WidgetIconPath,
 };
 
 /// Where a control sits inside a FLUSH button group (`button_group`
@@ -954,6 +965,14 @@ pub const Widget = struct {
             else => {},
         };
         return .{};
+    }
+
+    pub fn iconPath(self: Widget) ?WidgetIconPath {
+        for (self.immediate_commands) |command| switch (command) {
+            .icon_path => |path| return path,
+            else => {},
+        };
+        return null;
     }
 };
 

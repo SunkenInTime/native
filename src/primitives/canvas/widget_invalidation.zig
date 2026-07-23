@@ -757,6 +757,10 @@ fn immediateCommandsEqual(a: []const canvas.ImmediateCanvasCommand, b: []const c
                 .text_shadow => |other| if (!equality_model.offsetsEqual(value.offset, other.offset) or value.blur != other.blur or !equality_model.colorsEqual(value.color, other.color)) return false,
                 else => unreachable,
             },
+            .icon_path => |value| switch (right) {
+                .icon_path => |other| if (!equality_model.rectsEqual(value.view_box, other.view_box) or value.stroke_width != other.stroke_width or !equality_model.pathElementsEqual(value.elements, other.elements)) return false,
+                else => unreachable,
+            },
             else => if (!std.meta.eql(left, right)) return false,
         }
     }
