@@ -142,7 +142,7 @@ pub fn layoutWidgetDepth(
             const child_content = accordionContentFrame(widget, content, tokens, depth);
             for (widget.children) |child| {
                 if (child.layout.anchor != null) continue;
-                _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child), index, depth + 1, output, len, tokens);
+                _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child, .{}), index, depth + 1, output, len, tokens);
             }
         },
         .alert => {
@@ -152,13 +152,13 @@ pub fn layoutWidgetDepth(
             const child_content = alertContentFrame(widget, content, tokens);
             for (widget.children) |child| {
                 if (child.layout.anchor != null) continue;
-                _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child), index, depth + 1, output, len, tokens);
+                _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child, .{}), index, depth + 1, output, len, tokens);
             }
         },
         .stack, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover => {
             for (widget.children) |child| {
                 if (child.layout.anchor != null) continue;
-                _ = try layoutWidgetDepth(child, stackChildFrame(content, child), index, depth + 1, output, len, tokens);
+                _ = try layoutWidgetDepth(child, stackChildFrame(content, child, widget.layout), index, depth + 1, output, len, tokens);
             }
         },
         // Span paragraphs and span-carrying table cells share the link
@@ -1295,7 +1295,7 @@ fn layoutScrollChildren(
     const scrolled_content = content.translate(geometry.OffsetF.init(0, -scroll_y));
     for (children) |child| {
         if (child.layout.anchor != null) continue;
-        _ = try layoutWidgetDepth(child, stackChildFrame(scrolled_content, child), parent_index, depth + 1, output, len, tokens);
+        _ = try layoutWidgetDepth(child, stackChildFrame(scrolled_content, child, .{}), parent_index, depth + 1, output, len, tokens);
     }
 }
 
@@ -1701,7 +1701,7 @@ pub fn widgetKindStacksChildren(kind: widget_model.WidgetKind) bool {
     };
 }
 
-fn stackChildFrame(content: geometry.RectF, child: Widget) geometry.RectF {
+fn stackChildFrame(content: geometry.RectF, child: Widget, parent_layout: WidgetLayoutStyle) geometry.RectF {
     const margin = child.layout.margin;
     const inner = content.inset(.{
         .top = finiteMargin(margin.top),
@@ -1719,11 +1719,24 @@ fn stackChildFrame(content: geometry.RectF, child: Widget) geometry.RectF {
     if (std.math.isFinite(ratio) and ratio > 0 and width_determined != height_determined) {
         if (width_determined) height = width / ratio else width = height * ratio;
     }
+    width = clampIntrinsicAxis(width, child.layout.min_size.width, child.layout.max_size.width);
+    height = clampIntrinsicAxis(height, child.layout.min_size.height, child.layout.max_size.height);
+    const cross = child.layout.self_alignment orelse parent_layout.cross_alignment;
+    const x_offset = switch (cross) {
+        .center => (inner.width - width) * 0.5,
+        .end => inner.width - width,
+        .start, .stretch => 0,
+    };
+    const y_offset = switch (parent_layout.main_alignment) {
+        .center, .space_around, .space_evenly => (inner.height - height) * 0.5,
+        .end => inner.height - height,
+        .start, .space_between => 0,
+    };
     return geometry.RectF.init(
-        inner.x + child.frame.x,
-        inner.y + child.frame.y,
-        clampIntrinsicAxis(width, child.layout.min_size.width, child.layout.max_size.width),
-        clampIntrinsicAxis(height, child.layout.min_size.height, child.layout.max_size.height),
+        inner.x + x_offset + child.frame.x,
+        inner.y + y_offset + child.frame.y,
+        width,
+        height,
     );
 }
 

@@ -478,6 +478,27 @@ test "widget layout applies aspect ratio when exactly one axis is definite" {
     try expectLayoutFrame(stack_layout, 4, geometry.RectF.init(0, 0, 120, 60));
 }
 
+test "stack-like panels center an explicit icon box without a layout wrapper" {
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .icon,
+        .frame = geometry.RectF.init(0, 0, 24, 24),
+    }};
+    const panel = Widget{
+        .id = 1,
+        .kind = .panel,
+        .layout = .{
+            .padding = geometry.InsetsF.all(5),
+            .cross_alignment = .center,
+            .main_alignment = .center,
+        },
+        .children = &children,
+    };
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(panel, geometry.RectF.init(10, 20, 80, 60), &nodes);
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(38, 38, 24, 24));
+}
+
 test "chat bubbles cap at the thread fraction, never the full thread" {
     // A hug-sized bubble in a WIDE thread: its message wants 700 points,
     // the row offers 600, and the reference contract caps the bubble at
