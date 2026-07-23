@@ -468,7 +468,14 @@ pub const RenderPlanner = struct {
         const transformed_radius = transformRadius(clip.radius, self.state.transform);
         if (self.state.clip) |existing| {
             const intersection = geometry.RectF.intersection(existing, transformed_clip);
-            if (rectsEqual(intersection, transformed_clip)) {
+            if (rectsEqual(existing, transformed_clip)) {
+                // Equal-bounds nested clips intersect corner-by-corner. A
+                // square child clip must never erase an ancestor's rounded
+                // mask (the cover-image emitter adds exactly that shape);
+                // for coincident rounded rects the larger radius is the
+                // tighter constraint at each corner.
+                self.state.clip_radius = maxRadii(self.state.clip_radius, transformed_radius);
+            } else if (rectsEqual(intersection, transformed_clip)) {
                 self.state.clip_radius = transformed_radius;
             } else if (!rectsEqual(intersection, existing)) {
                 // One rounded rect cannot encode the lens formed by two
@@ -741,6 +748,15 @@ fn renderBatchCanExtend(batch: RenderBatch, command: RenderCommand, pipeline: Re
 
 fn rectsEqual(a: geometry.RectF, b: geometry.RectF) bool {
     return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
+}
+
+fn maxRadii(a: Radius, b: Radius) Radius {
+    return .{
+        .top_left = @max(a.top_left, b.top_left),
+        .top_right = @max(a.top_right, b.top_right),
+        .bottom_right = @max(a.bottom_right, b.bottom_right),
+        .bottom_left = @max(a.bottom_left, b.bottom_left),
+    };
 }
 
 fn transformRadius(radius: Radius, transform: Affine) Radius {

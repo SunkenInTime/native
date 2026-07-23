@@ -360,6 +360,62 @@ test "image widget emits fit tile and asymmetric radius on the draw" {
         else => return error.TestUnexpectedResult,
     }
 }
+
+test "cover image in padded fixed stack cannot erase the stack rounded clip" {
+    const image = Widget{
+        .id = 3,
+        .kind = .image,
+        .image_id = 42,
+        .image_fit = .cover,
+        .layout = .{ .percent_size = geometry.SizeF.init(100, 100) },
+    };
+    const screen = Widget{
+        .id = 2,
+        .kind = .stack,
+        .frame = geometry.RectF.init(0, 0, 0, 20),
+        .layout = .{ .flags = .{ .clip_content = true } },
+        .style = .{ .radius = 6 },
+        .children = &.{image},
+    };
+    const root = Widget{
+        .id = 1,
+        .kind = .column,
+        .layout = .{ .padding = geometry.InsetsF.all(2) },
+        .children = &.{screen},
+    };
+
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 34, 36), &nodes);
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(2, 2, 30, 20));
+    try expectLayoutFrame(layout, 3, geometry.RectF.init(2, 2, 30, 20));
+
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetLayout(&builder, layout, .{});
+    var render_commands: [2]RenderCommand = undefined;
+    const plan = try builder.displayList().renderPlan(&render_commands);
+    try std.testing.expectEqual(@as(usize, 1), plan.commands.len);
+    try std.testing.expectEqualDeep(Radius.all(6), plan.commands[0].clip_radius);
+
+    const red = [_]u8{ 255, 0, 0, 255 };
+    const images = [_]ReferenceImage{.{ .id = 42, .width = 1, .height = 1, .pixels = &red }};
+    var pixels: [34 * 36 * 4]u8 = undefined;
+    const surface = (try ReferenceRenderSurface.init(34, 36, &pixels)).withImages(&images);
+    try surface.renderPass(.{
+        .commands = plan.commands,
+        .surface_size = geometry.SizeF.init(34, 36),
+        .full_repaint = true,
+    }, Color{ .r = 0, .g = 0, .b = 0, .a = 0 });
+
+    // The fixed stack starts at (2,2): its square child cover must paint
+    // the center but neither rounded top corner nor the padding rim.
+    try expectPixelRgba8(.{ 0, 0, 0, 0 }, surface, 2, 2);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 17, 2);
+    try expectPixelRgba8(.{ 0, 0, 0, 0 }, surface, 31, 2);
+    try expectPixelRgba8(.{ 0, 0, 0, 0 }, surface, 1, 10);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 17, 10);
+}
+
 const toggleWidgetKnobCommandId = support.toggleWidgetKnobCommandId;
 const toggleWidgetKnobTravel = support.toggleWidgetKnobTravel;
 const textSelectionForWidgetPoint = support.textSelectionForWidgetPoint;

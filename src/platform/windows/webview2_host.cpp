@@ -586,10 +586,6 @@ struct HostLifetime {
  * 31 ms on common systems, limiting a requested 30 Hz surface to ~21-28 Hz. */
 constexpr size_t kMaxAppTimers = 64;
 constexpr UINT_PTR kAppTimerIdBase = 0x1000;
-/* The 16 ms per-window frame-pump timer (SetTimer id on each top-level
- * window; distinct from the app-timer id range). */
-constexpr UINT_PTR kFrameTimerId = 1;
-
 struct AppTimer {
     uint64_t id = 0;
     HWND hwnd = nullptr;
@@ -5344,9 +5340,6 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case WM_TIMER:
             if (host && handleAppTimerMessage(host, wparam)) return 0;
             if (host && handleAudioTimerMessage(host, wparam)) return 0;
-            if (host && wparam == kFrameTimerId) {
-                for (auto &entry : host->windows) emit(host, entry.second, kFrame);
-            }
             return 0;
         case WM_GETMINMAXINFO:
             if (host) {
@@ -5512,7 +5505,6 @@ static bool createNativeWindow(Host *host, Window &window) {
     }
     UpdateWindow(hwnd);
     logWindowDpiLifecycle(host, window, "created");
-    SetTimer(hwnd, kFrameTimerId, 16, nullptr);
     return true;
 }
 
