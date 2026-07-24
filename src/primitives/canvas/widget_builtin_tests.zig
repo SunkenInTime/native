@@ -640,6 +640,90 @@ test "retained icon path metadata draws fill or round stroke with current text c
     }
 }
 
+test "a centered 28px path icon paints within one pixel of a 100px button center" {
+    // A symmetric fill makes this a layout/render assertion rather than an
+    // eyeball test: the reference renderer must put the painted path's pixel
+    // bbox on the same center as the pressable panel that Weaver projects for
+    // a styled <button>.
+    const elements = [_]canvas.PathElement{
+        .{ .verb = .move_to, .points = .{ geometry.PointF.init(7, 6), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(12, 6), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(12, 22), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(7, 22), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .close },
+        .{ .verb = .move_to, .points = .{ geometry.PointF.init(16, 6), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(21, 6), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(21, 22), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .line_to, .points = .{ geometry.PointF.init(16, 22), geometry.PointF.zero(), geometry.PointF.zero() } },
+        .{ .verb = .close },
+    };
+    const metadata = [_]canvas.ImmediateCanvasCommand{.{ .icon_path = .{
+        .view_box = geometry.RectF.init(0, 0, 28, 28),
+        .elements = &elements,
+        .stroke_width = 0,
+    } }};
+    const icon = Widget{
+        .id = 82,
+        .kind = .icon,
+        .frame = geometry.RectF.init(0, 0, 28, 28),
+        .style = .{ .foreground = Color.rgb8(255, 255, 255) },
+        .immediate_commands = &metadata,
+    };
+    const button = Widget{
+        .id = 81,
+        .kind = .panel,
+        .frame = geometry.RectF.init(0, 0, 100, 100),
+        .layout = .{
+            .cross_alignment = .center,
+            .main_alignment = .center,
+        },
+        .style = .{
+            .background = Color.rgba8(0, 0, 0, 0),
+            .border = Color.rgba8(0, 0, 0, 0),
+            .stroke_width = 0,
+        },
+        .children = &.{icon},
+    };
+
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(button, button.frame, &nodes);
+    try expectLayoutFrame(layout, 82, geometry.RectF.init(36, 36, 28, 28));
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetLayout(&builder, layout, .{});
+    var render_commands: [16]RenderCommand = undefined;
+    const plan = try builder.displayList().renderPlan(&render_commands);
+    var pixels: [100 * 100 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(100, 100, &pixels);
+    try surface.renderPass(.{
+        .commands = plan.commands,
+        .surface_size = geometry.SizeF.init(100, 100),
+        .full_repaint = true,
+    }, Color.rgba8(0, 0, 0, 0));
+
+    var min_x: usize = 100;
+    var min_y: usize = 100;
+    var max_x: usize = 0;
+    var max_y: usize = 0;
+    var ink: usize = 0;
+    for (0..100) |y| {
+        for (0..100) |x| {
+            if (surface.pixelRgba8(x, y)[3] == 0) continue;
+            min_x = @min(min_x, x);
+            min_y = @min(min_y, y);
+            max_x = @max(max_x, x);
+            max_y = @max(max_y, y);
+            ink += 1;
+        }
+    }
+    try std.testing.expect(ink > 0);
+    const center_x = @as(f32, @floatFromInt(min_x + max_x)) * 0.5;
+    const center_y = @as(f32, @floatFromInt(min_y + max_y)) * 0.5;
+    try std.testing.expectApproxEqAbs(@as(f32, 50), center_x, 1);
+    try std.testing.expectApproxEqAbs(@as(f32, 50), center_y, 1);
+}
+
 test "an unresolved explicit icon name draws the missing-icon fallback, never a silent gap" {
     const tokens = DesignTokens{};
     // The explicit channel (`Widget.icon`) is where bound markup names
