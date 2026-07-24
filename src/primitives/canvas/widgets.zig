@@ -710,6 +710,10 @@ fn builtinComponent(
 pub const WidgetActions = struct {
     focus: bool = false,
     press: bool = false,
+    /// An explicitly bound secondary press (`on_hold` / right-click).
+    /// Kept distinct from `press`: native text defaults may yield to this
+    /// action without making every ordinary button suppress Copy.
+    secondary_press: bool = false,
     toggle: bool = false,
     increment: bool = false,
     decrement: bool = false,
@@ -723,6 +727,7 @@ pub const WidgetActions = struct {
     pub fn isEmpty(self: WidgetActions) bool {
         return !self.focus and
             !self.press and
+            !self.secondary_press and
             !self.toggle and
             !self.increment and
             !self.decrement and

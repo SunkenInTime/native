@@ -782,6 +782,7 @@ fn widgetSemanticsEqual(a: WidgetSemantics, b: WidgetSemantics) bool {
 fn widgetActionsEqual(a: WidgetActions, b: WidgetActions) bool {
     return a.focus == b.focus and
         a.press == b.press and
+        a.secondary_press == b.secondary_press and
         a.toggle == b.toggle and
         a.increment == b.increment and
         a.decrement == b.decrement and

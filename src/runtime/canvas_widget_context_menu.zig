@@ -11,10 +11,12 @@
 //! Resolution order for a secondary-button press:
 //! 1. the deepest widget on the hit route declaring
 //!    `ElementOptions.context_menu` (app-declared, Msg-mapped items),
-//! 2. an editable text target: the standard Cut / Copy / Paste /
+//! 2. the resolved press target's explicit `on_hold` / right-press
+//!    handler (so a button's child text cannot steal its gesture),
+//! 3. an editable text target: the standard Cut / Copy / Paste /
 //!    Select All menu wired to the existing clipboard actions,
-//! 3. the view's live static-text selection: a Copy-only menu.
-//! The zero-code defaults (2 and 3) are presenter-only: without a native
+//! 4. the view's live static-text selection: a Copy-only menu.
+//! The zero-code defaults (3 and 4) are presenter-only: without a native
 //! menu they degrade to the keyboard clipboard paths, never a synthesized
 //! surface (there are no app-declared items to mount).
 //!
@@ -120,7 +122,28 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 return;
             }
 
-            // 2. Editable text target: the standard edit menu, wired to
+            // 2. An explicit secondary handler on the resolved press target
+            // outranks zero-code text menus. A button commonly contains a
+            // text leaf; the leaf may have a live selection, but the authored
+            // button action still owns a right/control-click anywhere inside
+            // the button. Ordinary buttons do not set `secondary_press`, so
+            // selected text keeps its Copy menu unless the author explicitly
+            // claimed this gesture.
+            if (pointer_event.press_target) |press_target| {
+                const press_index = self.views[index].canvasWidgetNodeIndexById(press_target.id) orelse return;
+                const press_widget = self.views[index].widget_layout_nodes[press_index].widget;
+                if (press_widget.semantics.actions.secondary_press) {
+                    try self.dispatchEvent(app, .{ .canvas_widget_context_press = .{
+                        .window_id = input_event.window_id,
+                        .view_label = self.views[index].label,
+                        .press_target = pointer_event.press_target,
+                        .pointer = pointer_event.pointer,
+                    } });
+                    return;
+                }
+            }
+
+            // 3. Editable text target: the standard edit menu, wired to
             // the existing clipboard actions. Focus the field first so
             // paste lands where the user clicked (macOS behavior).
             if (pointer_event.target) |target| {
@@ -143,7 +166,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     return;
                 }
 
-                // 3. Static text with a live selection: Copy only.
+                // 4. Static text with a live selection: Copy only.
                 const selected_id = self.views[index].canvas_widget_selected_text_id;
                 if (selected_id != 0 and selected_id == target.id) {
                     if (!has_presenter) return;
@@ -157,7 +180,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 }
             }
 
-            // 4. No menu anywhere on the route: the press-and-hold
+            // 5. No menu anywhere on the route: the press-and-hold
             // alternative. Deliver the context press so `UiApp` can
             // dispatch the press target's `on_hold` Msg.
             try self.dispatchEvent(app, .{ .canvas_widget_context_press = .{

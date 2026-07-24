@@ -2477,7 +2477,10 @@ pub fn Ui(comptime Msg: type) type {
             // press claimer), like on_press: the hold gesture starts as a
             // press, and the classic list-row shape (press to open, hold
             // for the menu) pairs the two on one element.
-            if (node.on_hold.isBound()) widget.semantics.actions.press = true;
+            if (node.on_hold.isBound()) {
+                widget.semantics.actions.press = true;
+                widget.semantics.actions.secondary_press = true;
+            }
             if (node.on_input != null) widget.semantics.actions.set_text = true;
             if (widget.kind == .slider and (node.on_value != null or node.on_change != null)) {
                 widget.semantics.actions.increment = true;

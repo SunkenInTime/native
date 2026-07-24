@@ -129,6 +129,42 @@ test "runtime dispatches app activation lifecycle events" {
     try std.testing.expectEqual(LifecycleEvent.deactivate, app_state.events[3]);
 }
 
+test "frame-requested app hook can invalidate an otherwise idle frame" {
+    const TestApp = struct {
+        requests: usize = 0,
+
+        fn app(self: *@This()) App {
+            return .{
+                .context = self,
+                .name = "frame-request-hook",
+                .source = platform.WebViewSource.html("<h1>Frame request</h1>"),
+                .frame_requested_fn = frameRequested,
+            };
+        }
+
+        fn frameRequested(context: *anyopaque, runtime: *Runtime) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.requests += 1;
+            runtime.invalidateFor(.state, null);
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    const frame_before = harness.runtime.frame_index;
+
+    // Simulate the event delivered by PlatformServices.requestFrame after
+    // startup has gone idle. The hook runs before the clean-frame return,
+    // invalidates, and the same boundary publishes.
+    harness.runtime.invalidated = false;
+    try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try std.testing.expectEqual(@as(usize, 2), app_state.requests);
+    try std.testing.expectEqual(frame_before + 1, harness.runtime.frame_index);
+}
+
 test "runtime stores and dispatches appearance preferences" {
     const TestApp = struct {
         appearance_count: u32 = 0,

@@ -503,6 +503,12 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         pub fn frame(self: *Runtime, app: App) anyerror!void {
             const start_ns = nowNanoseconds();
             try consumeAutomationCommand(self, app);
+            // `request_frame_fn` is the thread-safe half of this seam:
+            // the platform only gets us onto the loop thread. Let the app
+            // consume its queued state HERE before a clean runtime returns,
+            // so a static surface can wake, update, invalidate, and publish
+            // without an unrelated input or animation frame.
+            try app.frameRequested(self);
             if (!self.invalidated) return;
 
             try publishAutomation(self);

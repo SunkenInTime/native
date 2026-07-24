@@ -339,6 +339,7 @@ pub fn App(comptime Runtime: type) type {
         const EventFn = *const fn (context: *anyopaque, runtime: *Runtime, event: Event) anyerror!void;
         const SourceFn = *const fn (context: *anyopaque) anyerror!platform.WebViewSource;
         const SceneFn = *const fn (context: *anyopaque) anyerror!app_manifest.ShellConfig;
+        const FrameRequestedFn = *const fn (context: *anyopaque, runtime: *Runtime) anyerror!void;
         const StopFn = *const fn (context: *anyopaque, runtime: *Runtime) anyerror!void;
         const ReplayFn = *const fn (context: *anyopaque, control: ReplayControl) anyerror!void;
 
@@ -348,6 +349,13 @@ pub fn App(comptime Runtime: type) type {
         source_fn: ?SourceFn = null,
         scene_fn: ?SceneFn = null,
         start_fn: ?StartFn = null,
+        /// Loop-thread hook at the start of every platform
+        /// `frame_requested` boundary, before the runtime's clean-frame
+        /// short-circuit. This lets an off-thread producer pair the
+        /// thread-safe `PlatformServices.requestFrame` wake with a
+        /// loop-thread state update; null keeps the boundary allocation-
+        /// and callback-free for ordinary apps.
+        frame_requested_fn: ?FrameRequestedFn = null,
         event_fn: ?EventFn = null,
         stop_fn: ?StopFn = null,
         /// Session-replay hook (`UiApp` wires it automatically). Null
@@ -361,6 +369,10 @@ pub fn App(comptime Runtime: type) type {
 
         pub fn event(self: Self, runtime: *Runtime, event_value: Event) anyerror!void {
             if (self.event_fn) |event_fn| try event_fn(self.context, runtime, event_value);
+        }
+
+        pub fn frameRequested(self: Self, runtime: *Runtime) anyerror!void {
+            if (self.frame_requested_fn) |frame_requested_fn| try frame_requested_fn(self.context, runtime);
         }
 
         pub fn webViewSource(self: Self) anyerror!platform.WebViewSource {
