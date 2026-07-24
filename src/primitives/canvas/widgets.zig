@@ -401,13 +401,31 @@ pub const unset_widget_corner_radius = -std.math.inf(f32);
 
 /// Optional visual overrides for one pointer-interaction state. A null
 /// channel inherits the base `WidgetStyle` channel, so authors can change one
-/// property without restating the other three. Pressed wins over hovered when
+/// property without restating the others. Pressed wins over hovered when
 /// both states are true.
+pub const WidgetBoxShadowStyle = struct {
+    offset: geometry.OffsetF = .{},
+    blur: f32 = 0,
+    spread: f32 = 0,
+    color: Color,
+    inset: bool = false,
+};
+
+/// A state variant can inherit the base shadow, explicitly remove it, or
+/// replace it. The explicit `.none` arm keeps `pressed:shadow-none`
+/// distinguishable from an omitted state-shadow utility.
+pub const WidgetInteractionShadow = union(enum) {
+    inherit,
+    none,
+    value: WidgetBoxShadowStyle,
+};
+
 pub const WidgetInteractionStyle = struct {
     background: ?Color = null,
     foreground: ?Color = null,
     opacity: ?f32 = null,
     border: ?Color = null,
+    shadow: WidgetInteractionShadow = .inherit,
 };
 
 pub const WidgetStyle = struct {
@@ -790,7 +808,7 @@ pub const ImmediateCanvasCommand = union(enum) {
     polyline: struct { points: []const geometry.PointF, width: f32, color: Color },
     /// Rare retained metadata; never emitted as immediate paint.
     text_style: WidgetTextStyle,
-    box_shadow: struct { offset: geometry.OffsetF = .{}, blur: f32 = 0, spread: f32 = 0, color: Color, inset: bool = false },
+    box_shadow: WidgetBoxShadowStyle,
     text_shadow: canvas.TextShadow,
     /// Per-text registered/built-in face override. Retaining this in the
     /// existing command slice avoids enlarging every Widget for a rare style.

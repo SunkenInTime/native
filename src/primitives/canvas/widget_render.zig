@@ -476,7 +476,7 @@ fn emitWidgetLayoutNode(
     const node = layout.nodes[node_index];
     if (node.widget.semantics.hidden) return;
 
-    var widget = widgetWithInteractionStyle(widgetWithRenderState(widgetWithFrame(node.widget, node.frame), state));
+    var widget = widgetWithInteractionStyle(widgetWithLayoutRenderState(layout, node_index, widgetWithFrame(node.widget, node.frame), state));
     widget.group_segment = segment;
     const opacity = widgetOpacity(widget);
     if (opacity <= 0) return;
@@ -2654,6 +2654,29 @@ fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
     }
     if (state.pressed_id) |pressed_id| {
         copy.state.pressed = copy.id != 0 and copy.id == pressed_id;
+    }
+    return copy;
+}
+
+/// Stamp the state a node's interaction variants resolve against. A
+/// press-claiming node owns its own state. Decoration/layout descendants use
+/// the nearest press-claiming ancestor, matching pointer routing, so an icon
+/// or label inside a button can react without becoming a hit target.
+pub fn widgetWithLayoutRenderState(layout: anytype, node_index: usize, widget: Widget, state: WidgetRenderState) Widget {
+    var copy = widgetWithRenderState(widget, state);
+    if (widget_access.widgetClaimsPress(copy)) return copy;
+    if (node_index >= layout.nodes.len) return copy;
+
+    var parent_index = layout.nodes[node_index].parent_index;
+    while (parent_index) |index| {
+        if (index >= layout.nodes.len) return copy;
+        const ancestor = layout.nodes[index].widget;
+        if (widget_access.widgetClaimsPress(ancestor)) {
+            copy.state.hovered = if (state.hovered_id) |id| ancestor.id != 0 and ancestor.id == id else ancestor.state.hovered;
+            copy.state.pressed = if (state.pressed_id) |id| ancestor.id != 0 and ancestor.id == id else ancestor.state.pressed;
+            return copy;
+        }
+        parent_index = layout.nodes[index].parent_index;
     }
     return copy;
 }

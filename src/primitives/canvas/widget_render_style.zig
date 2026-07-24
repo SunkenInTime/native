@@ -13,19 +13,59 @@ const DesignTokens = token_model.DesignTokens;
 const ControlVisualTokens = token_model.ControlVisualTokens;
 const Widget = widget_model.Widget;
 
-pub fn widgetBoxShadow(widget: Widget) ?canvas.Shadow {
-    for (widget.immediate_commands) |command| switch (command) {
-        .box_shadow => |shadow| return .{
+pub const WidgetBoxShadowResolution = union(enum) {
+    inherit,
+    none,
+    shadow: canvas.Shadow,
+};
+
+fn resolvedInteractionShadow(widget: Widget) widget_model.WidgetInteractionShadow {
+    if (widget.state.pressed) {
+        for (widget.immediate_commands) |command| switch (command) {
+            .pressed_style => |style| switch (style.shadow) {
+                .inherit => {},
+                else => return style.shadow,
+            },
+            else => {},
+        };
+    }
+    if (widget.state.hovered) {
+        for (widget.immediate_commands) |command| switch (command) {
+            .hover_style => |style| switch (style.shadow) {
+                .inherit => {},
+                else => return style.shadow,
+            },
+            else => {},
+        };
+    }
+    return .inherit;
+}
+
+pub fn widgetBoxShadow(widget: Widget) WidgetBoxShadowResolution {
+    switch (resolvedInteractionShadow(widget)) {
+        .none => return .none,
+        .value => |shadow| return .{ .shadow = .{
             .rect = widget.frame,
             .offset = shadow.offset,
             .blur = shadow.blur,
             .spread = shadow.spread,
             .color = shadow.color,
             .inset = shadow.inset,
-        },
+        } },
+        .inherit => {},
+    }
+    for (widget.immediate_commands) |command| switch (command) {
+        .box_shadow => |shadow| return .{ .shadow = .{
+            .rect = widget.frame,
+            .offset = shadow.offset,
+            .blur = shadow.blur,
+            .spread = shadow.spread,
+            .color = shadow.color,
+            .inset = shadow.inset,
+        } },
         else => {},
     };
-    return null;
+    return .inherit;
 }
 
 pub fn widgetTextShadow(widget: Widget) ?canvas.TextShadow {

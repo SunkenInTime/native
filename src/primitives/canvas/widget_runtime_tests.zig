@@ -626,6 +626,73 @@ test "hover and pressed transitions invalidate shadow halos" {
     try std.testing.expect(pressed_dirty.maxY() > frame.maxY());
 }
 
+test "pressed shadow replacement invalidates the larger halo on press and release" {
+    const commands = [_]canvas.ImmediateCanvasCommand{
+        .{ .box_shadow = .{
+            .offset = .{ .dx = 1, .dy = 1 },
+            .blur = 1,
+            .color = Color.rgba8(0, 0, 0, 32),
+        } },
+        .{ .pressed_style = .{ .shadow = .{ .value = .{
+            .offset = .{ .dx = 8, .dy = 6 },
+            .blur = 8,
+            .spread = 3,
+            .color = Color.rgba8(0, 0, 0, 128),
+        } } } },
+    };
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(20, 20, 80, 30),
+        .immediate_commands = &commands,
+    }};
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 180, 120), &nodes);
+    const frame = layout.findById(2).?.frame;
+
+    const press_dirty = layout.renderStateDirtyBounds(.{}, .{ .pressed_id = 2 }).?;
+    try std.testing.expect(press_dirty.maxX() > frame.maxX() + 8);
+    try std.testing.expect(press_dirty.maxY() > frame.maxY() + 6);
+    try expectRect(press_dirty, layout.renderStateDirtyBounds(.{ .pressed_id = 2 }, .{}));
+}
+
+test "ancestor press invalidates descendant state-shadow halo" {
+    const child_commands = [_]canvas.ImmediateCanvasCommand{
+        .{ .box_shadow = .{
+            .offset = .{ .dy = 1 },
+            .blur = 1,
+            .color = Color.rgba8(0, 0, 0, 32),
+        } },
+        .{ .pressed_style = .{ .shadow = .{ .value = .{
+            .offset = .{ .dx = 7, .dy = 5 },
+            .blur = 7,
+            .spread = 2,
+            .color = Color.rgba8(0, 0, 0, 128),
+        } } } },
+    };
+    const decoration = Widget{
+        .id = 3,
+        .kind = .panel,
+        .frame = geometry.RectF.init(0, 0, 70, 24),
+        .immediate_commands = &child_commands,
+    };
+    const button = Widget{
+        .id = 2,
+        .kind = .panel,
+        .frame = geometry.RectF.init(20, 20, 80, 30),
+        .semantics = .{ .actions = .{ .press = true } },
+        .children = &.{decoration},
+    };
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(button, button.frame, &nodes);
+    const child_frame = layout.findById(3).?.frame;
+
+    const press_dirty = layout.renderStateDirtyBounds(.{}, .{ .pressed_id = 2 }).?;
+    try std.testing.expect(press_dirty.maxX() > child_frame.maxX());
+    try std.testing.expect(press_dirty.maxY() > child_frame.maxY());
+    try expectRect(press_dirty, layout.renderStateDirtyBounds(.{ .pressed_id = 2 }, .{}));
+}
+
 test "widget render state dirty bounds uses custom focus stroke tokens" {
     const children = [_]Widget{.{
         .id = 2,

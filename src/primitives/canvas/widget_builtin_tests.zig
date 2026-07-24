@@ -416,7 +416,7 @@ test "cover image in padded fixed stack cannot erase the stack rounded clip" {
     try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 17, 10);
 }
 
-test "interaction styles resolve all four channels with pressed precedence" {
+test "interaction styles resolve all channels with pressed precedence" {
     const hover_ink = Color.rgb8(210, 20, 30);
     const hovered_text = Widget{
         .id = 5,
@@ -443,6 +443,7 @@ test "interaction styles resolve all four channels with pressed precedence" {
 
     const pressed_background = Color.rgb8(30, 40, 50);
     const pressed_border = Color.rgb8(220, 230, 240);
+    const pressed_shadow = Color.rgba8(0, 0, 0, 77);
     const active_panel = Widget{
         .id = 6,
         .kind = .panel,
@@ -450,7 +451,16 @@ test "interaction styles resolve all four channels with pressed precedence" {
         .state = .{ .hovered = true, .pressed = true },
         .immediate_commands = &.{
             .{ .hover_style = .{ .background = Color.rgb8(1, 2, 3), .border = Color.rgb8(4, 5, 6) } },
-            .{ .pressed_style = .{ .background = pressed_background, .border = pressed_border } },
+            .{ .pressed_style = .{
+                .background = pressed_background,
+                .border = pressed_border,
+                .shadow = .{ .value = .{
+                    .offset = .{ .dy = 2 },
+                    .blur = 4,
+                    .color = pressed_shadow,
+                    .inset = true,
+                } },
+            } },
         },
     };
     var panel_commands: [8]CanvasCommand = undefined;
@@ -467,6 +477,60 @@ test "interaction styles resolve all four channels with pressed precedence" {
         else => return error.TestUnexpectedResult,
     };
     try expectFillColor(pressed_border, border.stroke.fill);
+    const shadow = switch (panel_list.findCommandById(widgetPartId(6, 1)).?.command) {
+        .shadow => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(shadow.inset);
+    try std.testing.expectEqual(@as(f32, 4), shadow.blur);
+    try std.testing.expectEqualDeep(pressed_shadow, shadow.color);
+
+    const shadowless_panel = Widget{
+        .id = 7,
+        .kind = .panel,
+        .frame = geometry.RectF.init(0, 0, 80, 40),
+        .state = .{ .pressed = true },
+        .style = .{ .background = Color.rgb8(20, 20, 20) },
+        .immediate_commands = &.{
+            .{ .box_shadow = .{ .blur = 3, .color = Color.rgba8(0, 0, 0, 80) } },
+            .{ .pressed_style = .{ .shadow = .none } },
+        },
+    };
+    var shadowless_commands: [8]CanvasCommand = undefined;
+    var shadowless_builder = Builder.init(&shadowless_commands);
+    try emitWidgetTree(&shadowless_builder, shadowless_panel, DesignTokens{});
+    try std.testing.expect(shadowless_builder.displayList().findCommandById(widgetPartId(7, 1)) == null);
+}
+
+test "non-pressable descendants resolve interaction style from nearest pressable ancestor" {
+    const base_ink = Color.rgb8(208, 208, 208);
+    const pressed_ink = Color.rgb8(182, 182, 182);
+    const label = Widget{
+        .id = 12,
+        .kind = .text,
+        .frame = geometry.RectF.init(0, 0, 60, 20),
+        .text = "Play",
+        .style = .{ .foreground = base_ink },
+        .immediate_commands = &.{.{ .pressed_style = .{ .foreground = pressed_ink } }},
+    };
+    const button = Widget{
+        .id = 11,
+        .kind = .panel,
+        .frame = geometry.RectF.init(0, 0, 100, 40),
+        .semantics = .{ .actions = .{ .press = true } },
+        .children = &.{label},
+    };
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(button, button.frame, &nodes);
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, DesignTokens{}, .{ .pressed_id = 11 });
+    const text = switch (builder.displayList().findCommandById(widgetPartId(12, 1)).?.command) {
+        .draw_text => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualDeep(pressed_ink, text.color);
 }
 const toggleWidgetKnobCommandId = support.toggleWidgetKnobCommandId;
 const toggleWidgetKnobTravel = support.toggleWidgetKnobTravel;
