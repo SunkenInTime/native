@@ -1,0 +1,1 @@
+feature: **Complete retained flex layout**: widget rows and columns can distribute space around/evenly, compress opted-in children to min-size floors, override cross alignment per child, and wrap into deterministic lines.

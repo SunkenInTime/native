@@ -505,6 +505,7 @@ pub fn Ui(comptime Msg: type) type {
             /// Width divided by height; 0 leaves aspect unconstrained.
             aspect_ratio: f32 = 0,
             grow: f32 = 0,
+            shrink: f32 = 0,
             gap: f32 = 0,
             padding: f32 = 0,
             padding_top: ?f32 = null,
@@ -518,6 +519,8 @@ pub fn Ui(comptime Msg: type) type {
             margin_left: ?f32 = null,
             main: canvas.WidgetMainAlignment = .start,
             cross: canvas.WidgetCrossAlignment = .stretch,
+            self_align: ?canvas.WidgetCrossAlignment = null,
+            flex_wrap: bool = false,
             /// Line policy for `text` leaves. `true`: word-wrap through
             /// the span paragraph machinery (a single-span paragraph),
             /// wrapping at the width the widget receives and reserving
@@ -2570,8 +2573,11 @@ pub fn Ui(comptime Msg: type) type {
                     },
                     .gap = options.gap,
                     .grow = options.grow,
+                    .shrink = options.shrink,
                     .main_alignment = options.main,
                     .cross_alignment = options.cross,
+                    .self_alignment = options.self_align,
+                    .flex_wrap = options.flex_wrap,
                     .columns = options.columns,
                     .anchor = if (options.anchor) |placement| .{
                         .placement = placement,
