@@ -41,6 +41,7 @@ pub fn drawImageFingerprint(image: DrawImage) u64 {
     hash = resourceHashOptionalRect(hash, image.src);
     hash = resourceHashEnum(hash, @intFromEnum(image.fit));
     hash = resourceHashEnum(hash, @intFromEnum(image.sampling));
+    hash = resourceHashU8(hash, @intFromBool(image.tile));
     return hash;
 }
 

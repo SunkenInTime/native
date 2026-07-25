@@ -160,6 +160,7 @@ pub const CanvasGpuImage = struct {
     opacity: f32 = 1,
     fit: ImageFit = .stretch,
     sampling: ImageSampling = .linear,
+    tile: bool = false,
     /// Rounded-corner mask over `dst` (the avatar circle clip).
     radius: Radius = .{},
 };
@@ -563,6 +564,7 @@ pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: 
                 .opacity = value.opacity,
                 .fit = value.fit,
                 .sampling = value.sampling,
+                .tile = value.tile,
                 .radius = value.radius,
             };
             packet_command.uses_image = true;

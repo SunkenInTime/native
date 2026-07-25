@@ -400,7 +400,14 @@ test "avatar and image sugar carry registered image ids" {
     const tree = try ui.finalize(ui.column(.{}, .{
         ui.avatar(.{ .image = 77, .semantics = .{ .label = "Native SDK" } }, "NS"),
         ui.avatar(.{}, "NS"),
-        ui.image(.{ .image = 42, .semantics = .{ .label = "Chart" } }),
+        ui.image(.{
+            .image = 42,
+            .image_fit = .contain,
+            .image_sampling = .nearest,
+            .image_tile = true,
+            .style = .{ .radius = 9, .radius_bottom_left = 2 },
+            .semantics = .{ .label = "Chart" },
+        }),
     }));
 
     // With an image id the avatar clips it to the circle (cover fit);
@@ -418,6 +425,11 @@ test "avatar and image sugar carry registered image ids" {
     const image_leaf = tree.root.children[2];
     try testing.expectEqual(canvas.WidgetKind.image, image_leaf.kind);
     try testing.expectEqual(@as(canvas.ImageId, 42), image_leaf.image_id);
+    try testing.expectEqual(canvas.ImageFit.contain, image_leaf.image_fit);
+    try testing.expectEqual(canvas.ImageSampling.nearest, image_leaf.image_sampling);
+    try testing.expect(image_leaf.image_tile);
+    try testing.expectEqual(@as(?f32, 9), image_leaf.style.radius);
+    try testing.expectEqual(@as(?f32, 2), image_leaf.style.radius_bottom_left);
 }
 
 test "payload-carrying handlers build messages from edits and values" {

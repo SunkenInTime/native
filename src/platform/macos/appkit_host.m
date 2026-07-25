@@ -2640,12 +2640,19 @@ static BOOL NativeSdkPacketDrawImage(NSDictionary *packetImage, NSDictionary<NSS
     NSRect src = NativeSdkPacketImageSourceRect(packetImage, image);
     if (src.size.width <= 0 || src.size.height <= 0) return NO;
     NSString *fit = [packetImage[@"fit"] isKindOfClass:[NSString class]] ? packetImage[@"fit"] : @"stretch";
-    NSRect dst = NativeSdkPacketImageDestinationRect(NativeSdkPacketRect(packetImage[@"dst"]), src, fit);
+    NSRect requestedDst = CGRectStandardize(NativeSdkPacketRect(packetImage[@"dst"]));
+    BOOL tile = [packetImage[@"tile"] boolValue];
+    NSRect dst = tile ? requestedDst : NativeSdkPacketImageDestinationRect(requestedDst, src, fit);
     if (dst.size.width <= 0 || dst.size.height <= 0) return NO;
+    if (tile) {
+        double tileCount = ceil(dst.size.width / src.size.width) * ceil(dst.size.height / src.size.height);
+        if (!isfinite(tileCount) || tileCount > 65536) return NO;
+    }
 
     CGFloat imageOpacity = fmax(0.0, fmin(1.0, NativeSdkPacketNumber(packetImage[@"opacity"], 1)));
     NSString *sampling = [packetImage[@"sampling"] isKindOfClass:[NSString class]] ? packetImage[@"sampling"] : @"linear";
     [NSGraphicsContext saveGraphicsState];
+    if (tile) [NSBezierPath clipRect:requestedDst];
     /* Rounded-corner mask over the REQUESTED destination (the widget
      * frame) — the avatar circle clip; a `cover` fit expands `dst`, so
      * the mask uses the packet's original dst rect. */
@@ -2656,11 +2663,21 @@ static BOOL NativeSdkPacketDrawImage(NSDictionary *packetImage, NSDictionary<NSS
             maxCorner = fmax(maxCorner, NativeSdkPacketNumber(radius[index], 0));
         }
         if (maxCorner > 0) {
-            [NativeSdkPacketRoundedRectPath(NativeSdkPacketRect(NativeSdkPacketArray(packetImage[@"dst"], 4)), packetImage[@"radius"]) addClip];
+            [NativeSdkPacketRoundedRectPath(requestedDst, packetImage[@"radius"]) addClip];
         }
     }
     [NSGraphicsContext.currentContext setImageInterpolation:[sampling isEqualToString:@"nearest"] ? NSImageInterpolationNone : NSImageInterpolationHigh];
-    [image drawInRect:dst fromRect:src operation:NSCompositingOperationSourceOver fraction:(opacity * imageOpacity) respectFlipped:YES hints:nil];
+    if (tile) {
+        const CGFloat maxX = NSMaxX(dst);
+        const CGFloat maxY = NSMaxY(dst);
+        for (CGFloat y = NSMinY(dst); y < maxY; y += src.size.height) {
+            for (CGFloat x = NSMinX(dst); x < maxX; x += src.size.width) {
+                [image drawInRect:NSMakeRect(x, y, src.size.width, src.size.height) fromRect:src operation:NSCompositingOperationSourceOver fraction:(opacity * imageOpacity) respectFlipped:YES hints:nil];
+            }
+        }
+    } else {
+        [image drawInRect:dst fromRect:src operation:NSCompositingOperationSourceOver fraction:(opacity * imageOpacity) respectFlipped:YES hints:nil];
+    }
     [NSGraphicsContext restoreGraphicsState];
     return YES;
 }
@@ -2832,7 +2849,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
 }
 
 /* ---------------------------------------------------------------------------
- * Compact binary gpu-surface packet decoding (wire format v6).
+ * Compact binary gpu-surface packet decoding (wire format v7).
  *
  * Little-endian, length-prefixed, mirror of the engine's binary packet
  * encoder (serialization.zig, `writeCanvasGpuPacketBinary` and the patch
@@ -2848,7 +2865,8 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
  * command dictionary; v3 added the flag-gated dirty rect list after the
  * scissor; v4 added the per-command stroke end-cap code after
  * stroke_width; v5 added optional text shadows and the shadow-effect inset
- * flag; v6 adds four per-corner radii after every present command clip.
+ * flag; v6 adds four per-corner radii after every present command clip;
+ * v7 adds an image tile byte after the sampling code.
  * The version this comment names and the encoder's spec
  * comment must agree with `binary_packet_version` (serialization.zig);
  * the `test-wire-format-version-prose` build check pins all three.
@@ -3055,6 +3073,7 @@ static NSDictionary *NativeSdkBinaryReadImage(NativeSdkBinaryPacketReader *reade
     NSNumber *opacity = NativeSdkBinaryReadF32Number(reader);
     uint8_t fitCode = NativeSdkBinaryReadU8(reader);
     uint8_t samplingCode = NativeSdkBinaryReadU8(reader);
+    uint8_t tileCode = NativeSdkBinaryReadU8(reader);
     NSArray *radius = NativeSdkBinaryReadF32Array(reader, 4);
     if (reader->failed || !dst || !radius || (hasSrc && !src)) return nil;
     NSString *fit = fitCode == 1 ? @"contain" : (fitCode == 2 ? @"cover" : @"stretch");
@@ -3065,6 +3084,7 @@ static NSDictionary *NativeSdkBinaryReadImage(NativeSdkBinaryPacketReader *reade
         @"opacity" : opacity,
         @"fit" : fit,
         @"sampling" : sampling,
+        @"tile" : @(tileCode != 0),
         @"radius" : radius,
     }];
     if (src) image[@"src"] = src;
@@ -3249,7 +3269,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (memcmp(bytes, "NSGP", 4) != 0) return nil;
     reader.offset = 4;
     uint8_t version = NativeSdkBinaryReadU8(&reader);
-    if (version != 6) return nil;
+    if (version != 7) return nil;
     uint8_t loadActionCode = NativeSdkBinaryReadU8(&reader);
     uint8_t packetFlags = NativeSdkBinaryReadU8(&reader);
     (void)NativeSdkBinaryReadU8(&reader); /* reserved */

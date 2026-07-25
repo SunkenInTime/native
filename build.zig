@@ -142,7 +142,7 @@ pub fn build(b: *std.Build) void {
     desktop_mod.addImport("platform_info", platform_info_mod);
     desktop_mod.addImport("json", json_mod);
     desktop_mod.addImport("canvas", canvas_mod);
-    const native_sdk_test_assets = module(b, target, optimize, "examples/deck/src/fonts/test_assets.zig");
+    const native_sdk_test_assets = module(b, target, optimize, "examples/deck/src/test_assets.zig");
     desktop_mod.addImport("native_sdk_test_assets", native_sdk_test_assets);
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
@@ -158,6 +158,19 @@ pub fn build(b: *std.Build) void {
             .flags = &.{"-std=c++17"},
         });
         artifact.root_module.addIncludePath(b.path("src/platform/windows"));
+        artifact.root_module.linkSystemLibrary("c++", .{});
+        artifact.root_module.linkSystemLibrary("c", .{});
+        break :tests artifact;
+    } else null;
+    const windows_image_decoder_tests: ?*std.Build.Step.Compile = if (target.result.os.tag == .windows) tests: {
+        const image_decoder_test_mod = module(b, target, optimize, "src/platform/windows/image_decoder_test_runner.zig");
+        image_decoder_test_mod.addImport("native_sdk_test_assets", native_sdk_test_assets);
+        const artifact = testArtifact(b, image_decoder_test_mod);
+        artifact.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/windows/image_decoder.cpp"),
+            .flags = &.{"-std=c++17"},
+        });
+        artifact.root_module.linkSystemLibrary("ole32", .{});
         artifact.root_module.linkSystemLibrary("c++", .{});
         artifact.root_module.linkSystemLibrary("c", .{});
         break :tests artifact;
@@ -420,6 +433,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     test_step.dependOn(&b.addRunArtifact(widget_profile_tests).step);
     if (windows_dpi_geometry_tests) |tests| {
+        test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+    if (windows_image_decoder_tests) |tests| {
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
     for (desktop_test_shards) |shard_tests| {
@@ -695,10 +711,10 @@ pub fn build(b: *std.Build) void {
     // this step until the encoder comment, the host decoder comment, and
     // the patterns below move with it.
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-wire-format-version-prose", "Verify wire-format version prose matches the packet version constant", &.{
-        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "pub const binary_packet_version: u8 = 6;" },
-        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "Compact binary gpu-surface packet encoding (wire format v6)." },
-        .{ .path = "src/platform/windows/d3d_presenter.cpp", .pattern = "static constexpr uint8_t kBinaryPacketVersion = 6;" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Compact binary gpu-surface packet decoding (wire format v6)." },
+        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "pub const binary_packet_version: u8 = 7;" },
+        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "Compact binary gpu-surface packet encoding (wire format v7)." },
+        .{ .path = "src/platform/windows/d3d_presenter.cpp", .pattern = "static constexpr uint8_t kBinaryPacketVersion = 7;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Compact binary gpu-surface packet decoding (wire format v7)." },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-blur-effects", "Verify AppKit GPU packet presenter applies blur effects", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketApplyBlur" },
@@ -836,6 +852,9 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-widget-profile", "Verify stock and widget capacity profiles", widget_profile_tests);
     if (windows_dpi_geometry_tests) |tests| {
         addTestStep(b, "test-windows-dpi-geometry", "Run Windows DPI geometry and renderer protocol tests", tests);
+    }
+    if (windows_image_decoder_tests) |tests| {
+        addTestStep(b, "test-windows-image-decoder", "Decode real Windows image fixtures at framework budgets", tests);
     }
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
     for (desktop_test_shard_specs, desktop_test_shards) |spec, shard_tests| {

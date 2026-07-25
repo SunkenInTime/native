@@ -463,7 +463,8 @@ pub const ReferenceRenderSurface = struct {
         } else return error.ReferenceRenderUnsupportedCommand;
 
         const src_rect = referenceImageSourceRect(image, value.src) orelse return;
-        const local_dst = referenceImageDestinationRect(value.dst, src_rect, value.fit) orelse return;
+        const requested_dst = value.dst.normalized();
+        const local_dst = if (value.tile) requested_dst else referenceImageDestinationRect(value.dst, src_rect, value.fit) orelse return;
         const dst_rect = command.transform.transformRect(local_dst).normalized();
         // The rounded mask applies over the REQUESTED destination (the
         // widget frame), not the fit-expanded rect a `.cover` draw fills.
@@ -487,37 +488,42 @@ pub const ReferenceRenderSurface = struct {
         // once per (image content, size, phase) and every later repaint
         // — the cover-loading cascade, a re-opened view, a whole-pixel
         // move — blends from the panel.
-        if (self.imageScalePanel(image, value, src_rect, dst_rect, pixel_rect)) |panel| {
-            const dst_x0: i64 = @intFromFloat(@floor(dst_rect.x));
-            const dst_y0: i64 = @intFromFloat(@floor(dst_rect.y));
-            var y = pixel_rect.y;
-            while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
-                var x = pixel_rect.x;
-                while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
-                    const point = referencePixelCenter(x, y);
-                    if (!referencePointInCommandClip(command, point)) continue;
-                    if (!dst_rect.containsPoint(point)) continue;
-                    if (has_mask and !referencePointInRoundedRect(point, mask_rect, mask_radius)) continue;
-                    const column: usize = @intCast(@as(i64, @intCast(x)) - dst_x0);
-                    const row: usize = @intCast(@as(i64, @intCast(y)) - dst_y0);
-                    const offset = (row * panel.width + column) * 4;
-                    const sample = [4]u8{ panel.pixels[offset], panel.pixels[offset + 1], panel.pixels[offset + 2], panel.pixels[offset + 3] };
-                    const index = (y * self.width + x) * 4;
-                    const dst = [4]u8{
-                        self.pixels[index + 0],
-                        self.pixels[index + 1],
-                        self.pixels[index + 2],
-                        self.pixels[index + 3],
-                    };
-                    const out = blendRgba8(dst, rgba8ToColor(sample), command.opacity * image_opacity);
-                    self.pixels[index + 0] = out[0];
-                    self.pixels[index + 1] = out[1];
-                    self.pixels[index + 2] = out[2];
-                    self.pixels[index + 3] = out[3];
+        if (!value.tile) {
+            if (self.imageScalePanel(image, value, src_rect, dst_rect, pixel_rect)) |panel| {
+                const dst_x0: i64 = @intFromFloat(@floor(dst_rect.x));
+                const dst_y0: i64 = @intFromFloat(@floor(dst_rect.y));
+                var y = pixel_rect.y;
+                while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
+                    var x = pixel_rect.x;
+                    while (x < pixel_rect.x + pixel_rect.width) : (x += 1) {
+                        const point = referencePixelCenter(x, y);
+                        if (!referencePointInCommandClip(command, point)) continue;
+                        if (!dst_rect.containsPoint(point)) continue;
+                        if (has_mask and !referencePointInRoundedRect(point, mask_rect, mask_radius)) continue;
+                        const column: usize = @intCast(@as(i64, @intCast(x)) - dst_x0);
+                        const row: usize = @intCast(@as(i64, @intCast(y)) - dst_y0);
+                        const offset = (row * panel.width + column) * 4;
+                        const sample = [4]u8{ panel.pixels[offset], panel.pixels[offset + 1], panel.pixels[offset + 2], panel.pixels[offset + 3] };
+                        const index = (y * self.width + x) * 4;
+                        const dst = [4]u8{
+                            self.pixels[index + 0],
+                            self.pixels[index + 1],
+                            self.pixels[index + 2],
+                            self.pixels[index + 3],
+                        };
+                        const out = blendRgba8(dst, rgba8ToColor(sample), command.opacity * image_opacity);
+                        self.pixels[index + 0] = out[0];
+                        self.pixels[index + 1] = out[1];
+                        self.pixels[index + 2] = out[2];
+                        self.pixels[index + 3] = out[3];
+                    }
                 }
+                return;
             }
-            return;
         }
+        const tile_width = if (value.tile and requested_dst.width > 0) src_rect.width * dst_rect.width / requested_dst.width else 0;
+        const tile_height = if (value.tile and requested_dst.height > 0) src_rect.height * dst_rect.height / requested_dst.height else 0;
+        if (value.tile and (!(tile_width > 0) or !(tile_height > 0))) return;
         var y = pixel_rect.y;
         while (y < pixel_rect.y + pixel_rect.height) : (y += 1) {
             var x = pixel_rect.x;
@@ -526,8 +532,14 @@ pub const ReferenceRenderSurface = struct {
                 if (!referencePointInCommandClip(command, point)) continue;
                 if (!dst_rect.containsPoint(point)) continue;
                 if (has_mask and !referencePointInRoundedRect(point, mask_rect, mask_radius)) continue;
-                const u = std.math.clamp((point.x - dst_rect.x) / dst_rect.width, 0, 1);
-                const v = std.math.clamp((point.y - dst_rect.y) / dst_rect.height, 0, 1);
+                const u = if (value.tile)
+                    positiveFraction((point.x - dst_rect.x) / tile_width)
+                else
+                    std.math.clamp((point.x - dst_rect.x) / dst_rect.width, 0, 1);
+                const v = if (value.tile)
+                    positiveFraction((point.y - dst_rect.y) / tile_height)
+                else
+                    std.math.clamp((point.y - dst_rect.y) / dst_rect.height, 0, 1);
                 const sample = referenceSampleImage(image, src_rect, u, v, value.sampling);
                 const index = (y * self.width + x) * 4;
                 const dst = [4]u8{
@@ -1400,6 +1412,10 @@ fn referenceImageDestinationRect(dst: geometry.RectF, src: geometry.RectF, fit: 
         width,
         height,
     );
+}
+
+fn positiveFraction(value: f32) f32 {
+    return value - @floor(value);
 }
 
 const ReferencePremultipliedLinearColor = struct {

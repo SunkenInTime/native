@@ -1532,6 +1532,13 @@ test "windows frame events report the actual renderer backend" {
     try std.testing.expectEqual(platform_mod.GpuSurfaceBackend.software, gpuBackendFromInt(0));
 }
 
+test "windows top-level frame delivery stays demand-driven" {
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "SetTimer(hwnd, kFrameTimerId") == null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "PostMessageW(hwnd, kRequestFrameMessage") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "SetTimer(view.hwnd, kGpuEmitTimerId") != null);
+}
+
 test "windows audio event maps kinds and payload" {
     var event = std.mem.zeroes(WindowsEvent);
     event.audio_kind = 1;

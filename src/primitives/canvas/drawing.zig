@@ -229,6 +229,9 @@ pub const DrawImage = struct {
     opacity: f32 = 1,
     fit: ImageFit = .stretch,
     sampling: ImageSampling = .linear,
+    /// Repeat the selected source rect at its native logical-pixel size
+    /// from the destination origin. When true, `fit` is ignored.
+    tile: bool = false,
     /// Rounded-corner mask in destination space: pixels outside the
     /// rounded `dst` rect are not drawn (the avatar circle clip). Zero —
     /// the default — keeps the plain rectangular draw. Carried on the

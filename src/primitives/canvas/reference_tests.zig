@@ -1799,6 +1799,51 @@ test "reference renderer draws image resources" {
     try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 0, 3);
 }
 
+test "reference renderer repeats image source pixels from the destination origin" {
+    const commands = [_]CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 42,
+        .dst = geometry.RectF.init(0, 0, 5, 2),
+        .sampling = .nearest,
+        .tile = true,
+    } }};
+    const image_pixels = [_]u8{
+        255, 0, 0,   255,
+        0,   0, 255, 255,
+    };
+    const images = [_]ReferenceImage{.{ .id = 42, .width = 2, .height = 1, .pixels = &image_pixels }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(5, 2),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [5 * 2 * 4]u8 = undefined;
+    const surface = (try ReferenceRenderSurface.init(5, 2, &pixels)).withImages(&images);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+    for (0..2) |y| {
+        try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 0, y);
+        try expectPixelRgba8(.{ 0, 0, 255, 255 }, surface, 1, y);
+        try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 2, y);
+        try expectPixelRgba8(.{ 0, 0, 255, 255 }, surface, 3, y);
+        try expectPixelRgba8(.{ 255, 0, 0, 255 }, surface, 4, y);
+    }
+}
+
 test "reference renderer bilinear-filters scaled images" {
     const commands = [_]CanvasCommand{.{ .draw_image = .{
         .id = 1,
