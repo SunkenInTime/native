@@ -1,0 +1,1 @@
+feature: **Weaver interaction states and press geometry**: Resolve optional hover and pressed visual overrides without growing the common widget allocation, and expose node-local press, double-press, and right-press geometry to typed UI handlers.

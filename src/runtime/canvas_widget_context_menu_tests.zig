@@ -25,6 +25,8 @@ const MenuTestApp = struct {
     last_menu_item_index: usize = 0,
     request_count: u32 = 0,
     last_request_target: canvas.ObjectId = 0,
+    context_press_count: u32 = 0,
+    last_context_press_target: canvas.ObjectId = 0,
 
     fn app(self: *@This()) App {
         return .{ .context = self, .name = "context-menus", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
@@ -44,6 +46,10 @@ const MenuTestApp = struct {
             .canvas_widget_context_menu_request => |request_event| {
                 self.request_count += 1;
                 self.last_request_target = request_event.target_id;
+            },
+            .canvas_widget_context_press => |press_event| {
+                self.context_press_count += 1;
+                self.last_context_press_target = if (press_event.press_target) |target| target.id else 0;
             },
             else => {},
         }
@@ -239,6 +245,40 @@ test "right click on selected static text presents a copy-only menu" {
     try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 2));
     var clipboard_buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings("Release", try harness.runtime.readClipboard(&clipboard_buffer));
+}
+
+test "explicit ancestor secondary press outranks a selected child text copy menu" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    const label = canvas.Widget{
+        .id = 3,
+        .kind = .text,
+        .frame = geometry.RectF.init(20, 10, 120, 20),
+        .text = "Interactive surface",
+    };
+    const button = canvas.Widget{
+        .id = 2,
+        .kind = .button,
+        .frame = geometry.RectF.init(10, 10, 180, 44),
+        .semantics = .{ .actions = .{ .press = true, .secondary_press = true } },
+        .children = &.{label},
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{button} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // Model a live selection in the child text. The explicit handler on
+    // the resolved button target owns the secondary gesture.
+    harness.runtime.views[0].canvas_widget_selected_text_id = 3;
+    harness.runtime.views[0].widget_layout_nodes[2].widget.text_selection = .{ .anchor = 0, .focus = 11 };
+    try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 24));
+
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+    try std.testing.expectEqual(@as(u32, 1), app_state.context_press_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_context_press_target);
 }
 
 test "right click with no menu target presents nothing" {

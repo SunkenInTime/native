@@ -399,6 +399,35 @@ pub const WidgetLayoutStyle = struct {
 /// override and resolves through the existing non-negative clamp.
 pub const unset_widget_corner_radius = -std.math.inf(f32);
 
+/// Optional visual overrides for one pointer-interaction state. A null
+/// channel inherits the base `WidgetStyle` channel, so authors can change one
+/// property without restating the others. Pressed wins over hovered when
+/// both states are true.
+pub const WidgetBoxShadowStyle = struct {
+    offset: geometry.OffsetF = .{},
+    blur: f32 = 0,
+    spread: f32 = 0,
+    color: Color,
+    inset: bool = false,
+};
+
+/// A state variant can inherit the base shadow, explicitly remove it, or
+/// replace it. The explicit `.none` arm keeps `pressed:shadow-none`
+/// distinguishable from an omitted state-shadow utility.
+pub const WidgetInteractionShadow = union(enum) {
+    inherit,
+    none,
+    value: WidgetBoxShadowStyle,
+};
+
+pub const WidgetInteractionStyle = struct {
+    background: ?Color = null,
+    foreground: ?Color = null,
+    opacity: ?f32 = null,
+    border: ?Color = null,
+    shadow: WidgetInteractionShadow = .inherit,
+};
+
 pub const WidgetStyle = struct {
     background: ?Color = null,
     foreground: ?Color = null,
@@ -681,6 +710,10 @@ fn builtinComponent(
 pub const WidgetActions = struct {
     focus: bool = false,
     press: bool = false,
+    /// An explicitly bound secondary press (`on_hold` / right-click).
+    /// Kept distinct from `press`: native text defaults may yield to this
+    /// action without making every ordinary button suppress Copy.
+    secondary_press: bool = false,
     toggle: bool = false,
     increment: bool = false,
     decrement: bool = false,
@@ -694,6 +727,7 @@ pub const WidgetActions = struct {
     pub fn isEmpty(self: WidgetActions) bool {
         return !self.focus and
             !self.press and
+            !self.secondary_press and
             !self.toggle and
             !self.increment and
             !self.decrement and
@@ -779,13 +813,18 @@ pub const ImmediateCanvasCommand = union(enum) {
     polyline: struct { points: []const geometry.PointF, width: f32, color: Color },
     /// Rare retained metadata; never emitted as immediate paint.
     text_style: WidgetTextStyle,
-    box_shadow: struct { offset: geometry.OffsetF = .{}, blur: f32 = 0, spread: f32 = 0, color: Color, inset: bool = false },
+    box_shadow: WidgetBoxShadowStyle,
     text_shadow: canvas.TextShadow,
     /// Per-text registered/built-in face override. Retaining this in the
     /// existing command slice avoids enlarging every Widget for a rare style.
     text_font: FontId,
     /// Retained vector geometry for a path-authored icon. Metadata only.
     icon_path: WidgetIconPath,
+    /// Rare retained visual metadata rides the existing command slice rather
+    /// than enlarging every Widget. Emitters consume these entries as style;
+    /// immediate canvases never draw them.
+    hover_style: WidgetInteractionStyle,
+    pressed_style: WidgetInteractionStyle,
 };
 
 /// Where a control sits inside a FLUSH button group (`button_group`

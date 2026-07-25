@@ -67,23 +67,6 @@ fn widgetWithFrame(widget: Widget, frame: geometry.RectF) Widget {
     return copy;
 }
 
-fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
-    var copy = widget;
-    if (state.focused_id != null or state.focus_visible_id != null) {
-        copy.state.focused = if (state.focus_visible_id) |focus_visible_id|
-            copy.id != 0 and copy.id == focus_visible_id
-        else
-            false;
-    }
-    if (state.hovered_id) |hovered_id| {
-        copy.state.hovered = copy.id != 0 and copy.id == hovered_id;
-    }
-    if (state.pressed_id) |pressed_id| {
-        copy.state.pressed = copy.id != 0 and copy.id == pressed_id;
-    }
-    return copy;
-}
-
 pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTokens, output: []WidgetInvalidation) Error![]const WidgetInvalidation {
     // Id lookups ride the probe-table index whenever the trees are big
     // enough to be worth a table reset and fit its half-full bound;
@@ -329,10 +312,24 @@ pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState
         const index = widgetIndexById(layout, id) orelse continue;
         const node = layout.nodes[index];
         const base = widgetWithFrame(node.widget, node.frame);
-        const previous_widget = widgetWithRenderState(base, previous);
-        const next_widget = widgetWithRenderState(base, next);
+        const previous_widget = widget_render.widgetWithLayoutRenderState(layout, index, base, previous);
+        const next_widget = widget_render.widgetWithLayoutRenderState(layout, index, base, next);
         if (widgetStatesEqual(previous_widget.state, next_widget.state)) continue;
         bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetRenderStatePaintChangeBounds(previous_widget, next_widget, tokens)));
+    }
+    // Descendant interaction variants share the nearest press-claiming
+    // ancestor's hover/pressed state. Their ids do not occur in
+    // `WidgetRenderState`, so walk the bounded layout only when one of those
+    // two state ids changes and add every descendant whose effective state
+    // changed. Idle frames never enter this path.
+    if (previous.hovered_id != next.hovered_id or previous.pressed_id != next.pressed_id) {
+        for (layout.nodes, 0..) |node, index| {
+            const base = widgetWithFrame(node.widget, node.frame);
+            const previous_widget = widget_render.widgetWithLayoutRenderState(layout, index, base, previous);
+            const next_widget = widget_render.widgetWithLayoutRenderState(layout, index, base, next);
+            if (widgetStatesEqual(previous_widget.state, next_widget.state)) continue;
+            bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetRenderStatePaintChangeBounds(previous_widget, next_widget, tokens)));
+        }
     }
     // Focus-within chrome: an `.input_group` ancestor wears the focus
     // ring FOR its focused descendant, so a focus-visible change dirties
@@ -637,11 +634,15 @@ fn widgetFocusStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 fn widgetShadowPaintBounds(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
-    if (widget_render_style.widgetBoxShadow(widget)) |custom| {
-        var value = custom;
-        value.rect = widget.frame;
-        value.radius = widgetShadowRadius(widget, tokens);
-        return shadowBounds(value);
+    switch (widget_render_style.widgetBoxShadow(widget)) {
+        .shadow => |custom| {
+            var value = custom;
+            value.rect = widget.frame;
+            value.radius = widgetShadowRadius(widget, tokens);
+            return shadowBounds(value);
+        },
+        .none => return null,
+        .inherit => {},
     }
     if (widget_render_style.widgetTextShadow(widget)) |text_shadow| {
         return widget.frame.normalized().translate(text_shadow.offset).inflate(geometry.InsetsF.all(@max(0, text_shadow.blur)));
@@ -781,6 +782,7 @@ fn widgetSemanticsEqual(a: WidgetSemantics, b: WidgetSemantics) bool {
 fn widgetActionsEqual(a: WidgetActions, b: WidgetActions) bool {
     return a.focus == b.focus and
         a.press == b.press and
+        a.secondary_press == b.secondary_press and
         a.toggle == b.toggle and
         a.increment == b.increment and
         a.decrement == b.decrement and

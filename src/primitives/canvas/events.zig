@@ -58,6 +58,18 @@ pub const WidgetPointerEvent = struct {
     click_count: u8 = 1,
 };
 
+/// A press-family callback's geometry in node-local logical pixels. Width and
+/// height are carried with the point so higher-level SDKs can derive stable
+/// normalized coordinates without another layout lookup.
+pub const WidgetPressEvent = struct {
+    target_id: ObjectId,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    click_count: u8 = 1,
+};
+
 pub const WidgetKeyboardPhase = enum {
     key_down,
     key_up,

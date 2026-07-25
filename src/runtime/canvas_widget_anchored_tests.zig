@@ -70,6 +70,10 @@ fn pickerUpdate(model: *PickerModel, msg: PickerMsg) void {
     }
 }
 
+fn crumbPressEvent(_: canvas.WidgetPressEvent) PickerMsg {
+    return .crumb_press;
+}
+
 fn pickerView(ui: *PickerApp.Ui, model: *const PickerModel) PickerApp.Ui.Node {
     const trigger = ui.el(.select, .{ .text = "Repo", .width = 160, .on_press = .toggle_picker }, .{});
     const picker = if (model.open) ui.stack(.{ .height = 28 }, .{
@@ -105,7 +109,7 @@ fn pickerView(ui: *PickerApp.Ui, model: *const PickerModel) PickerApp.Ui.Node {
     return ui.column(.{ .gap = 8, .padding = 12 }, .{
         picker,
         switcher,
-        ui.button(.{ .on_press = .crumb_press, .on_hold = .crumb_hold }, "Crumb"),
+        ui.button(.{ .on_press_event = crumbPressEvent, .on_hold = .crumb_hold }, "Crumb"),
         ui.text(.{}, ui.fmt("picked {d}", .{model.picked})),
     });
 }
@@ -554,6 +558,18 @@ test "press-and-hold fires through the runtime timer path and suppresses the rel
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.crumb_presses);
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.holds);
     try std.testing.expect(fixture.harness.null_platform.fireTimer(PickerApp.press_hold_timer_id, 3_000_000) == null);
+}
+
+test "one primary down-up cycle dispatches exactly one typed press event" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const crumb_id = fixture.widgetIdByText(.button, "Crumb").?;
+    const center = (try fixture.retainedFrame(crumb_id)).?.center();
+    try fixture.pointer(.pointer_down, center);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.crumb_presses);
+    try fixture.pointer(.pointer_up, center);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.crumb_presses);
 }
 
 test "a secondary click with no context menu dispatches the hold Msg immediately" {

@@ -29,6 +29,19 @@ const Msg = union(enum) {
 
 const InboxUi = ui_model.Ui(Msg);
 
+const PointerMsg = union(enum) {
+    press: canvas.WidgetPressEvent,
+    double_press: canvas.WidgetPressEvent,
+    right_press: canvas.WidgetPressEvent,
+};
+const PointerUi = ui_model.Ui(PointerMsg);
+fn pointerDoublePress(event: canvas.WidgetPressEvent) PointerMsg {
+    return .{ .double_press = event };
+}
+fn pointerRightPress(event: canvas.WidgetPressEvent) PointerMsg {
+    return .{ .right_press = event };
+}
+
 const Model = struct {
     tasks: []const Task,
     filter: Filter = .all,
@@ -304,6 +317,45 @@ test "pointer events resolve to typed messages through semantic intents" {
     const status_bar = findByKind(tree.root, .status_bar).?;
     try testing.expectEqual(@as(?Msg, null), tree.msgForPointer(status_bar.id, .up));
     try testing.expectEqual(@as(?Msg, null), tree.msgForPointer(0xdead_beef, .up));
+}
+
+test "press-family event handlers receive node-local geometry" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = PointerUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.button(.{
+        .frame = geometry.RectF.init(10, 20, 100, 40),
+        .on_press_event = PointerUi.pressMsg(.press),
+        .on_double_press_event = pointerDoublePress,
+        .on_right_press_event = pointerRightPress,
+    }, "Open"));
+    const target = canvas.WidgetHit{
+        .id = tree.root.id,
+        .kind = .button,
+        .bounds = geometry.RectF.init(10, 20, 100, 40),
+        .depth = 0,
+        .index = 0,
+        .state = .{},
+    };
+
+    const press = tree.msgForPointerEvent(target, .{ .phase = .up, .point = geometry.PointF.init(35, 32) }).?.press;
+    try testing.expectEqual(tree.root.id, press.target_id);
+    try testing.expectEqual(@as(f32, 25), press.x);
+    try testing.expectEqual(@as(f32, 12), press.y);
+    try testing.expectEqual(@as(f32, 100), press.width);
+    try testing.expectEqual(@as(f32, 40), press.height);
+    try testing.expectEqual(@as(u8, 1), press.click_count);
+
+    const double_press = tree.msgForPointerEvent(target, .{ .phase = .up, .point = geometry.PointF.init(40, 38), .click_count = 2 }).?.double_press;
+    try testing.expectEqual(@as(f32, 30), double_press.x);
+    try testing.expectEqual(@as(f32, 18), double_press.y);
+    try testing.expectEqual(@as(u8, 2), double_press.click_count);
+
+    const right_press = tree.msgForRightPress(target, .{ .phase = .down, .point = geometry.PointF.init(55, 45) }).?.right_press;
+    try testing.expectEqual(@as(f32, 45), right_press.x);
+    try testing.expectEqual(@as(f32, 25), right_press.y);
+    try testing.expect(tree.root.semantics.actions.press);
 }
 
 test "keyboard events resolve activation and submit messages" {
@@ -1471,4 +1523,24 @@ test "structural id goldens: the id algorithm is pinned end to end" {
     try testing.expectEqual(@as(canvas.ObjectId, 14648775719080514296), canvas.globalWidgetId(.text, canvas.uiKey("greeting")));
     try testing.expectEqual(@as(canvas.ObjectId, 10740830058688169295), canvas.globalWidgetId(.tree, .{ .index = 3 }));
     try testing.expectEqual(@as(canvas.ObjectId, 9835495177657875356), canvas.globalWidgetId(.split_divider, canvas.uiKey("divider")));
+}
+
+test "element retains hover and pressed metadata together" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.panel(.{
+        .hover_style = .{ .opacity = 0.8 },
+        .pressed_style = .{ .opacity = 0.6 },
+    }, .{}));
+
+    try testing.expectEqual(@as(usize, 2), tree.root.immediate_commands.len);
+    switch (tree.root.immediate_commands[0]) {
+        .hover_style => |style| try testing.expectEqual(@as(?f32, 0.8), style.opacity),
+        else => return error.TestExpectedEqual,
+    }
+    switch (tree.root.immediate_commands[1]) {
+        .pressed_style => |style| try testing.expectEqual(@as(?f32, 0.6), style.opacity),
+        else => return error.TestExpectedEqual,
+    }
 }

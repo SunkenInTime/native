@@ -354,7 +354,15 @@ fn layoutAxisChildren(
         const resolved = resolvedChildExtents(child, axis, available_extent, cross_extent, alignment, tokens);
         const base = flexBaseMainExtent(child, axis, available_extent, resolved.main);
         const main_extent = distributedMainExtent(child, axis, base, available_extent, distribution);
-        const cross = resolved.cross;
+        const cross = wrappedCrossExtentForMain(
+            child,
+            axis,
+            main_extent,
+            cross_extent,
+            alignment,
+            resolved.cross,
+            tokens,
+        );
         const cross_start_margin = crossMarginStart(child, axis);
         const cross_end_margin = crossMarginEnd(child, axis);
         const cross_band = @max(0, cross_extent - cross_start_margin - cross_end_margin);
@@ -625,10 +633,34 @@ fn resolvedChildExtents(
             };
         }
     }
+    cross = wrappedCrossExtentForMain(child, axis, main, available_cross, alignment, cross, tokens);
     return .{
         .main = clampMainExtent(child, axis, main),
         .cross = clampCrossExtent(child, axis, cross),
     };
+}
+
+/// Height-aware twin of `preferredMainExtentInCross` for a child in a ROW.
+/// A centered/hug-height column that contains wrapped spans or clamped text
+/// must reserve the height those lines need at the width the row assigned.
+/// Without this second dimension pass, the column hugs each text leaf's
+/// one-line intrinsic height, then its children shrink into one another even
+/// though the row has enough cross-axis room.
+fn wrappedCrossExtentForMain(
+    child: Widget,
+    axis: LayoutAxis,
+    main_extent: f32,
+    available_cross: f32,
+    alignment: WidgetCrossAlignment,
+    fallback: f32,
+    tokens: DesignTokens,
+) f32 {
+    if (axis != .horizontal or alignment == .stretch) return fallback;
+    if (hasExplicitCrossExtent(child, axis) or percentCrossExtent(child, axis, available_cross) != null) return fallback;
+    const ratio = child.layout.aspect_ratio;
+    if (std.math.isFinite(ratio) and ratio > 0) return fallback;
+    if (!widgetSubtreeHasTextSpans(child, 0)) return fallback;
+    return clampCrossExtent(child, axis, wrappedVerticalExtentForWidth(child, main_extent, tokens, 0));
 }
 
 fn clampedPercent(value: f32) ?f32 {

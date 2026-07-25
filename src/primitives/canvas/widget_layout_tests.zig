@@ -804,6 +804,51 @@ test "cross-centering splits the overflow of a taller-than-band child evenly" {
     try expectLayoutFrame(fitting_layout, 6, geometry.RectF.init(10, 14, 80, 16));
 }
 
+test "row measures a centered clamped-text column at its assigned width" {
+    const title = Widget{
+        .id = 3,
+        .kind = .text,
+        .text = "Directional padding",
+        .immediate_commands = &.{.{ .text_style = .{ .line_height = 14 } }},
+    };
+    const description = Widget{
+        .id = 4,
+        .kind = .text,
+        .text = "02:47 · Fractions, bounds, aspect ratio, and clamped text",
+        .immediate_commands = &.{.{ .text_style = .{ .line_height = 13, .max_lines = 2 } }},
+    };
+    const text_children = [_]Widget{ title, description };
+    const row_children = [_]Widget{.{
+        .id = 2,
+        .kind = .column,
+        .frame = geometry.RectF.init(0, 0, 120, 0),
+        .layout = .{
+            .padding = .{ .top = 4, .bottom = 4 },
+            .self_alignment = .center,
+            .flags = .{ .preferred_width_set = true },
+        },
+        .children = &text_children,
+    }};
+    const row = Widget{
+        .id = 1,
+        .kind = .row,
+        .layout = .{ .cross_alignment = .center },
+        .children = &row_children,
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(row, geometry.RectF.init(0, 0, 240, 80), &nodes);
+    const column = layout.findById(2).?.frame;
+    const title_frame = layout.findById(3).?.frame;
+    const description_frame = layout.findById(4).?.frame;
+
+    try std.testing.expectEqual(@as(f32, 48), column.height);
+    try std.testing.expectEqual(@as(f32, 26), description_frame.height);
+    try std.testing.expect(description_frame.y >= title_frame.maxY());
+    try std.testing.expect(column.y <= title_frame.y);
+    try std.testing.expect(column.maxY() >= description_frame.maxY());
+}
+
 test "widget text alignment emits local text layout options" {
     const tokens = DesignTokens{
         .typography = .{ .font_id = 1, .body_size = 10 },

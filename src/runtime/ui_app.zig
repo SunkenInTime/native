@@ -561,6 +561,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// the safe area (it keeps the keyboard's residual overlap),
             /// so an unsubscribed app keeps today's automatic insets.
             on_chrome: ?*const fn (chrome: platform.WindowChrome) ?MsgT = null,
+            /// Optional loop-thread mapping for a platform
+            /// `frame_requested` boundary. This runs before the runtime
+            /// short-circuits a clean frame, so an off-thread producer can
+            /// queue state, call the thread-safe `requestFrame` service,
+            /// and turn that wake into an ordinary Msg/rebuild. Keep this
+            /// null for apps without such a producer.
+            on_frame_requested: ?*const fn (model: *const ModelT) ?MsgT = null,
             /// Optional mapping from presented gpu frames (carrying the
             /// renderer diagnostics the runtime recorded) into messages.
             /// Called after presenting every frame except the installing
@@ -992,10 +999,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .context = self,
                 .name = self.options.name,
                 .scene_fn = sceneFn,
+                .frame_requested_fn = frameRequestedFn,
                 .event_fn = eventFn,
                 .stop_fn = stopFn,
                 .replay_fn = replayFn,
             };
+        }
+
+        fn frameRequestedFn(context: *anyopaque, runtime: *Runtime) anyerror!void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            const map = self.options.on_frame_requested orelse return;
+            if (map(&self.model)) |msg| {
+                try self.dispatch(runtime, self.canvas_window_id, msg);
+            }
         }
 
         /// The app's stop hook (`App.stop`): the runtime guarantees it
@@ -3139,7 +3155,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // `on_double_press` handler (falling back to the ordinary
             // press), while its first release already dispatched the
             // single press — select-then-act, the list convention.
-            if (tree.msgForPointerClick(target.id, pointer_event.pointer.phase, pointer_event.pointer.click_count)) |msg| {
+            if (tree.msgForPointerEvent(target, pointer_event.pointer)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
             }
         }
@@ -3197,7 +3213,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn handleContextPress(self: *Self, runtime: *Runtime, press_event: core.CanvasWidgetContextPressEvent) anyerror!void {
             const tree = self.treeForViewLabel(press_event.view_label) orelse return;
             const target = press_event.press_target orelse return;
-            if (tree.msgForHold(target.id)) |msg| {
+            if (tree.msgForRightPress(target, press_event.pointer)) |msg| {
                 try self.dispatch(runtime, press_event.window_id, msg);
             }
         }

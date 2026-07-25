@@ -243,12 +243,13 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
     const radius = controlRadius(widget, visual, tokens.radius.lg);
     const background = widgetBackgroundColor(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface));
     const shadow_token = tokens.shadow.sm;
+    const box_shadow = widget_render_style.widgetBoxShadow(widget);
     // Only an opaque surface casts a drop shadow: a translucent or
     // fully transparent panel (a dismiss catcher, a tinted wash) has
     // nothing to occlude the light, and the shadow would read as an
     // extra dim showing through the see-through fill.
-    if (widget_render_style.widgetBoxShadow(widget)) |custom| {
-        if (!custom.inset) try builder.shadow(.{
+    switch (box_shadow) {
+        .shadow => |custom| if (!custom.inset) try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
             .rect = widget.frame,
             .radius = radius,
@@ -256,17 +257,19 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
             .blur = custom.blur,
             .spread = custom.spread,
             .color = custom.color,
-        });
-    } else if (background.a >= 1 and (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0)) {
-        try builder.shadow(.{
-            .id = widgetPartId(widget.id, 1),
-            .rect = widget.frame,
-            .radius = radius,
-            .offset = .{ .dx = 0, .dy = shadow_token.y },
-            .blur = shadow_token.blur,
-            .spread = shadow_token.spread,
-            .color = tokens.colors.shadow,
-        });
+        }),
+        .inherit => if (background.a >= 1 and (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0)) {
+            try builder.shadow(.{
+                .id = widgetPartId(widget.id, 1),
+                .rect = widget.frame,
+                .radius = radius,
+                .offset = .{ .dx = 0, .dy = shadow_token.y },
+                .blur = shadow_token.blur,
+                .spread = shadow_token.spread,
+                .color = tokens.colors.shadow,
+            });
+        },
+        .none => {},
     }
 
     try builder.fillRoundedRect(.{
@@ -275,8 +278,8 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
         .radius = radius,
         .fill = colorFill(background),
     });
-    if (widget_render_style.widgetBoxShadow(widget)) |custom| {
-        if (custom.inset) try builder.shadow(.{
+    switch (box_shadow) {
+        .shadow => |custom| if (custom.inset) try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
             .rect = widget.frame,
             .radius = radius,
@@ -285,7 +288,8 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
             .spread = custom.spread,
             .color = custom.color,
             .inset = true,
-        });
+        }),
+        .inherit, .none => {},
     }
     try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 3),
