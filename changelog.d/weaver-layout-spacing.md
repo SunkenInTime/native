@@ -1,0 +1,1 @@
+feature: **Complete widget box sizing**: retained canvas elements now support directional padding, positive or negative margins, min/max constraints, parent-relative percentage sizing, and aspect-ratio sizing without adding frame work to static widgets.

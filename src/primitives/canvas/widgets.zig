@@ -309,13 +309,25 @@ pub const WidgetAnchor = struct {
     offset: f32 = 4,
 };
 
+pub const WidgetLayoutFlags = packed struct(u8) {
+    clip_content: bool = false,
+    preferred_width_set: bool = false,
+    preferred_height_set: bool = false,
+    _padding: u5 = 0,
+};
+
 pub const WidgetLayoutStyle = struct {
     padding: geometry.InsetsF = .{},
+    /// External spacing reserved by the parent layout. Margins never
+    /// participate in the widget's own content inset or painted frame.
+    margin: geometry.InsetsF = .{},
     gap: f32 = 0,
     grow: f32 = 0,
     main_alignment: WidgetMainAlignment = .start,
     cross_alignment: WidgetCrossAlignment = .stretch,
-    clip_content: bool = false,
+    /// Authored-size presence shares the historical clip flag byte so an
+    /// explicit zero remains distinct without growing retained widgets.
+    flags: WidgetLayoutFlags = .{},
     columns: usize = 0,
     virtualized: bool = false,
     virtual_item_extent: f32 = 0,
@@ -359,12 +371,19 @@ pub const WidgetLayoutStyle = struct {
     /// Anchored floating placement: non-null makes this widget a floating
     /// surface positioned against its parent (see `WidgetAnchor`).
     anchor: ?WidgetAnchor = null,
+    /// Whether the matching `Widget.frame` axis is an authored preferred
+    /// size. The bit is separate from the value so an explicit zero remains
+    /// distinct from an intrinsic/unset axis.
     min_size: geometry.SizeF = .{},
-    /// Per-axis upper bound; 0 leaves the axis unbounded. An explicit
-    /// author size is definite: the ui builder writes `width`/`height`
-    /// into both `min_size` and `max_size`, so intrinsic content can
-    /// neither shrink nor silently grow the box past it.
+    /// Per-axis upper bound; 0 leaves the axis unbounded. Authored preferred
+    /// sizes are independent of min/max and participate as flex bases.
     max_size: geometry.SizeF = .{},
+    /// Per-axis percentage of the parent's content box. 0 leaves the axis
+    /// intrinsic/explicit; values are clamped to 0...100 by layout.
+    percent_size: geometry.SizeF = .{},
+    /// Width divided by height. Applied only when exactly one axis is
+    /// author-determined, matching CSS/Tailwind aspect-ratio behavior.
+    aspect_ratio: f32 = 0,
 };
 
 pub const WidgetStyle = struct {
@@ -1225,12 +1244,12 @@ pub fn widgetKindDefaultLayout(kind: WidgetKind, size: WidgetSize) ?WidgetLayout
         .card => .{
             .padding = geometry.InsetsF.all(if (size == .sm) 16 else 24),
             .gap = 12,
-            .clip_content = true,
+            .flags = .{ .clip_content = true },
         },
         .alert => .{
             .padding = geometry.InsetsF.all(16),
             .gap = 12,
-            .clip_content = true,
+            .flags = .{ .clip_content = true },
         },
         // The chat bubble hugs its message: 10px vertical / 12px
         // horizontal, so one 14px body line closes into a ~40px capsule
@@ -1238,7 +1257,7 @@ pub fn widgetKindDefaultLayout(kind: WidgetKind, size: WidgetSize) ?WidgetLayout
         // single line). Children stack inside — no gap axis to default.
         .bubble => .{
             .padding = geometry.InsetsF.init(10, 12, 10, 12),
-            .clip_content = true,
+            .flags = .{ .clip_content = true },
         },
         // The house TabsList: one muted rounded container hugging its
         // triggers with `tabs_list_inset` of padding; the active trigger
@@ -1266,7 +1285,7 @@ fn builtinComponentLayout(kind: BuiltinComponentKind, size: WidgetSize, layout: 
         .resizable => .{
             .padding = geometry.InsetsF.all(12),
             .gap = 8,
-            .clip_content = true,
+            .flags = .{ .clip_content = true },
         },
         .dialog,
         .drawer,
@@ -1274,12 +1293,12 @@ fn builtinComponentLayout(kind: BuiltinComponentKind, size: WidgetSize, layout: 
         => .{
             .padding = geometry.InsetsF.all(20),
             .gap = 16,
-            .clip_content = true,
+            .flags = .{ .clip_content = true },
         },
         .dropdown_menu => .{
             .padding = geometry.InsetsF.all(4),
             .gap = 2,
-            .clip_content = true,
+            .flags = .{ .clip_content = true },
         },
         // Page cells sit on a 2px rhythm — tighter than the other strips
         // so the row reads as one control with the current page's outline
@@ -1297,10 +1316,10 @@ fn builtinComponentLayout(kind: BuiltinComponentKind, size: WidgetSize, layout: 
             .cross_alignment = .center,
         },
         .accordion => .{
-            .clip_content = true,
+            .flags = .{ .clip_content = true },
         },
         .table => .{
-            .clip_content = true,
+            .flags = .{ .clip_content = true },
         },
         .textarea => .{
             .min_size = geometry.SizeF.init(160, 80),
@@ -1331,7 +1350,7 @@ fn mergeLayoutDefaults(explicit: WidgetLayoutStyle, defaults: WidgetLayoutStyle)
     }
     if (explicit.gap == 0) merged.gap = defaults.gap;
     if (explicit.cross_alignment == .stretch) merged.cross_alignment = defaults.cross_alignment;
-    if (!explicit.clip_content) merged.clip_content = defaults.clip_content;
+    if (!explicit.flags.clip_content) merged.flags.clip_content = defaults.flags.clip_content;
     if (explicit.min_size.width == 0 and explicit.min_size.height == 0) merged.min_size = defaults.min_size;
     return merged;
 }

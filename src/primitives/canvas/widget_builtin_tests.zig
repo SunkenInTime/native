@@ -1558,7 +1558,7 @@ test "built-in component factory applies house composite defaults" {
     try std.testing.expectEqual(@as(f32, 24), card.layout.padding.left);
     try std.testing.expectEqual(@as(f32, 12), card.layout.gap);
     try std.testing.expectEqual(@as(f32, 16), builtinComponentWidget(.card, .{ .size = .sm }).layout.padding.top);
-    try std.testing.expect(card.layout.clip_content);
+    try std.testing.expect(card.layout.flags.clip_content);
     try std.testing.expectEqual(@as(usize, 2), card.children.len);
 
     const button_group = builtinComponentWidget(.button_group, .{});
@@ -1592,7 +1592,7 @@ test "built-in component factory applies house composite defaults" {
     for (panel_components, panel_kinds) |kind, widget_kind| {
         const component = builtinComponentWidget(kind, .{});
         try std.testing.expectEqual(widget_kind, component.kind);
-        try std.testing.expect(component.layout.clip_content);
+        try std.testing.expect(component.layout.flags.clip_content);
         try std.testing.expectEqual(WidgetRole.group, component.semantics.role);
     }
     // house accordion items are borderless rows: no built-in inset —
@@ -1623,7 +1623,7 @@ test "built-in component factory applies house composite defaults" {
     });
     try std.testing.expectEqual(@as(f32, 8), padded_card.layout.padding.top);
     try std.testing.expectEqual(@as(f32, 12), padded_card.layout.gap);
-    try std.testing.expect(padded_card.layout.clip_content);
+    try std.testing.expect(padded_card.layout.flags.clip_content);
 }
 
 test "built-in accordion renders house disclosure chrome and toggle semantics" {
@@ -1834,7 +1834,7 @@ test "built-in alert renders house surface chrome and text" {
     try std.testing.expectEqual(WidgetKind.alert, alert.kind);
     try std.testing.expectEqual(@as(f32, 16), alert.layout.padding.top);
     try std.testing.expectEqual(@as(f32, 12), alert.layout.gap);
-    try std.testing.expect(alert.layout.clip_content);
+    try std.testing.expect(alert.layout.flags.clip_content);
 
     var nodes: [2]WidgetLayoutNode = undefined;
     const layout = try layoutWidgetTree(alert, alert.frame, &nodes);
@@ -1902,7 +1902,7 @@ test "built-in card renders house surface chrome and title" {
     try std.testing.expectEqual(WidgetKind.card, card.kind);
     try std.testing.expectEqual(@as(f32, 24), card.layout.padding.top);
     try std.testing.expectEqual(@as(f32, 12), card.layout.gap);
-    try std.testing.expect(card.layout.clip_content);
+    try std.testing.expect(card.layout.flags.clip_content);
 
     var nodes: [2]WidgetLayoutNode = undefined;
     const layout = try layoutWidgetTree(card, card.frame, &nodes);
@@ -2120,9 +2120,9 @@ test "built-in modal surfaces render house chrome and semantics" {
     try std.testing.expectEqual(WidgetKind.sheet, sheet.kind);
     try std.testing.expectEqual(@as(f32, 20), dialog.layout.padding.top);
     try std.testing.expectEqual(@as(f32, 16), sheet.layout.gap);
-    try std.testing.expect(dialog.layout.clip_content);
-    try std.testing.expect(drawer.layout.clip_content);
-    try std.testing.expect(sheet.layout.clip_content);
+    try std.testing.expect(dialog.layout.flags.clip_content);
+    try std.testing.expect(drawer.layout.flags.clip_content);
+    try std.testing.expect(sheet.layout.flags.clip_content);
 
     const root = Widget{ .kind = .stack, .children = &.{ backdrop, dialog, drawer, sheet } };
     var nodes: [5]WidgetLayoutNode = undefined;

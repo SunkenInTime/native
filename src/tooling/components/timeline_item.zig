@@ -69,8 +69,8 @@ pub fn TimelineItem(comptime Msg: type) type {
                 .variant = options.variant,
                 .text = options.indicator,
                 .icon = options.icon,
-                .width = if (dot) 10 else 0,
-                .height = if (dot) 10 else 0,
+                .width = if (dot) 10 else null,
+                .height = if (dot) 10 else null,
             }, .{});
             const lead = if (options.connector)
                 ui.el(.column, .{ .cross = .center, .gap = 4 }, .{

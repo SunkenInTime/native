@@ -1147,7 +1147,12 @@ test "the registry's attr value classes match the ElementOptions field types" {
         const expected: contract.AttrClass = switch (@typeInfo(FieldType)) {
             .float => .number,
             .int => .whole,
-            .bool, .optional => .truthy,
+            .bool => .truthy,
+            .optional => |optional| switch (@typeInfo(optional.child)) {
+                .bool => .truthy,
+                .float => .number,
+                else => unreachable,
+            },
             .@"enum" => .option,
             .pointer => .text,
             else => unreachable,
@@ -2274,9 +2279,11 @@ test "the wrap attribute builds the hand-written wrapped text leaf" {
     try testing.expectEqual(@as(usize, 0), clipped.spans.len);
     try testing.expectEqual(canvas.TextOverflow.clip, clipped.text_overflow);
 
-    // The definite column width is both floor and cap.
-    try testing.expectEqual(@as(f32, 360), markup_tree.root.layout.min_size.width);
-    try testing.expectEqual(@as(f32, 360), markup_tree.root.layout.max_size.width);
+    // The column width is an authored preferred size, independent of bounds.
+    try testing.expect(markup_tree.root.layout.flags.preferred_width_set);
+    try testing.expectEqual(@as(f32, 360), markup_tree.root.frame.width);
+    try testing.expectEqual(@as(f32, 0), markup_tree.root.layout.min_size.width);
+    try testing.expectEqual(@as(f32, 0), markup_tree.root.layout.max_size.width);
 }
 
 // -------------------------------------------- avatar image binding fixture

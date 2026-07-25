@@ -484,22 +484,38 @@ pub fn Ui(comptime Msg: type) type {
             autofocus: bool = false,
             variant: canvas.WidgetVariant = .default,
             size: canvas.WidgetSize = .default,
-            /// Definite width: the widget is exactly this wide (the value
-            /// becomes both the min and max bound), so intrinsic content
-            /// can neither shrink nor silently overflow the box. 0 keeps
-            /// intrinsic sizing. `resizable` treats it as the initial
-            /// width only (the drag handle keeps resizing past it).
-            width: f32 = 0,
-            /// Definite height; same contract as `width`.
-            height: f32 = 0,
-            /// Width floor WITHOUT the definite-max side of `width`:
-            /// the widget may grow past it but never shrink below.
+            /// Preferred width / flex basis. `null` keeps intrinsic sizing;
+            /// `0` is an explicit zero basis. Min/max remain independent.
+            width: ?f32 = null,
+            /// Preferred height / flex basis; same contract as `width`.
+            height: ?f32 = null,
+            /// Width floor, independent of the preferred width.
             /// Split panes use it to constrain the divider drag (the
             /// clamp band derives from both panes' floors).
             min_width: f32 = 0,
+            min_height: f32 = 0,
+            /// Optional upper bounds. `null` is unbounded; zero is an
+            /// authored clamp and remains distinct through layout.
+            max_width: ?f32 = null,
+            max_height: ?f32 = null,
+            /// Percentage sizes use 0 as the unset sentinel. The Weaver
+            /// projection keeps these mutually exclusive with width/height.
+            width_percent: f32 = 0,
+            height_percent: f32 = 0,
+            /// Width divided by height; 0 leaves aspect unconstrained.
+            aspect_ratio: f32 = 0,
             grow: f32 = 0,
             gap: f32 = 0,
             padding: f32 = 0,
+            padding_top: ?f32 = null,
+            padding_right: ?f32 = null,
+            padding_bottom: ?f32 = null,
+            padding_left: ?f32 = null,
+            margin: f32 = 0,
+            margin_top: ?f32 = null,
+            margin_right: ?f32 = null,
+            margin_bottom: ?f32 = null,
+            margin_left: ?f32 = null,
             main: canvas.WidgetMainAlignment = .start,
             cross: canvas.WidgetCrossAlignment = .stretch,
             /// Line policy for `text` leaves. `true`: word-wrap through
@@ -1399,8 +1415,8 @@ pub fn Ui(comptime Msg: type) type {
                 // source value, which the reconcile treats as the
                 // programmatic scroll it is.)
                 .value = window.layout_offset,
-                .width = options.width,
-                .height = options.height,
+                .width = if (options.width > 0) options.width else null,
+                .height = if (options.height > 0) options.height else null,
                 .min_width = options.min_width,
                 .grow = options.grow,
                 .padding = options.padding,
@@ -1705,8 +1721,8 @@ pub fn Ui(comptime Msg: type) type {
             var node = self.el(.chart, .{
                 .key = options.key,
                 .global_key = options.global_key,
-                .width = options.width,
-                .height = options.height,
+                .width = if (options.width > 0) options.width else null,
+                .height = if (options.height > 0) options.height else null,
                 .grow = options.grow,
                 .padding = options.padding,
                 .style = .{ .stroke_width = options.stroke_width },
@@ -1818,8 +1834,8 @@ pub fn Ui(comptime Msg: type) type {
             return self.el(.input_group, .{
                 .key = options.key,
                 .global_key = options.global_key,
-                .width = options.width,
-                .height = options.height,
+                .width = if (options.width > 0) options.width else null,
+                .height = if (options.height > 0) options.height else null,
                 .min_width = options.min_width,
                 .grow = options.grow,
                 .semantics = semantics,
@@ -2016,8 +2032,8 @@ pub fn Ui(comptime Msg: type) type {
                 .variant = options.variant,
                 .text = options.indicator,
                 .icon = options.icon,
-                .width = if (dot) 10 else 0,
-                .height = if (dot) 10 else 0,
+                .width = if (dot) 10 else null,
+                .height = if (dot) 10 else null,
             }, .{});
             const lead = if (options.connector)
                 self.el(.column, .{ .cross = .center, .gap = 4 }, .{
@@ -2302,8 +2318,8 @@ pub fn Ui(comptime Msg: type) type {
                 child_widgets[0] = try self.finalizeNode(node.nodes[0], widget.id, node.nodes[0].key orelse UiKey{ .index = 0 }, handlers, handler_len, tokens, key_trail);
                 child_widgets[1] = splitDividerWidget(widget);
                 child_widgets[2] = try self.finalizeNode(node.nodes[1], widget.id, node.nodes[1].key orelse UiKey{ .index = 1 }, handlers, handler_len, tokens, key_trail);
-                child_widgets[0].layout.clip_content = true;
-                child_widgets[2].layout.clip_content = true;
+                child_widgets[0].layout.flags.clip_content = true;
+                child_widgets[2].layout.flags.clip_content = true;
                 widget.children = child_widgets;
             } else if (node.nodes.len > 0) {
                 const child_widgets = try self.arena.alloc(Widget, node.nodes.len);
@@ -2503,7 +2519,9 @@ pub fn Ui(comptime Msg: type) type {
         /// default gap. Explicit spacing always wins for its own field.
         fn applyKindDefaultLayout(kind: WidgetKind, options: ElementOptions, layout: *canvas.WidgetLayoutStyle) void {
             const defaults = canvas.widgetKindDefaultLayout(kind, options.size) orelse return;
-            if (options.padding == 0) layout.padding = defaults.padding;
+            if (options.padding == 0 and options.padding_top == null and options.padding_right == null and options.padding_bottom == null and options.padding_left == null) {
+                layout.padding = defaults.padding;
+            }
             if (options.gap == 0) layout.gap = defaults.gap;
             if (layout.cross_alignment == .stretch and defaults.cross_alignment != .stretch) {
                 layout.cross_alignment = defaults.cross_alignment;
@@ -2513,9 +2531,12 @@ pub fn Ui(comptime Msg: type) type {
         fn widgetFromOptions(kind: WidgetKind, options: ElementOptions) Widget {
             warnStackContainerGap(kind, options.gap);
             warnUnknownIconName(options.icon);
+            var authored_frame = options.frame;
+            if (options.width) |width| authored_frame.width = @max(0, width);
+            if (options.height) |height| authored_frame.height = @max(0, height);
             var widget: Widget = .{
                 .kind = kind,
-                .frame = options.frame,
+                .frame = authored_frame,
                 .opacity = options.opacity,
                 .transform = options.transform,
                 .text = options.text,
@@ -2536,10 +2557,16 @@ pub fn Ui(comptime Msg: type) type {
                 },
                 .layout = .{
                     .padding = .{
-                        .top = options.padding,
-                        .right = options.padding,
-                        .bottom = options.padding,
-                        .left = options.padding,
+                        .top = options.padding_top orelse options.padding,
+                        .right = options.padding_right orelse options.padding,
+                        .bottom = options.padding_bottom orelse options.padding,
+                        .left = options.padding_left orelse options.padding,
+                    },
+                    .margin = .{
+                        .top = options.margin_top orelse options.margin,
+                        .right = options.margin_right orelse options.margin,
+                        .bottom = options.margin_bottom orelse options.margin,
+                        .left = options.margin_left orelse options.margin,
                     },
                     .gap = options.gap,
                     .grow = options.grow,
@@ -2559,12 +2586,20 @@ pub fn Ui(comptime Msg: type) type {
                     .virtual_anchor_index = options.virtual_anchor_index,
                     .virtual_anchor_extent = options.virtual_anchor_extent,
                     .virtual_total_extent = options.virtual_total_extent,
-                    .min_size = .{ .width = @max(options.width, options.min_width), .height = options.height },
-                    // Explicit sizes are definite (min AND max). Resizable
-                    // is the exception: width documents the initial width
-                    // and the engine's drag handle keeps writing larger
-                    // frames past it.
-                    .max_size = if (kind == .resizable) .{} else .{ .width = options.width, .height = options.height },
+                    .flags = .{
+                        .preferred_width_set = options.width != null,
+                        .preferred_height_set = options.height != null,
+                    },
+                    .min_size = .{ .width = options.min_width, .height = options.min_height },
+                    .max_size = .{
+                        .width = encodedOptionalMax(options.max_width),
+                        .height = encodedOptionalMax(options.max_height),
+                    },
+                    .percent_size = .{
+                        .width = options.width_percent,
+                        .height = options.height_percent,
+                    },
+                    .aspect_ratio = options.aspect_ratio,
                 },
                 .style = options.style,
                 .semantics = options.semantics,
@@ -2642,6 +2677,12 @@ fn findWidgetIn(widget: Widget, id: ObjectId) ?Widget {
         if (findWidgetIn(child, id)) |found| return found;
     }
     return null;
+}
+
+fn encodedOptionalMax(value: ?f32) f32 {
+    const authored = value orelse return 0;
+    if (!std.math.isFinite(authored) or authored < 0) return 0;
+    return if (authored == 0) -0.0 else authored;
 }
 
 fn isTextEntryWidget(widget: Widget) bool {

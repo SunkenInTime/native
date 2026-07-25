@@ -83,8 +83,8 @@ test "split finalize synthesizes the divider and binds on_resize to the split" {
     try std.testing.expect(tree.root.children[1].id != 0);
     // Panes clip so drag echoes (and narrow panes) never paint into the
     // neighbor.
-    try std.testing.expect(tree.root.children[0].layout.clip_content);
-    try std.testing.expect(tree.root.children[2].layout.clip_content);
+    try std.testing.expect(tree.root.children[0].layout.flags.clip_content);
+    try std.testing.expect(tree.root.children[2].layout.flags.clip_content);
     // The resize handler binds to the SPLIT id and builds the fraction Msg.
     const msg = tree.msgForResize(tree.root.id, 0.25) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(f32, 0.25), msg.resized);
