@@ -94,6 +94,8 @@ pub const TextSpanLayoutOptions = struct {
     /// 0 derives `size * max_scale * 1.25`, matching the single-style text
     /// widget convention.
     line_height: f32 = 0,
+    letter_spacing: f32 = 0,
+    tabular_numbers: bool = false,
     /// 0 (or non-finite) disables wrapping.
     max_width: f32 = 0,
     wrap: TextWrap = .word,
@@ -203,6 +205,25 @@ fn measureSpanSlice(span: TextSpan, slice: []const u8, options: TextSpanLayoutOp
     if (slice.len == 0) return 0;
     const font_id = textSpanFontId(span, options.typography);
     const size = textSpanSize(span, options.size);
+    if (options.letter_spacing != 0 or options.tabular_numbers) {
+        var widest_digit: f32 = 0;
+        if (options.tabular_numbers) for ("0123456789") |digit| {
+            const one = [_]u8{digit};
+            widest_digit = @max(widest_digit, text_metrics.measureTextWidthForFont(options.measure, font_id, &one, size));
+        };
+        var width: f32 = 0;
+        var cursor: usize = 0;
+        while (cursor < slice.len) {
+            const next = @min(slice.len, cursor + text_interaction.utf8SequenceLength(slice[cursor]));
+            const advance = if (options.tabular_numbers and next == cursor + 1 and slice[cursor] >= '0' and slice[cursor] <= '9')
+                widest_digit
+            else
+                text_metrics.measureTextAdvance(options.measure, font_id, size, slice, 0, cursor, next);
+            width += @max(0, advance + options.letter_spacing);
+            cursor = next;
+        }
+        return width;
+    }
     // Batched provider path: every slice the span breaker measures is a
     // subslice of `span.text`, so one batched fetch per span (cached
     // across slices, lines, and rebuilds) answers all of them as advance
@@ -470,6 +491,8 @@ const SpanWrapKey = struct {
     span_count: usize = 0,
     size_bits: u32 = 0,
     line_height_bits: u32 = 0,
+    letter_spacing_bits: u32 = 0,
+    tabular_numbers: bool = false,
     max_width_bits: u32 = 0,
     wrap: TextWrap = .word,
     alignment: TextAlign = .start,
@@ -540,6 +563,8 @@ fn spanWrapKey(spans: []const TextSpan, options: TextSpanLayoutOptions) SpanWrap
         .span_count = spans.len,
         .size_bits = @bitCast(options.size),
         .line_height_bits = @bitCast(options.line_height),
+        .letter_spacing_bits = @bitCast(options.letter_spacing),
+        .tabular_numbers = options.tabular_numbers,
         .max_width_bits = @bitCast(options.max_width),
         .wrap = options.wrap,
         .alignment = options.alignment,
@@ -558,6 +583,8 @@ fn spanWrapKeysEqual(a: SpanWrapKey, b: SpanWrapKey) bool {
         a.span_count == b.span_count and
         a.size_bits == b.size_bits and
         a.line_height_bits == b.line_height_bits and
+        a.letter_spacing_bits == b.letter_spacing_bits and
+        a.tabular_numbers == b.tabular_numbers and
         a.max_width_bits == b.max_width_bits and
         a.wrap == b.wrap and
         a.alignment == b.alignment and

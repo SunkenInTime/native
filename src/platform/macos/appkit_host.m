@@ -2340,6 +2340,15 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
         [value drawAtPoint:NSMakePoint(origin.x, origin.y - size) withAttributes:baseAttributes];
         return YES;
     }
+    CGFloat letterSpacing = NativeSdkPacketNumber(layout[@"letterSpacing"], 0);
+    BOOL tabularNumbers = [layout[@"tabularNumbers"] boolValue];
+    NSMutableDictionary *textAttributes = [baseAttributes mutableCopy];
+    if (letterSpacing != 0) textAttributes[NSKernAttributeName] = @(letterSpacing);
+    if (tabularNumbers) {
+        NSArray *settings = @[ @{ NSFontFeatureTypeIdentifierKey: @(kNumberSpacingType), NSFontFeatureSelectorIdentifierKey: @(kMonospacedNumbersSelector) } ];
+        NSFontDescriptor *descriptor = [font.fontDescriptor fontDescriptorByAddingAttributes:@{ NSFontFeatureSettingsAttribute: settings }];
+        textAttributes[NSFontAttributeName] = [NSFont fontWithDescriptor:descriptor size:size] ?: font;
+    }
 
     // Engine-measured line breaks: the packet carries the exact lines the
     // layout already broke the text into (the same breaks the reference
@@ -2357,7 +2366,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
             if (lineText.length == 0) continue;
             CGFloat lineX = NativeSdkPacketNumber(line[@"x"], origin.x);
             CGFloat baseline = NativeSdkPacketNumber(line[@"baseline"], origin.y);
-            [lineText drawAtPoint:NSMakePoint(lineX, baseline - size) withAttributes:baseAttributes];
+            [lineText drawAtPoint:NSMakePoint(lineX, baseline - size) withAttributes:textAttributes];
         }
         return YES;
     }
@@ -2373,7 +2382,7 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
         paragraph.maximumLineHeight = lineHeight;
     }
 
-    NSMutableDictionary *attributes = [baseAttributes mutableCopy];
+    NSMutableDictionary *attributes = textAttributes;
     attributes[NSParagraphStyleAttributeName] = paragraph;
     CGFloat maxWidth = NativeSdkPacketNumber(layout[@"maxWidth"], 0);
     CGFloat measuredWidth = ceil([value sizeWithAttributes:attributes].width + size);
@@ -3040,12 +3049,15 @@ static NSDictionary *NativeSdkBinaryReadText(NativeSdkBinaryPacketReader *reader
 
     NSNumber *maxWidth = NativeSdkBinaryReadF32Number(reader);
     NSNumber *lineHeight = NativeSdkBinaryReadF32Number(reader);
+    NSNumber *letterSpacing = NativeSdkBinaryReadF32Number(reader);
+    NSNumber *tabularNumbers = @(NativeSdkBinaryReadU8(reader) != 0);
+    NSNumber *maxLines = @(NativeSdkBinaryReadU32(reader));
     uint8_t wrapCode = NativeSdkBinaryReadU8(reader);
     uint8_t alignCode = NativeSdkBinaryReadU8(reader);
     if (reader->failed) return nil;
     NSString *wrap = wrapCode == 0 ? @"none" : (wrapCode == 2 ? @"character" : @"word");
     NSString *align = alignCode == 1 ? @"center" : (alignCode == 2 ? @"end" : @"start");
-    result[@"layout"] = @{ @"maxWidth" : maxWidth, @"lineHeight" : lineHeight, @"wrap" : wrap, @"align" : align };
+    result[@"layout"] = @{ @"maxWidth" : maxWidth, @"lineHeight" : lineHeight, @"letterSpacing" : letterSpacing, @"tabularNumbers" : tabularNumbers, @"maxLines" : maxLines, @"wrap" : wrap, @"align" : align };
 
     uint8_t hasLines = NativeSdkBinaryReadU8(reader);
     if (reader->failed) return nil;

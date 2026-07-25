@@ -401,6 +401,7 @@ pub const WidgetActions = widget_model.WidgetActions;
 pub const WidgetSemantics = widget_model.WidgetSemantics;
 pub const WidgetContextMenuItem = widget_model.WidgetContextMenuItem;
 pub const ImmediateCanvasCommand = widget_model.ImmediateCanvasCommand;
+pub const WidgetTextStyle = widget_model.WidgetTextStyle;
 pub const PresentationLayer = drawing_model.PresentationLayer;
 pub const Widget = widget_model.Widget;
 pub const BuiltinComponentOptions = widget_model.BuiltinComponentOptions;

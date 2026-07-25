@@ -1721,7 +1721,7 @@ test "display list serializes per-run text layout options" {
     var writer = std.Io.Writer.fixed(&buffer);
     try (DisplayList{ .commands = &commands }).writeJson(&writer);
     try std.testing.expectEqualStrings(
-        "{\"commands\":[{\"op\":\"draw_text\",\"id\":3,\"font\":1,\"size\":10,\"origin\":[4,20],\"color\":[0,0,0,1],\"text\":\"Wrapped\",\"glyphs\":[],\"layout\":{\"maxWidth\":42,\"lineHeight\":14,\"wrap\":\"character\",\"align\":\"center\",\"overflow\":\"ellipsis\"}}]}",
+        "{\"commands\":[{\"op\":\"draw_text\",\"id\":3,\"font\":1,\"size\":10,\"origin\":[4,20],\"color\":[0,0,0,1],\"text\":\"Wrapped\",\"glyphs\":[],\"layout\":{\"maxWidth\":42,\"lineHeight\":14,\"letterSpacing\":0,\"tabularNumbers\":false,\"maxLines\":0,\"wrap\":\"character\",\"align\":\"center\",\"overflow\":\"ellipsis\"}}]}",
         writer.buffered(),
     );
 }
@@ -1946,4 +1946,43 @@ test "text command bounds cover glyph ink overhang past metric advances" {
     try std.testing.expectEqual(@as(usize, 0), try tailInkDroppedByBoundsClip("mono tail mm", null));
     try std.testing.expectEqual(@as(usize, 0), try tailInkDroppedByBoundsClip("gravity plummets", null));
     try std.testing.expectEqual(@as(usize, 0), try tailInkDroppedByBoundsClip("Grocery run notes\xe2\x80\xa6", null));
+}
+
+test "text tracking and tabular figures change the reference layout seam" {
+    const tracked_options = TextLayoutOptions{ .line_height = 14, .wrap = .none, .letter_spacing = 2 };
+    const tracked_text = DrawText{
+        .font_id = default_sans_font_id,
+        .size = 10,
+        .origin = geometry.PointF.init(0, 10),
+        .color = Color.rgb8(0, 0, 0),
+        .text = "abcd",
+        .text_layout = tracked_options,
+    };
+    var tracked_lines: [2]TextLine = undefined;
+    const tracked = try layoutTextRun(tracked_text, tracked_options, &tracked_lines);
+    try std.testing.expectApproxEqAbs(estimateTextWidth("abcd", 10) + 8, tracked.bounds.?.width, 0.001);
+
+    const tabular_options = TextLayoutOptions{ .line_height = 14, .wrap = .none, .tabular_numbers = true };
+    var one_lines: [2]TextLine = undefined;
+    var eight_lines: [2]TextLine = undefined;
+    const ones = try layoutTextRun(.{ .font_id = default_sans_font_id, .size = 10, .origin = geometry.PointF.init(0, 10), .color = Color.rgb8(0, 0, 0), .text = "1111", .text_layout = tabular_options }, tabular_options, &one_lines);
+    const eights = try layoutTextRun(.{ .font_id = default_sans_font_id, .size = 10, .origin = geometry.PointF.init(0, 10), .color = Color.rgb8(0, 0, 0), .text = "8888", .text_layout = tabular_options }, tabular_options, &eight_lines);
+    try std.testing.expectApproxEqAbs(ones.bounds.?.width, eights.bounds.?.width, 0.001);
+}
+
+test "wrapped max lines elides the final visible line" {
+    const content = "one two three four five six";
+    const options = TextLayoutOptions{
+        .max_width = estimateTextWidth("one two", 10),
+        .line_height = 14,
+        .wrap = .word,
+        .max_lines = 2,
+    };
+    const text = DrawText{ .font_id = default_sans_font_id, .size = 10, .origin = geometry.PointF.init(0, 10), .color = Color.rgb8(0, 0, 0), .text = content, .text_layout = options };
+    var lines: [8]TextLine = undefined;
+    const layout = try layoutTextRun(text, options, &lines);
+    try std.testing.expectEqual(@as(usize, 2), layout.lineCount());
+    try std.testing.expect(layout.lines[1].hasEllipsis());
+    try std.testing.expectEqual(content.len, layout.lines[1].text_start + layout.lines[1].text_len);
+    try std.testing.expect(layout.lines[1].bounds.width <= options.max_width + 0.125);
 }

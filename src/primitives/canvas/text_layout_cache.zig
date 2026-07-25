@@ -269,6 +269,8 @@ fn textLayoutKeyHash(key: TextLayoutKey) u64 {
     hash = plan_key_index.mixF32(hash, key.origin.y);
     hash = plan_key_index.mixF32(hash, key.max_width);
     hash = plan_key_index.mixF32(hash, key.line_height);
+    hash = plan_key_index.mixF32(hash, key.letter_spacing);
+    hash = plan_key_index.mixHash(hash ^ @as(u64, @intCast(key.max_lines)) ^ (@as(u64, @intFromBool(key.tabular_numbers)) << 56));
     hash = plan_key_index.mixHash(hash ^ @as(u64, @intFromEnum(key.wrap)) ^ (@as(u64, @intFromEnum(key.alignment)) << 8));
     hash = plan_key_index.mixHash(hash ^ @as(u64, @intCast(key.text_len)) ^ (@as(u64, @intCast(key.glyph_count)) << 20));
     return hash;

@@ -779,18 +779,34 @@ test "widget text alignment emits local text layout options" {
         .frame = geometry.RectF.init(10, 20, 100, 20),
         .text = "Hi",
         .text_alignment = .center,
+        .immediate_commands = &.{.{ .text_style = .{
+            .scale = 1.3,
+            .weight = .bold,
+            .line_height = 18,
+            .letter_spacing = 1.5,
+            .tabular_numbers = true,
+            .max_lines = 2,
+        } }},
     };
-    var center_commands: [1]CanvasCommand = undefined;
+    var center_commands: [3]CanvasCommand = undefined;
     var center_builder = Builder.init(&center_commands);
     try emitWidgetTree(&center_builder, centered, tokens);
-    switch (center_builder.displayList().commands[0]) {
+    try std.testing.expectEqual(@as(usize, 3), center_builder.displayList().commandCount());
+    switch (center_builder.displayList().commands[1]) {
         .draw_text => |text| {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 1)), text.id);
             try std.testing.expectApproxEqAbs(@as(f32, 10), text.origin.x, 0.001);
-            try std.testing.expectApproxEqAbs(@as(f32, 33.75), text.origin.y, 0.001);
+            try std.testing.expectApproxEqAbs(@as(f32, 34.875), text.origin.y, 0.001);
+            try std.testing.expectEqual(@as(FontId, 4), text.font_id);
+            try std.testing.expectApproxEqAbs(@as(f32, 13), text.size, 0.001);
             try std.testing.expect(text.text_layout != null);
             try std.testing.expectEqual(@as(f32, 100), text.text_layout.?.max_width);
             try std.testing.expectEqual(TextAlign.center, text.text_layout.?.alignment);
+            try std.testing.expectEqual(@as(f32, 18), text.text_layout.?.line_height);
+            try std.testing.expectEqual(@as(f32, 1.5), text.text_layout.?.letter_spacing);
+            try std.testing.expect(text.text_layout.?.tabular_numbers);
+            try std.testing.expectEqual(@as(usize, 2), text.text_layout.?.max_lines);
+            try std.testing.expectEqual(TextWrap.word, text.text_layout.?.wrap);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -813,6 +829,12 @@ test "widget text alignment emits local text layout options" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "text-only styling does not grow the common retained Widget" {
+    // N3's compact common shape: future text-only metadata belongs in the
+    // existing rare-command side channel, not on every retained widget.
+    try std.testing.expectEqual(@as(usize, 728), @sizeOf(Widget));
 }
 
 test "widget opacity wraps subtree display list commands" {

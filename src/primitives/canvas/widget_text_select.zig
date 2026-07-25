@@ -102,7 +102,7 @@ pub fn staticTextSelectionRects(
 pub fn staticTextDrawText(widget: Widget, tokens: DesignTokens) DrawText {
     const text_size = widget_metrics.widgetBodyTextSize(widget, tokens);
     return .{
-        .font_id = tokens.typography.font_id,
+        .font_id = widget_metrics.widgetTextFontId(widget, tokens),
         .size = text_size,
         .origin = pixelSnapTextPoint(tokens, staticTextOrigin(widget.frame, text_size)),
         .color = tokens.colors.text,
@@ -112,14 +112,18 @@ pub fn staticTextDrawText(widget: Widget, tokens: DesignTokens) DrawText {
 }
 
 fn staticTextLayoutOptions(widget: Widget, tokens: DesignTokens, text_size: f32) TextLayoutOptions {
+    const text_style = widget.textStyle();
     return .{
         .max_width = widget.frame.width,
-        .line_height = text_size * 1.25,
+        .line_height = if (text_style.line_height > 0) text_style.line_height else text_size * 1.25,
+        .letter_spacing = text_style.letter_spacing,
+        .tabular_numbers = text_style.tabular_numbers,
+        .max_lines = text_style.max_lines,
         // Mirrors `emitTextWidget`: plain single-line text lays out
         // (and therefore selects/hit-maps) as the one line it paints,
         // under the same overflow policy — an elided line still maps
         // every hidden byte, pinned at the painted right edge.
-        .wrap = .none,
+        .wrap = if (text_style.max_lines > 0) .word else .none,
         .alignment = widget.text_alignment,
         .overflow = widget.text_overflow,
         .measure = tokens.text_measure,

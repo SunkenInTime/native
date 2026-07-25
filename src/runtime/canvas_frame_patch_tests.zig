@@ -230,7 +230,7 @@ const BinaryCursor = struct {
             try self.skip(text_len);
             const has_layout = try self.readU8();
             if (has_layout != 0) {
-                try self.skip(4 + 4 + 1 + 1); // max width + line height + wrap + align
+                try self.skip(4 + 4 + 4 + 1 + 4 + 1 + 1); // max width + line height + tracking + tabular + max lines + wrap + align
                 const has_lines = try self.readU8();
                 if (has_lines != 0) {
                     const line_count = try self.readU32();
@@ -336,13 +336,15 @@ fn buildScriptScene(
     count += 1;
     for (0..message_count) |row| {
         const y: f32 = @as(f32, @floatFromInt(row)) * 28 + 12 - scroll_offset;
-        commands[count] = .{ .fill_rounded_rect = .{
-            .id = @intCast(1_000 + row),
-            .rect = geometry.RectF.init(8, y, patch_surface_width - 16, 24),
-            .radius = canvas.Radius.all(6),
-            // The "toggle": message 0's bubble flips color from step 1 on.
-            .fill = .{ .color = if (row == 0 and step >= 1) canvas.Color.rgb8(37, 99, 235) else canvas.Color.rgb8(30, 41, 59) },
-        } };
+        commands[count] = .{
+            .fill_rounded_rect = .{
+                .id = @intCast(1_000 + row),
+                .rect = geometry.RectF.init(8, y, patch_surface_width - 16, 24),
+                .radius = canvas.Radius.all(6),
+                // The "toggle": message 0's bubble flips color from step 1 on.
+                .fill = .{ .color = if (row == 0 and step >= 1) canvas.Color.rgb8(37, 99, 235) else canvas.Color.rgb8(30, 41, 59) },
+            },
+        };
         count += 1;
         const text = std.fmt.bufPrint(&text_storage[row], "message {d} body{s}", .{
             row,

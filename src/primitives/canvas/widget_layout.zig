@@ -27,6 +27,26 @@ const measureTextWidthForFont = text_model.measureTextWidthForFont;
 fn measuredTextWidth(tokens: DesignTokens, text: []const u8, size: f32) f32 {
     return measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, text, size);
 }
+
+fn styledWidgetTextWidth(widget: Widget, tokens: DesignTokens, size: f32) f32 {
+    const font_id = widget_metrics.widgetTextFontId(widget, tokens);
+    const text_style = widget.textStyle();
+    if (text_style.letter_spacing == 0 and !text_style.tabular_numbers) return measureTextWidthForFont(tokens.text_measure, font_id, widget.text, size);
+    const options = text_model.TextLayoutOptions{
+        .letter_spacing = text_style.letter_spacing,
+        .tabular_numbers = text_style.tabular_numbers,
+        .measure = tokens.text_measure,
+    };
+    var width: f32 = 0;
+    const tabular_advance = text_model.styledTextTabularAdvance(options, font_id, size);
+    var cursor: usize = 0;
+    while (cursor < widget.text.len) {
+        const next = text_model.nextTextOffset(widget.text, cursor);
+        width += text_model.styledTextClusterAdvanceWithTabular(widget.text, font_id, size, 0, cursor, next, options, tabular_advance);
+        cursor = next;
+    }
+    return width;
+}
 const gridColumnCount = widget_tree.gridColumnCount;
 const gridRowCount = widget_tree.gridRowCount;
 const saturatingU32 = widget_tree.saturatingU32;
@@ -863,7 +883,7 @@ fn widgetIsSpanParagraph(widget: Widget) bool {
 
 fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize) bool {
     if (depth >= max_widget_depth) return false;
-    if (widgetIsSpanParagraph(widget)) return true;
+    if (widgetIsSpanParagraph(widget) or (widget.kind == .text and widget.textStyle().max_lines > 0)) return true;
     for (widget.children) |child| {
         if (widgetSubtreeHasTextSpans(child, depth + 1)) return true;
     }
@@ -883,6 +903,8 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
     const content_height: f32 = switch (widget.kind) {
         .text, .data_cell => if (widget.spans.len > 0)
             spanParagraphHeight(widget, inner_width, tokens)
+        else if (widget.kind == .text and widget.textStyle().max_lines > 0)
+            clampedTextHeight(widget, inner_width, tokens)
         else
             return preferredMainExtent(widget, .vertical, tokens),
         .column, .list, .data_grid, .table, .menu_surface, .dropdown_menu => blk: {
@@ -1024,6 +1046,30 @@ fn spanParagraphHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
         widget.spans,
         widgetTextSpanLayoutOptions(widget, tokens, width),
     );
+}
+
+fn clampedTextHeight(widget: Widget, width: f32, tokens: DesignTokens) f32 {
+    const size = widgetBodyTextSize(widget, tokens);
+    const text_style = widget.textStyle();
+    const line_height = if (text_style.line_height > 0) text_style.line_height else widgetLineHeight(size);
+    const draw = text_model.DrawText{
+        .font_id = widget_metrics.widgetTextFontId(widget, tokens),
+        .size = size,
+        .origin = geometry.PointF.init(0, size),
+        .color = tokens.colors.text,
+        .text = widget.text,
+    };
+    var lines: [text_spans_model.max_text_span_lines_per_paragraph]text_model.TextLine = undefined;
+    const layout = text_model.layoutTextRun(draw, .{
+        .max_width = width,
+        .line_height = line_height,
+        .letter_spacing = text_style.letter_spacing,
+        .tabular_numbers = text_style.tabular_numbers,
+        .max_lines = text_style.max_lines,
+        .wrap = .word,
+        .measure = tokens.text_measure,
+    }, &lines) catch return line_height * @as(f32, @floatFromInt(text_style.max_lines));
+    return line_height * @as(f32, @floatFromInt(layout.lineCount()));
 }
 
 /// Position a span paragraph's link hit-area children. By convention the
@@ -1966,8 +2012,8 @@ fn intrinsicTextWidgetSize(widget: Widget, tokens: DesignTokens, text_size: f32)
         );
     }
     return geometry.SizeF.init(
-        measuredTextWidth(tokens, widget.text, text_size),
-        widgetLineHeight(text_size),
+        styledWidgetTextWidth(widget, tokens, text_size),
+        if (widget.textStyle().line_height > 0) widget.textStyle().line_height else widgetLineHeight(text_size),
     );
 }
 

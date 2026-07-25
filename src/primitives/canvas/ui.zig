@@ -545,6 +545,18 @@ pub fn Ui(comptime Msg: type) type {
             /// status bars, and surface titles consume it. Controls that
             /// own their label placement (buttons, badges) ignore it.
             text_alignment: canvas.TextAlign = .start,
+            /// Relative size multiplier for plain text leaves; 0 means inherit.
+            text_scale: f32 = 0,
+            /// Font weight for plain text leaves.
+            text_weight: canvas.TextSpanWeight = .regular,
+            /// Explicit logical-pixel line height; 0 keeps the token-derived default.
+            text_line_height: f32 = 0,
+            /// Additional logical pixels between text clusters.
+            text_letter_spacing: f32 = 0,
+            /// Normalize ASCII digits to the widest digit advance.
+            text_tabular_numbers: bool = false,
+            /// Clamp wrapped text to this many lines; 0 is unlimited.
+            text_max_lines: usize = 0,
             /// Fixed column count for `grid` containers. 0 (the default)
             /// keeps the derived near-square column count.
             columns: usize = 0,
@@ -1073,7 +1085,7 @@ pub fn Ui(comptime Msg: type) type {
             if (options.on_dismiss != null) warnDismissHandlerKind(kind);
             if (options.on_resize != null) warnResizeHandlerKind(kind);
             return .{
-                .widget = widgetFromOptions(kind, options),
+                .widget = self.widgetFromOptions(kind, options),
                 .key = options.key,
                 .global_key = options.global_key,
                 .wrap = options.wrap,
@@ -2255,7 +2267,7 @@ pub fn Ui(comptime Msg: type) type {
             // `widget.text`), so wrapping, intrinsic sizing, wrapped
             // height reservation, and rendering are all the existing span
             // path — no forked text pipeline.
-            if (node.wrap == true and widget.kind == .text and widget.spans.len == 0 and widget.text.len > 0) {
+            if (node.wrap == true and widget.textStyle().max_lines == 0 and widget.kind == .text and widget.spans.len == 0 and widget.text.len > 0) {
                 const spans = try self.arena.alloc(canvas.TextSpan, 1);
                 spans[0] = .{ .text = widget.text };
                 widget.spans = spans;
@@ -2531,7 +2543,7 @@ pub fn Ui(comptime Msg: type) type {
             }
         }
 
-        fn widgetFromOptions(kind: WidgetKind, options: ElementOptions) Widget {
+        fn widgetFromOptions(self: *Self, kind: WidgetKind, options: ElementOptions) Widget {
             warnStackContainerGap(kind, options.gap);
             warnUnknownIconName(options.icon);
             var authored_frame = options.frame;
@@ -2615,6 +2627,22 @@ pub fn Ui(comptime Msg: type) type {
                 .resize_easing = options.resize_easing,
                 .resize_origin = options.resize_origin,
             };
+            const text_style: canvas.WidgetTextStyle = .{
+                .scale = options.text_scale,
+                .weight = options.text_weight,
+                .line_height = options.text_line_height,
+                .letter_spacing = options.text_letter_spacing,
+                .tabular_numbers = options.text_tabular_numbers,
+                .max_lines = options.text_max_lines,
+            };
+            if (!text_style.isDefault()) {
+                const metadata = self.arena.alloc(canvas.ImmediateCanvasCommand, 1) catch {
+                    self.failed = true;
+                    return widget;
+                };
+                metadata[0] = .{ .text_style = text_style };
+                widget.immediate_commands = metadata;
+            }
             applyKindDefaultLayout(kind, options, &widget.layout);
             return widget;
         }

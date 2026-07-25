@@ -1,4 +1,5 @@
 const std = @import("std");
+const canvas = @import("root.zig");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
 const text_spans_model = @import("text_spans.zig");
@@ -36,12 +37,25 @@ pub fn widgetBodyTextSize(widget: Widget, tokens: DesignTokens) f32 {
     // views get a Debug warning from `Ui.el`).
     if (widget.kind == .text) {
         switch (widget.size) {
-            .heading => return tokens.typography.heading_size,
-            .display => return tokens.typography.display_size,
+            .heading => return scaledPlainTextSize(widget, tokens.typography.heading_size),
+            .display => return scaledPlainTextSize(widget, tokens.typography.display_size),
             else => {},
         }
     }
-    return widgetTypographySize(widget, tokens.typography.body_size);
+    const base = widgetTypographySize(widget, tokens.typography.body_size);
+    return if (widget.kind == .text) scaledPlainTextSize(widget, base) else base;
+}
+
+fn scaledPlainTextSize(widget: Widget, base: f32) f32 {
+    const scale = widget.textStyle().scale;
+    if (!std.math.isFinite(scale) or scale <= 0) return base;
+    return @max(1, base * scale);
+}
+
+/// Face used by a plain text leaf. It mirrors span weight resolution so
+/// clamped text can retain the same font styling without becoming a paragraph.
+pub fn widgetTextFontId(widget: Widget, tokens: DesignTokens) canvas.FontId {
+    return text_spans_model.textSpanFontId(.{ .weight = widget.textStyle().weight }, tokens.typography);
 }
 
 pub fn widgetLabelTextSize(widget: Widget, tokens: DesignTokens) f32 {
@@ -92,8 +106,12 @@ pub fn textWrapMaxWidth(tokens: DesignTokens, width: f32) f32 {
 /// a snapped paint frame never wraps a line the layout frame fit —
 /// painted lines are therefore always <= the reserved line count.
 pub fn widgetTextSpanLayoutOptions(widget: Widget, tokens: DesignTokens, max_width: f32) text_spans_model.TextSpanLayoutOptions {
+    const text_style = widget.textStyle();
     return .{
         .size = widgetBodyTextSize(widget, tokens),
+        .line_height = text_style.line_height,
+        .letter_spacing = text_style.letter_spacing,
+        .tabular_numbers = text_style.tabular_numbers,
         .max_width = max_width,
         .wrap = .word,
         .alignment = widget.text_alignment,

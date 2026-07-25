@@ -70,6 +70,49 @@ pub fn textEllipsisAdvance(measure: ?*const text_metrics.TextMeasureProvider, fo
     return text_metrics.estimatedTextEllipsisAdvance(font_id, size);
 }
 
+fn styledTextActive(options: TextLayoutOptions) bool {
+    return options.letter_spacing != 0 or options.tabular_numbers;
+}
+
+pub fn styledTextTabularAdvance(options: TextLayoutOptions, font_id: FontId, size: f32) f32 {
+    if (!options.tabular_numbers) return 0;
+    var widest: f32 = 0;
+    for ("0123456789") |digit| {
+        const one = [_]u8{digit};
+        widest = @max(widest, measureTextWidthForFont(options.measure, font_id, &one, size));
+    }
+    return widest;
+}
+
+pub fn styledTextClusterAdvance(text: []const u8, font_id: FontId, size: f32, line_start: usize, cluster_start: usize, cluster_end: usize, options: TextLayoutOptions) f32 {
+    return styledTextClusterAdvanceWithTabular(text, font_id, size, line_start, cluster_start, cluster_end, options, styledTextTabularAdvance(options, font_id, size));
+}
+
+pub fn styledTextClusterAdvanceWithTabular(text: []const u8, font_id: FontId, size: f32, line_start: usize, cluster_start: usize, cluster_end: usize, options: TextLayoutOptions, tabular_advance: f32) f32 {
+    var advance = measureTextAdvance(options.measure, font_id, size, text, line_start, cluster_start, cluster_end);
+    if (options.tabular_numbers and cluster_end == cluster_start + 1 and text[cluster_start] >= '0' and text[cluster_start] <= '9') {
+        advance = tabular_advance;
+    }
+    return @max(0, advance + options.letter_spacing);
+}
+
+fn styledTextWidth(text: []const u8, start: usize, end: usize, font_id: FontId, size: f32, options: TextLayoutOptions) f32 {
+    var width: f32 = 0;
+    const tabular_advance = styledTextTabularAdvance(options, font_id, size);
+    var index = start;
+    while (index < end) {
+        const next = @min(end, nextTextOffset(text, index));
+        width += styledTextClusterAdvanceWithTabular(text, font_id, size, start, index, next, options, tabular_advance);
+        index = next;
+    }
+    return width;
+}
+
+/// Styled width seam for consumers that must replay plain-text paint geometry.
+pub fn styledTextWidthForRange(text: []const u8, start: usize, end: usize, font_id: FontId, size: f32, options: TextLayoutOptions) f32 {
+    return styledTextWidth(text, start, end, font_id, size, options);
+}
+
 /// True when a run's options ask for single-line trailing elision:
 /// `wrap = .none` bounded by a real width with the (default) ellipsis
 /// overflow policy. Wrapping runs and unbounded runs never elide.
@@ -116,6 +159,7 @@ const LineElision = struct {
 /// narrower than the budget, never wider.
 fn plainLineElision(text: []const u8, start: usize, end: usize, font_id: FontId, size: f32, options: TextLayoutOptions) LineElision {
     if (!lineElisionEnabled(options) or end <= start) return .{};
+    if (styledTextActive(options)) return styledPlainLineElision(text, start, end, font_id, size, options);
     if (options.measure == null) return estimatedPlainLineElision(text, start, end, font_id, size, options);
     if (text_measure_cache.textRunAdvances(options.measure.?, font_id, size, text)) |advances| {
         return advancePlainLineElision(text, start, end, font_id, size, options, advances);
@@ -142,6 +186,31 @@ fn plainLineElision(text: []const u8, start: usize, end: usize, font_id: FontId,
         fit_width
     else
         measureTextWidthForFont(options.measure, font_id, text[start..trimmed], size);
+    return .{ .text_len = trimmed - start, .ellipsis_advance = ellipsis_advance, .painted_width = painted_width };
+}
+
+fn styledPlainLineElision(text: []const u8, start: usize, end: usize, font_id: FontId, size: f32, options: TextLayoutOptions) LineElision {
+    const full_width = styledTextWidth(text, start, end, font_id, size, options);
+    if (full_width <= options.max_width + text_elision_slack) return .{ .painted_width = full_width };
+    const ellipsis_advance = textEllipsisAdvance(options.measure, font_id, size);
+    if (ellipsis_advance > options.max_width) return .{ .text_len = 0, .ellipsis_advance = 0, .painted_width = 0 };
+    const budget = options.max_width - ellipsis_advance;
+    var fit = start;
+    var fit_width: f32 = 0;
+    var width: f32 = 0;
+    var index = start;
+    const tabular_advance = styledTextTabularAdvance(options, font_id, size);
+    while (index < end) {
+        const next = nextTextOffset(text, index);
+        width += styledTextClusterAdvanceWithTabular(text, font_id, size, start, index, next, options, tabular_advance);
+        if (width > budget) break;
+        fit = next;
+        fit_width = width;
+        index = next;
+    }
+    var trimmed = fit;
+    while (trimmed > start and isTextBreakByte(text[trimmed - 1])) trimmed -= 1;
+    const painted_width = if (trimmed == fit) fit_width else styledTextWidth(text, start, trimmed, font_id, size, options);
     return .{ .text_len = trimmed - start, .ellipsis_advance = ellipsis_advance, .painted_width = painted_width };
 }
 
@@ -366,7 +435,8 @@ pub const TextLineIterator = struct {
             return self.emit(0, 0, 0, 0, .{});
         }
         const start = self.cursor;
-        const end = nextTextLineEnd(bytes, start, self.text.font_id, self.text.size, self.options);
+        const clamp_last = self.options.max_lines > 0 and self.index + 1 >= self.options.max_lines;
+        const end = if (clamp_last) bytes.len else nextTextLineEnd(bytes, start, self.text.font_id, self.text.size, self.options);
         if (end >= bytes.len) {
             self.finished = true;
         } else {
@@ -375,7 +445,12 @@ pub const TextLineIterator = struct {
             while (self.options.wrap == .word and next_start < bytes.len and isTextBreakByte(bytes[next_start])) next_start += 1;
             self.cursor = next_start;
         }
-        const elision = plainLineElision(bytes, start, end, self.text.font_id, self.text.size, self.options);
+        var elision_options = self.options;
+        if (clamp_last) {
+            elision_options.wrap = .none;
+            elision_options.overflow = .ellipsis;
+        }
+        const elision = plainLineElision(bytes, start, end, self.text.font_id, self.text.size, elision_options);
         return self.emit(start, end - start, start, end - start, elision);
     }
 
@@ -389,10 +464,16 @@ pub const TextLineIterator = struct {
             if (self.index == 0) return self.emit(0, 0, 0, 0, .{});
             return null;
         }
-        const glyph_end = nextGlyphLineEnd(self.text, glyph_start, self.options);
+        const clamp_last = self.options.max_lines > 0 and self.index + 1 >= self.options.max_lines;
+        const glyph_end = if (clamp_last) self.text.glyphs.len else nextGlyphLineEnd(self.text, glyph_start, self.options);
         const range = textRangeForGlyphRangeWithGlyphs(self.text.text, self.text.glyphs, glyph_start, glyph_end - glyph_start);
         self.cursor = glyph_end;
-        const elision = glyphLineElision(self.text, glyph_start, glyph_end, range.start, self.options);
+        var elision_options = self.options;
+        if (clamp_last) {
+            elision_options.wrap = .none;
+            elision_options.overflow = .ellipsis;
+        }
+        const elision = glyphLineElision(self.text, glyph_start, glyph_end, range.start, elision_options);
         return self.emit(range.start, range.byteLen(self.text.text.len), glyph_start, glyph_end - glyph_start, elision);
     }
 
@@ -596,18 +677,25 @@ pub fn nextTextLineEnd(text: []const u8, start: usize, font_id: FontId, size: f3
     // line prefix once per cluster (O(L²), one provider round-trip
     // each). Falls through to the unbatched loop when the provider has
     // no batched entry or the host declined this run.
-    if (options.measure) |provider| {
-        if (text_measure_cache.textRunAdvances(provider, font_id, size, text)) |advances| {
-            return nextTextLineEndFromAdvances(text, start, max_width, options.wrap, advances);
+    if (!styledTextActive(options)) {
+        if (options.measure) |provider| {
+            if (text_measure_cache.textRunAdvances(provider, font_id, size, text)) |advances| {
+                return nextTextLineEndFromAdvances(text, start, max_width, options.wrap, advances);
+            }
         }
     }
 
     var index = start;
     var last_break: ?usize = null;
+    var styled_width: f32 = 0;
+    const tabular_advance = styledTextTabularAdvance(options, font_id, size);
     while (index < text.len) {
         if (text[index] == '\n') return index;
         const next_index = nextTextOffset(text, index);
-        const next_width = measureTextWidthForFont(options.measure, font_id, text[start..next_index], size);
+        const next_width = if (styledTextActive(options))
+            styled_width + styledTextClusterAdvanceWithTabular(text, font_id, size, start, index, next_index, options, tabular_advance)
+        else
+            measureTextWidthForFont(options.measure, font_id, text[start..next_index], size);
         if (isTextBreakByte(text[index])) last_break = next_index;
         if (next_width > max_width) {
             if (index == start) return next_index;
@@ -618,6 +706,7 @@ pub fn nextTextLineEnd(text: []const u8, start: usize, font_id: FontId, size: f3
             }
             return index;
         }
+        styled_width = next_width;
         index = next_index;
     }
     return text.len;
@@ -719,6 +808,8 @@ fn textLineAt(
     const plain_line = painted_glyph_len == 0 or glyph_start >= text.glyphs.len;
     var raw_bounds = if (plain_line and elision.painted_width != null)
         geometry.RectF.init(text.origin.x, baseline - text.size, elision.painted_width.?, line_height_value)
+    else if (plain_line and styledTextActive(options))
+        geometry.RectF.init(text.origin.x, baseline - text.size, styledTextWidth(text.text, text_start, text_start + painted_text_len, text.font_id, text.size, options), line_height_value)
     else
         textLineBounds(text, text_start, painted_text_len, glyph_start, painted_glyph_len, baseline, line_height_value);
     raw_bounds.width += elision.ellipsis_advance;
@@ -786,7 +877,10 @@ pub fn textLineCaretX(text: DrawText, line: TextLine, offset: usize) f32 {
     const x = if (line.glyph_len > 0 and line.glyph_start < text.glyphs.len)
         textLineGlyphCaretX(text, line, range, snapped)
     else
-        line.bounds.x + measureTextWidthForFont(drawTextMeasure(text), text.font_id, text.text[range.start..snapped], text.size);
+        line.bounds.x + if (text.text_layout) |options|
+            styledTextWidth(text.text, range.start, snapped, text.font_id, text.size, options)
+        else
+            measureTextWidthForFont(drawTextMeasure(text), text.font_id, text.text[range.start..snapped], text.size);
     // Offsets in an elided line's hidden tail pin to the painted right
     // edge (after the ellipsis): selection highlights stay inside the
     // box while the range itself still covers every hidden byte.
@@ -922,6 +1016,9 @@ pub fn textLineBounds(text: DrawText, text_start: usize, text_len: usize, glyph_
 /// cache. Unbatched (and estimator) runs keep the historical per-slice
 /// measure byte-identically.
 fn plainLineSliceWidth(text: DrawText, start: usize, end: usize) f32 {
+    if (text.text_layout) |options| {
+        if (styledTextActive(options)) return styledTextWidth(text.text, start, end, text.font_id, text.size, options);
+    }
     if (drawTextMeasure(text)) |provider| {
         if (text_measure_cache.cachedTextRunAdvances(provider, text.font_id, text.size, text.text)) |advances| {
             return text_measure_cache.advanceSliceWidth(advances, start, end);
