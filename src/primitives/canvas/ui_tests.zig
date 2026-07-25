@@ -123,6 +123,25 @@ test "ui builder emits an engine-compatible widget tree" {
     try testing.expect(saw_button);
 }
 
+test "ui stack exposes bounded rounded content clipping" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.stack(.{
+        .width = 80,
+        .height = 40,
+        .clip_content = true,
+        .style = .{ .radius = 12, .radius_bottom_left = 3 },
+    }, .{ui.panel(.{ .width_percent = 100, .height_percent = 100 }, .{})}));
+
+    try testing.expectEqual(canvas.WidgetKind.stack, tree.root.kind);
+    try testing.expect(tree.root.layout.flags.clip_content);
+    try testing.expectEqual(@as(?f32, 12), tree.root.style.radius);
+    try testing.expectEqual(@as(?f32, 3), tree.root.style.radius_bottom_left);
+    try testing.expectEqual(@as(usize, 1), tree.root.children.len);
+}
+
 test "structural ids are stable across rebuilds" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1343,7 +1362,6 @@ test "virtualWindow without a source falls back to the request viewport" {
     try testing.expect(ui.virtualWindow(options).isEmpty());
 }
 
-
 test "widget kind codes are pinned: assigned at birth, declaration-order-independent" {
     // The FULL golden table. `structuralId` hashes `widgetKindCode`, so
     // this table IS the id vocabulary persisted state references:
@@ -1442,4 +1460,3 @@ test "structural id goldens: the id algorithm is pinned end to end" {
     try testing.expectEqual(@as(canvas.ObjectId, 10740830058688169295), canvas.globalWidgetId(.tree, .{ .index = 3 }));
     try testing.expectEqual(@as(canvas.ObjectId, 9835495177657875356), canvas.globalWidgetId(.split_divider, canvas.uiKey("divider")));
 }
-

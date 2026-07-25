@@ -499,6 +499,21 @@ test "stack-like panels center an explicit icon box without a layout wrapper" {
     try expectLayoutFrame(layout, 2, geometry.RectF.init(38, 38, 24, 24));
 }
 
+test "stack percentages use the parent content box before margins" {
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .panel,
+        .layout = .{
+            .margin = .{ .top = 5, .right = 30, .bottom = 15, .left = 10 },
+            .percent_size = geometry.SizeF.init(50, 50),
+        },
+    }};
+    const stack = Widget{ .id = 1, .kind = .stack, .children = &children };
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(stack, geometry.RectF.init(0, 0, 300, 200), &nodes);
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(10, 5, 150, 100));
+}
+
 test "chat bubbles cap at the thread fraction, never the full thread" {
     // A hug-sized bubble in a WIDE thread: its message wants 700 points,
     // the row offers 600, and the reference contract caps the bubble at

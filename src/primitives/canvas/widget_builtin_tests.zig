@@ -303,6 +303,36 @@ const textOffsetForLayoutPoint = support.textOffsetForLayoutPoint;
 const applyTextInputEvent = support.applyTextInputEvent;
 const sampleCanvasRenderAnimations = support.sampleCanvasRenderAnimations;
 const emitWidgetLayout = support.emitWidgetLayout;
+
+test "stack clip content emits its authored asymmetric rounded mask" {
+    const child = Widget{
+        .id = 2,
+        .kind = .panel,
+        .frame = geometry.RectF.init(-10, -10, 120, 80),
+        .style = .{ .background = Color.rgb8(255, 255, 255) },
+    };
+    const stack = Widget{
+        .id = 1,
+        .kind = .stack,
+        .frame = geometry.RectF.init(0, 0, 100, 60),
+        .layout = .{ .flags = .{ .clip_content = true } },
+        .style = .{ .radius = 10, .radius_bottom_left = 2 },
+        .children = &.{child},
+    };
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, stack, DesignTokens{});
+    const list = builder.displayList();
+    try std.testing.expect(list.commands.len >= 3);
+    switch (list.commands[0]) {
+        .push_clip => |clip| {
+            try expectRect(geometry.RectF.init(0, 0, 100, 60), clip.rect);
+            try std.testing.expectEqualDeep(Radius{ .top_left = 10, .top_right = 10, .bottom_right = 10, .bottom_left = 2 }, clip.radius);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(list.commands[list.commands.len - 1] == .pop_clip);
+}
 const toggleWidgetKnobCommandId = support.toggleWidgetKnobCommandId;
 const toggleWidgetKnobTravel = support.toggleWidgetKnobTravel;
 const textSelectionForWidgetPoint = support.textSelectionForWidgetPoint;
@@ -3299,8 +3329,8 @@ test "label-exact controls at intrinsic width never elide under geometry pixel s
     // edge, at both snap scales, across labels whose fractional widths
     // land on both sides of the rounding boundary.
     const kinds = [_]canvas.WidgetKind{
-        .toggle_button, .button,   .toggle, .segmented_control,
-        .menu_item,     .checkbox, .radio,  .switch_control,
+        .toggle_button, .button,   .toggle,    .segmented_control,
+        .menu_item,     .checkbox, .radio,     .switch_control,
         .tooltip,       .badge,    .list_item,
     };
     const labels = [_][]const u8{ "PID", "CPU", "Memory", "Name", "Filter processes", "Quarterly report" };

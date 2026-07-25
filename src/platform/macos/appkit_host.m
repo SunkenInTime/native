@@ -1587,6 +1587,15 @@ static CGFloat NativeSdkPacketRadiusAt(id value, NSUInteger index, CGFloat maxim
     return fmax(0.0, fmin(maximum, NativeSdkPacketNumber(radiusValue, 0)));
 }
 
+static BOOL NativeSdkPacketRadiusIsZero(id value) {
+    NSArray *radius = NativeSdkPacketArray(value, 4);
+    if (!radius) return YES;
+    for (NSUInteger index = 0; index < 4; index += 1) {
+        if (NativeSdkPacketNumber(radius[index], 0) > 0) return NO;
+    }
+    return YES;
+}
+
 static NSColor *NativeSdkPacketColor(id value, CGFloat opacity) {
     NSArray *array = NativeSdkPacketArray(value, 4);
     if (!array) return nil;
@@ -2677,7 +2686,12 @@ static BOOL NativeSdkPacketDrawCommand(NSDictionary *command, CGContextRef conte
     }
     if ([clip isKindOfClass:[NSArray class]]) {
         NSRect commandClip = NativeSdkPacketRect(clip);
-        [NSBezierPath clipRect:commandClip];
+        NSArray *clipRadius = NativeSdkPacketArray(command[@"clipRadius"], 4);
+        if (clipRadius) {
+            [NativeSdkPacketRoundedRectPath(commandClip, clipRadius) addClip];
+        } else {
+            [NSBezierPath clipRect:commandClip];
+        }
         effectiveClip = hasEffectiveClip ? NSIntersectionRect(effectiveClip, commandClip) : commandClip;
         hasEffectiveClip = YES;
     }
@@ -2778,7 +2792,7 @@ static BOOL NativeSdkAutomationRefuseCompositePresent(void) {
 /* A command is raster-cacheable when its painted output is a pure
  * function of the command itself: no backdrop reads (blur samples the
  * pixels beneath it) and no animated transform (applied per frame via
- * the CTM). A command CLIP is a plain rect carried by the command, so
+ * the CTM). A command CLIP is a rect plus optional per-corner radii carried by the command, so
  * clipped output is still a pure function of the command — the fill
  * applies the clip and the raster extent shrinks to bounds∩clip.
  * (Clipped panel/scroll content dominates content-heavy views; leaving
@@ -2792,6 +2806,7 @@ static BOOL NativeSdkAutomationRefuseCompositePresent(void) {
 static BOOL NativeSdkPacketCommandRasterCacheable(NSDictionary *command, NSString *kind) {
     if (command[@"transform"]) return NO;
     if (command[@"clip"] && !NativeSdkPacketArray(command[@"clip"], 4)) return NO;
+    if (command[@"clipRadius"] && !NativeSdkPacketArray(command[@"clipRadius"], 4)) return NO;
     if ([kind isEqualToString:@"draw_text"] || [kind isEqualToString:@"shadow"]) return YES;
     if ([kind hasPrefix:@"fill_rect"] || [kind hasPrefix:@"fill_rounded_rect"] || [kind hasPrefix:@"stroke_rect"] || [kind hasPrefix:@"draw_line"]) return YES;
     if ([kind isEqualToString:@"fill_path"] || [kind isEqualToString:@"stroke_path"]) return YES;
@@ -2817,7 +2832,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
 }
 
 /* ---------------------------------------------------------------------------
- * Compact binary gpu-surface packet decoding (wire format v5).
+ * Compact binary gpu-surface packet decoding (wire format v6).
  *
  * Little-endian, length-prefixed, mirror of the engine's binary packet
  * encoder (serialization.zig, `writeCanvasGpuPacketBinary` and the patch
@@ -2833,7 +2848,8 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
  * command dictionary; v3 added the flag-gated dirty rect list after the
  * scissor; v4 added the per-command stroke end-cap code after
  * stroke_width; v5 added optional text shadows and the shadow-effect inset
- * flag. The version this comment names and the encoder's spec
+ * flag; v6 adds four per-corner radii after every present command clip.
+ * The version this comment names and the encoder's spec
  * comment must agree with `binary_packet_version` (serialization.zig);
  * the `test-wire-format-version-prose` build check pins all three.
  */
@@ -3181,8 +3197,10 @@ static NSDictionary *NativeSdkBinaryReadCommand(NativeSdkBinaryPacketReader *rea
     if (flags & NativeSdkBinaryCommandFlagId) command[@"id"] = @(NativeSdkBinaryReadU64(reader));
     if (flags & NativeSdkBinaryCommandFlagClip) {
         NSArray *clip = NativeSdkBinaryReadF32Array(reader, 4);
-        if (!clip) return nil;
+        NSArray *clipRadius = NativeSdkBinaryReadF32Array(reader, 4);
+        if (!clip || !clipRadius) return nil;
         command[@"clip"] = clip;
+        command[@"clipRadius"] = clipRadius;
     }
     if (flags & NativeSdkBinaryCommandFlagTransform) {
         NSArray *transform = NativeSdkBinaryReadF32Array(reader, 6);
@@ -3231,7 +3249,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (memcmp(bytes, "NSGP", 4) != 0) return nil;
     reader.offset = 4;
     uint8_t version = NativeSdkBinaryReadU8(&reader);
-    if (version != 5) return nil;
+    if (version != 6) return nil;
     uint8_t loadActionCode = NativeSdkBinaryReadU8(&reader);
     uint8_t packetFlags = NativeSdkBinaryReadU8(&reader);
     (void)NativeSdkBinaryReadU8(&reader); /* reserved */
@@ -4202,7 +4220,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                 NativeSdkPacketNumber(colorArray[3], 1) >= 1.0) {
                 NSRect rect = CGRectStandardize(NativeSdkPacketRect(shape[@"rect"]));
                 NSArray *clipArray = NativeSdkPacketArray(command[@"clip"], 4);
-                BOOL clipUsable = command[@"clip"] == nil || clipArray != nil;
+                BOOL clipUsable = (command[@"clip"] == nil || clipArray != nil) && NativeSdkPacketRadiusIsZero(command[@"clipRadius"]);
                 if (clipArray) rect = NSIntersectionRect(rect, CGRectStandardize(NativeSdkPacketRect(clipArray)));
                 CGFloat pxMinX = NSMinX(rect) * scale;
                 CGFloat pxMinY = NSMinY(rect) * scale;
@@ -4245,7 +4263,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             NSArray *colorArray = paint ? NativeSdkPacketArray(paint[@"color"], 4) : nil;
             NSArray *radiusArray = shape ? NativeSdkPacketArray(shape[@"radius"], 1) : nil;
             NSArray *clipArray = NativeSdkPacketArray(command[@"clip"], 4);
-            const BOOL clipUsable = command[@"clip"] == nil || clipArray != nil;
+            const BOOL clipUsable = (command[@"clip"] == nil || clipArray != nil) && NativeSdkPacketRadiusIsZero(command[@"clipRadius"]);
             if (colorArray && radiusArray && shape && clipUsable &&
                 [[paint[@"kind"] description] isEqualToString:@"color"] &&
                 [[shape[@"kind"] description] isEqualToString:@"rounded_rect"]) {
@@ -4817,7 +4835,12 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [NSGraphicsContext setCurrentContext:graphics];
     CGFloat opacity = fmax(0.0, fmin(1.0, NativeSdkPacketNumber(command[@"opacity"], 1)));
     if (hasCommandClip) {
-        [NSBezierPath clipRect:commandClip];
+        NSArray *clipRadius = NativeSdkPacketArray(command[@"clipRadius"], 4);
+        if (clipRadius) {
+            [NativeSdkPacketRoundedRectPath(commandClip, clipRadius) addClip];
+        } else {
+            [NSBezierPath clipRect:commandClip];
+        }
     }
     BOOL ok = NativeSdkPacketDrawCommandBody(command, kind, opacity, bitmap, scale, hasCommandClip, commandClip, self.canvasImageCache);
     [NSGraphicsContext restoreGraphicsState];

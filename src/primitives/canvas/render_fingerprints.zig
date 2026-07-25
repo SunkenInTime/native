@@ -61,6 +61,7 @@ pub fn renderLayerFingerprint(command: anytype) u64 {
     var hash = resourceHashTag("layer");
     hash = resourceHashF32(hash, command.opacity);
     hash = resourceHashOptionalRect(hash, command.clip);
+    hash = resourceHashRadius(hash, command.clip_radius);
     hash = resourceHashAffine(hash, command.transform);
     return renderLayerFingerprintAppend(hash, command);
 }

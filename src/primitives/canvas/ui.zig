@@ -521,6 +521,10 @@ pub fn Ui(comptime Msg: type) type {
             cross: canvas.WidgetCrossAlignment = .stretch,
             self_align: ?canvas.WidgetCrossAlignment = null,
             flex_wrap: bool = false,
+            /// Clip every descendant draw to this element's frame. The
+            /// resolved per-corner style radius shapes the clip; false keeps
+            /// descendants free to paint outside the frame.
+            clip_content: bool = false,
             /// Line policy for `text` leaves. `true`: word-wrap through
             /// the span paragraph machinery (a single-span paragraph),
             /// wrapping at the width the widget receives and reserving
@@ -2605,6 +2609,7 @@ pub fn Ui(comptime Msg: type) type {
                     .virtual_anchor_extent = options.virtual_anchor_extent,
                     .virtual_total_extent = options.virtual_total_extent,
                     .flags = .{
+                        .clip_content = options.clip_content,
                         .preferred_width_set = options.width != null,
                         .preferred_height_set = options.height != null,
                     },

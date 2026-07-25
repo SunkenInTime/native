@@ -373,6 +373,8 @@ fn writeCanvasGpuCommandJson(command: CanvasGpuCommand, writer: anytype) !void {
     try writeCanvasGpuEffectJson(command.effect, writer);
     try writer.writeAll(",\"clip\":");
     try writeOptionalRectJson(command.clip, writer);
+    try writer.writeAll(",\"clipRadius\":");
+    try writeRadiusJson(command.clip_radius, writer);
     try writer.print(",\"opacity\":{d},\"transform\":", .{command.opacity});
     try writeAffineJson(command.transform, writer);
     try writer.writeAll(",\"usesPathGeometry\":");
@@ -588,6 +590,8 @@ fn writeRenderCommandJson(command: RenderCommand, index: usize, writer: anytype)
     try writeOptionalObjectIdJson(command.id, writer);
     try writer.print(",\"opacity\":{d},\"clip\":", .{command.opacity});
     try writeOptionalRectJson(command.clip, writer);
+    try writer.writeAll(",\"clipRadius\":");
+    try writeRadiusJson(command.clip_radius, writer);
     try writer.writeAll(",\"transform\":");
     try writeAffineJson(command.transform, writer);
     try writer.writeAll(",\"localBounds\":");
@@ -604,6 +608,8 @@ fn writeRenderBatchJson(batch: RenderBatch, writer: anytype) !void {
     try json.writeString(writer, @tagName(batch.pipeline));
     try writer.print(",\"commandStart\":{d},\"commandCount\":{d},\"opacity\":{d},\"clip\":", .{ batch.command_start, batch.command_count, batch.opacity });
     try writeOptionalRectJson(batch.clip, writer);
+    try writer.writeAll(",\"clipRadius\":");
+    try writeRadiusJson(batch.clip_radius, writer);
     try writer.writeAll(",\"bounds\":");
     try writeRectJson(batch.bounds, writer);
     try writer.writeByte('}');
@@ -710,6 +716,8 @@ fn writeRenderLayerJson(layer: RenderLayer, writer: anytype) !void {
     try writeRectJson(layer.bounds, writer);
     try writer.print(",\"opacity\":{d},\"clip\":", .{layer.opacity});
     try writeOptionalRectJson(layer.clip, writer);
+    try writer.writeAll(",\"clipRadius\":");
+    try writeRadiusJson(layer.clip_radius, writer);
     try writer.writeAll(",\"transform\":");
     try writeAffineJson(layer.transform, writer);
     try writer.print(",\"fingerprint\":{d}}}", .{layer.fingerprint});
@@ -998,7 +1006,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Compact binary gpu-surface packet encoding (wire format v5).
+// Compact binary gpu-surface packet encoding (wire format v6).
 //
 // The version this comment names, the `binary_packet_version` constant
 // below, and the host decoder's spec comment (appkit_host.m) must agree;
@@ -1039,6 +1047,9 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 // carry an inset flag, keeping the packet presenter in lockstep with the
 // reference renderer's styling surface.
 //
+// v6 (from v5): command clips carry four per-corner radii after their rect,
+// preserving rounded overflow masks through render-plan flattening.
+//
 // Layout:
 //   "NSGP" u8[4] | version u8 | load_action u8 (1 load / 2 clear /
 //     3 patch) | flags u8 (bit0 scissor, bit1 dirty rect list) | reserved u8
@@ -1056,7 +1067,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 //     | order_count u32 | order keys u64[]
 
 pub const binary_packet_magic = "NSGP";
-pub const binary_packet_version: u8 = 5;
+pub const binary_packet_version: u8 = 6;
 
 /// Most dirty rects a patch header carries: enough to keep far-apart
 /// small changes (a switch plus a status line) from fusing into a
@@ -1090,6 +1101,7 @@ pub fn canvasGpuCommandFingerprint(command: CanvasGpuCommand) u64 {
     h = hash.resourceHashEnum(h, @intFromEnum(command.cap));
     h = hash.resourceHashOptionalObjectId(h, command.id);
     h = hash.resourceHashOptionalRect(h, command.clip);
+    h = hash.resourceHashRadius(h, command.clip_radius);
     h = hash.resourceHashAffine(h, command.transform);
     switch (command.shape) {
         .none => h = hash.resourceHashU8(h, 0),
@@ -1300,7 +1312,7 @@ const binary_command_flag_effect: u8 = 0x80;
 
 /// Command layout: kind u8 | flags u8 | bounds f32[4] | opacity f32
 /// | stroke_width f32 | cap u8 (0 butt / 1 round) | [id u64]
-/// | [clip f32[4]] | [transform f32[6]]
+/// | [clip f32[4] + clip_radius f32[4]] | [transform f32[6]]
 /// | [shape] | [paint] | [image] | [text] | [effect] — each optional
 /// section present exactly when its flag bit is set. The identity
 /// transform is elided (the flag doubles as "non-identity").
@@ -1327,7 +1339,10 @@ fn writeCanvasGpuCommandBinary(command: CanvasGpuCommand, writer: anytype) !void
         .round => 1,
     });
     if (command.id) |id| try writer.writeInt(u64, id, .little);
-    if (command.clip) |clip| try writeBinaryRect(clip, writer);
+    if (command.clip) |clip| {
+        try writeBinaryRect(clip, writer);
+        try writeBinaryRadius(command.clip_radius, writer);
+    }
     if (!identity_transform) try writeBinaryAffine(command.transform, writer);
     if (command.shape != .none) try writeBinaryShape(command.shape, writer);
     if (command.paint != .none) try writeBinaryPaint(command.paint, writer);

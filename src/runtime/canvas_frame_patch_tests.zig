@@ -946,6 +946,9 @@ test "command fingerprints cover every encoded field" {
     changed.clip = geometry.RectF.init(0, 0, 11, 10);
     try std.testing.expect(canvas.canvasGpuCommandFingerprint(changed) != base_fingerprint);
     changed = base;
+    changed.clip_radius = canvas.Radius{ .top_left = 1, .top_right = 2, .bottom_right = 3, .bottom_left = 4 };
+    try std.testing.expect(canvas.canvasGpuCommandFingerprint(changed) != base_fingerprint);
+    changed = base;
     changed.transform = canvas.Affine.translate(2, 1);
     try std.testing.expect(canvas.canvasGpuCommandFingerprint(changed) != base_fingerprint);
     changed = base;
