@@ -1,0 +1,1 @@
+Add retained inset box shadows and text shadows across reference rendering, widget projection, and macOS GPU packets. Text widgets can also select a registered face through the existing bounded effect slice so downstream font bundles do not enlarge every retained widget.

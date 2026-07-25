@@ -228,6 +228,8 @@ const BinaryCursor = struct {
             try self.skip(8 + 4 + 8 + 16); // font + size + origin + color
             const text_len = try self.readU32();
             try self.skip(text_len);
+            const has_shadow = try self.readU8();
+            if (has_shadow != 0) try self.skip(8 + 4 + 16); // offset + blur + color
             const has_layout = try self.readU8();
             if (has_layout != 0) {
                 try self.skip(4 + 4 + 4 + 1 + 4 + 1 + 1); // max width + line height + tracking + tabular + max lines + wrap + align
@@ -244,7 +246,7 @@ const BinaryCursor = struct {
         }
         if (flags & 0x80 != 0) { // effect
             switch (try self.readU8()) {
-                1 => try self.skip(64),
+                1 => try self.skip(65),
                 2 => try self.skip(20),
                 else => return error.UnknownEffectTag,
             }

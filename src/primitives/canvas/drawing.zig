@@ -245,6 +245,8 @@ pub const Shadow = struct {
     blur: f32 = 0,
     spread: f32 = 0,
     color: Color,
+    /// Draw inside `rect` instead of casting outside it.
+    inset: bool = false,
 };
 
 pub const Blur = struct {
@@ -258,6 +260,7 @@ pub fn strokeBounds(rect: geometry.RectF, width: f32) geometry.RectF {
 }
 
 pub fn shadowBounds(value: Shadow) geometry.RectF {
+    if (value.inset) return value.rect.normalized();
     const spread = nonNegative(@abs(value.spread));
     const blur_radius = nonNegative(value.blur);
     return value.rect

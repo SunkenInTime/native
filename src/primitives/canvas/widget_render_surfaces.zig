@@ -247,7 +247,17 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
     // fully transparent panel (a dismiss catcher, a tinted wash) has
     // nothing to occlude the light, and the shadow would read as an
     // extra dim showing through the see-through fill.
-    if (background.a >= 1 and (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0)) {
+    if (widget_render_style.widgetBoxShadow(widget)) |custom| {
+        if (!custom.inset) try builder.shadow(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = widget.frame,
+            .radius = radius,
+            .offset = custom.offset,
+            .blur = custom.blur,
+            .spread = custom.spread,
+            .color = custom.color,
+        });
+    } else if (background.a >= 1 and (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0)) {
         try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
             .rect = widget.frame,
@@ -265,6 +275,18 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
         .radius = radius,
         .fill = colorFill(background),
     });
+    if (widget_render_style.widgetBoxShadow(widget)) |custom| {
+        if (custom.inset) try builder.shadow(.{
+            .id = widgetPartId(widget.id, 1),
+            .rect = widget.frame,
+            .radius = radius,
+            .offset = custom.offset,
+            .blur = custom.blur,
+            .spread = custom.spread,
+            .color = custom.color,
+            .inset = true,
+        });
+    }
     try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,

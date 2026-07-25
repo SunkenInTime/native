@@ -164,6 +164,10 @@ pub fn writeCommandJson(command: CanvasCommand, writer: anytype) !void {
                 try writer.writeAll(",\"layout\":");
                 try writeTextLayoutOptionsJson(options, writer);
             }
+            if (value.text_shadow) |shadow| {
+                try writer.writeAll(",\"shadow\":");
+                try writeTextShadowJson(shadow, writer);
+            }
         },
         .shadow => |value| {
             try writer.print(",\"id\":{d},\"rect\":", .{value.id});
@@ -172,6 +176,7 @@ pub fn writeCommandJson(command: CanvasCommand, writer: anytype) !void {
             try writeRadiusJson(value.radius, writer);
             try writer.print(",\"offset\":[{d},{d}],\"blur\":{d},\"spread\":{d},\"color\":", .{ value.offset.dx, value.offset.dy, value.blur, value.spread });
             try writeColorJson(value.color, writer);
+            if (value.inset) try writer.writeAll(",\"inset\":true");
         },
         .blur => |value| {
             try writer.print(",\"id\":{d},\"rect\":", .{value.id});
@@ -195,6 +200,12 @@ fn writeTextLayoutOptionsJson(options: TextLayoutOptions, writer: anytype) !void
     try json.writeString(writer, @tagName(options.alignment));
     try writer.writeAll(",\"overflow\":");
     try json.writeString(writer, @tagName(options.overflow));
+    try writer.writeByte('}');
+}
+
+fn writeTextShadowJson(shadow: text_model.TextShadow, writer: anytype) !void {
+    try writer.print("{{\"offset\":[{d},{d}],\"blur\":{d},\"color\":", .{ shadow.offset.dx, shadow.offset.dy, shadow.blur });
+    try writeColorJson(shadow.color, writer);
     try writer.writeByte('}');
 }
 
@@ -489,6 +500,8 @@ fn writeCanvasGpuTextJson(text: ?CanvasGpuText, writer: anytype) !void {
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"shadow\":");
+    if (value.text_shadow) |shadow| try writeTextShadowJson(shadow, writer) else try writer.writeAll("null");
     try writer.writeByte('}');
 }
 
@@ -517,6 +530,7 @@ fn packetTextLayout(value: CanvasGpuText, options: TextLayoutOptions, lines: []T
         .text = value.text,
         .glyphs = value.glyphs,
         .text_layout = options,
+        .text_shadow = value.text_shadow,
     }, options, lines) catch null;
 }
 
@@ -558,6 +572,7 @@ fn writeCanvasGpuEffectJson(effect: CanvasGpuEffect, writer: anytype) !void {
             try writeRadiusJson(shadow.radius, writer);
             try writer.print(",\"offset\":[{d},{d}],\"blur\":{d},\"spread\":{d},\"color\":", .{ shadow.offset.dx, shadow.offset.dy, shadow.blur, shadow.spread });
             try writeColorJson(shadow.color, writer);
+            if (shadow.inset) try writer.writeAll(",\"inset\":true");
             try writer.writeByte('}');
         },
         .blur => |blur| {
@@ -983,7 +998,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Compact binary gpu-surface packet encoding (wire format v4).
+// Compact binary gpu-surface packet encoding (wire format v5).
 //
 // The version this comment names, the `binary_packet_version` constant
 // below, and the host decoder's spec comment (appkit_host.m) must agree;
@@ -1020,6 +1035,10 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 // (the checkbox mark, the spinner arc) with the same cap the reference
 // renderer rasterizes instead of their engine default.
 //
+// v5 (from v4): text carries an optional shadow payload and shadow effects
+// carry an inset flag, keeping the packet presenter in lockstep with the
+// reference renderer's styling surface.
+//
 // Layout:
 //   "NSGP" u8[4] | version u8 | load_action u8 (1 load / 2 clear /
 //     3 patch) | flags u8 (bit0 scissor, bit1 dirty rect list) | reserved u8
@@ -1037,7 +1056,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 //     | order_count u32 | order keys u64[]
 
 pub const binary_packet_magic = "NSGP";
-pub const binary_packet_version: u8 = 4;
+pub const binary_packet_version: u8 = 5;
 
 /// Most dirty rects a patch header carries: enough to keep far-apart
 /// small changes (a switch plus a status line) from fusing into a
@@ -1127,6 +1146,13 @@ pub fn canvasGpuCommandFingerprint(command: CanvasGpuCommand) u64 {
         h = hash.resourceHashPoint(h, text.origin);
         h = hash.resourceHashColor(h, text.color);
         h = hash.resourceHashBytes(h, text.text);
+        if (text.text_shadow) |shadow| {
+            h = hash.resourceHashU8(h, 1);
+            h = hash.resourceHashF32(h, shadow.offset.dx);
+            h = hash.resourceHashF32(h, shadow.offset.dy);
+            h = hash.resourceHashF32(h, shadow.blur);
+            h = hash.resourceHashColor(h, shadow.color);
+        } else h = hash.resourceHashU8(h, 0);
         h = hash.resourceHashUsize(h, text.glyphs.len);
         for (text.glyphs) |glyph| {
             h = hash.resourceHashU32(h, glyph.id);
@@ -1169,6 +1195,7 @@ pub fn canvasGpuCommandFingerprint(command: CanvasGpuCommand) u64 {
             h = hash.resourceHashF32(h, shadow.blur);
             h = hash.resourceHashF32(h, shadow.spread);
             h = hash.resourceHashColor(h, shadow.color);
+            h = hash.resourceHashU8(h, @intFromBool(shadow.inset));
         },
         .blur => |blur| {
             h = hash.resourceHashU8(h, 2);
@@ -1432,7 +1459,8 @@ fn writeBinaryImage(image: CanvasGpuImage, writer: anytype) !void {
 }
 
 /// Text draw: font_id u64 | size f32 | origin f32[2] | color f32[4]
-/// | text u32+bytes | has_layout u8 | layout { max_width f32,
+/// | text u32+bytes | has_shadow u8 [offset f32[2], blur f32, color f32[4]]
+/// | has_layout u8 | layout { max_width f32,
 /// line_height f32, letter_spacing f32, tabular_numbers u8, max_lines u32,
 /// wrap u8 (0 none / 1 word / 2 character), align u8
 /// (0 start / 1 center / 2 end), has_lines u8, [line_count u32, lines
@@ -1446,6 +1474,13 @@ fn writeBinaryText(text: CanvasGpuText, writer: anytype) !void {
     try writeBinaryPoint(text.origin, writer);
     try writeBinaryColor(text.color, writer);
     try writeBinarySlice(text.text, writer);
+    if (text.text_shadow) |shadow| {
+        try writer.writeByte(1);
+        try writeBinaryF32(shadow.offset.dx, writer);
+        try writeBinaryF32(shadow.offset.dy, writer);
+        try writeBinaryF32(shadow.blur, writer);
+        try writeBinaryColor(shadow.color, writer);
+    } else try writer.writeByte(0);
     const options = text.text_layout orelse {
         try writer.writeByte(0);
         return;
@@ -1501,6 +1536,7 @@ fn writeBinaryEffect(effect: CanvasGpuEffect, writer: anytype) !void {
             try writeBinaryF32(shadow.blur, writer);
             try writeBinaryF32(shadow.spread, writer);
             try writeBinaryColor(shadow.color, writer);
+            try writer.writeByte(@intFromBool(shadow.inset));
         },
         .blur => |blur| {
             try writer.writeByte(2);

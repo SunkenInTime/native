@@ -478,6 +478,27 @@ test "widget layout applies aspect ratio when exactly one axis is definite" {
     try expectLayoutFrame(stack_layout, 4, geometry.RectF.init(0, 0, 120, 60));
 }
 
+test "stack-like panels center an explicit icon box without a layout wrapper" {
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .icon,
+        .frame = geometry.RectF.init(0, 0, 24, 24),
+    }};
+    const panel = Widget{
+        .id = 1,
+        .kind = .panel,
+        .layout = .{
+            .padding = geometry.InsetsF.all(5),
+            .cross_alignment = .center,
+            .main_alignment = .center,
+        },
+        .children = &children,
+    };
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(panel, geometry.RectF.init(10, 20, 80, 60), &nodes);
+    try expectLayoutFrame(layout, 2, geometry.RectF.init(38, 38, 24, 24));
+}
+
 test "chat bubbles cap at the thread fraction, never the full thread" {
     // A hug-sized bubble in a WIDE thread: its message wants 700 points,
     // the row offers 600, and the reference contract caps the bubble at
@@ -773,20 +794,29 @@ test "widget text alignment emits local text layout options" {
         .typography = .{ .font_id = 1, .body_size = 10 },
     };
 
-    const centered = Widget{
-        .id = 1,
-        .kind = .text,
-        .frame = geometry.RectF.init(10, 20, 100, 20),
-        .text = "Hi",
-        .text_alignment = .center,
-        .immediate_commands = &.{.{ .text_style = .{
+    const text_effects = [_]canvas.ImmediateCanvasCommand{
+        .{ .text_style = .{
             .scale = 1.3,
             .weight = .bold,
             .line_height = 18,
             .letter_spacing = 1.5,
             .tabular_numbers = true,
             .max_lines = 2,
-        } }},
+        } },
+        .{ .text_shadow = .{
+            .offset = .{ .dx = 1, .dy = 2 },
+            .blur = 3,
+            .color = Color.rgba8(10, 20, 30, 128),
+        } },
+        .{ .text_font = canvas.min_registered_font_id },
+    };
+    const centered = Widget{
+        .id = 1,
+        .kind = .text,
+        .frame = geometry.RectF.init(10, 20, 100, 20),
+        .text = "Hi",
+        .text_alignment = .center,
+        .immediate_commands = &text_effects,
     };
     var center_commands: [3]CanvasCommand = undefined;
     var center_builder = Builder.init(&center_commands);
@@ -797,7 +827,7 @@ test "widget text alignment emits local text layout options" {
             try std.testing.expectEqual(@as(ObjectId, widgetPartId(1, 1)), text.id);
             try std.testing.expectApproxEqAbs(@as(f32, 10), text.origin.x, 0.001);
             try std.testing.expectApproxEqAbs(@as(f32, 34.875), text.origin.y, 0.001);
-            try std.testing.expectEqual(@as(FontId, 4), text.font_id);
+            try std.testing.expectEqual(@as(FontId, canvas.min_registered_font_id), text.font_id);
             try std.testing.expectApproxEqAbs(@as(f32, 13), text.size, 0.001);
             try std.testing.expect(text.text_layout != null);
             try std.testing.expectEqual(@as(f32, 100), text.text_layout.?.max_width);
@@ -807,9 +837,33 @@ test "widget text alignment emits local text layout options" {
             try std.testing.expect(text.text_layout.?.tabular_numbers);
             try std.testing.expectEqual(@as(usize, 2), text.text_layout.?.max_lines);
             try std.testing.expectEqual(TextWrap.word, text.text_layout.?.wrap);
+            try std.testing.expect(text.text_shadow != null);
+            try std.testing.expectEqual(@as(f32, 1), text.text_shadow.?.offset.dx);
+            try std.testing.expectEqual(@as(f32, 3), text.text_shadow.?.blur);
         },
         else => return error.TestUnexpectedResult,
     }
+
+    const custom_span = [_]canvas.TextSpan{.{ .text = "span", .weight = .bold }};
+    const custom_paragraph = Widget{
+        .id = 3,
+        .kind = .text,
+        .frame = geometry.RectF.init(0, 0, 100, 20),
+        .spans = &custom_span,
+        .immediate_commands = &text_effects,
+    };
+    var paragraph_commands: [3]CanvasCommand = undefined;
+    var paragraph_builder = Builder.init(&paragraph_commands);
+    try emitWidgetTree(&paragraph_builder, custom_paragraph, tokens);
+    var saw_custom_span = false;
+    for (paragraph_builder.displayList().commands) |command| switch (command) {
+        .draw_text => |text| {
+            try std.testing.expectEqual(@as(FontId, canvas.min_registered_font_id), text.font_id);
+            saw_custom_span = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_custom_span);
 
     const end = Widget{
         .id = 2,
@@ -835,6 +889,36 @@ test "text-only styling does not grow the common retained Widget" {
     // N3's compact common shape: future text-only metadata belongs in the
     // existing rare-command side channel, not on every retained widget.
     try std.testing.expectEqual(@as(usize, 728), @sizeOf(Widget));
+}
+
+test "panel chrome projects author inset shadow after its fill" {
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .box_shadow = .{
+        .offset = .{ .dx = 2, .dy = 2 },
+        .blur = 4,
+        .spread = 1,
+        .color = Color.rgba8(0, 0, 0, 100),
+        .inset = true,
+    } }};
+    const panel = Widget{
+        .id = 9,
+        .kind = .panel,
+        .frame = geometry.RectF.init(0, 0, 80, 40),
+        .immediate_commands = &effects,
+    };
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, panel, .{});
+    try std.testing.expectEqual(@as(usize, 3), builder.displayList().commandCount());
+    try std.testing.expect(builder.displayList().commands[0] == .fill_rounded_rect);
+    switch (builder.displayList().commands[1]) {
+        .shadow => |shadow| {
+            try std.testing.expect(shadow.inset);
+            try std.testing.expectEqual(@as(f32, 2), shadow.offset.dx);
+            try std.testing.expectEqual(@as(f32, 4), shadow.blur);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(builder.displayList().commands[2] == .stroke_rect);
 }
 
 test "widget opacity wraps subtree display list commands" {

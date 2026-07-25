@@ -1,5 +1,6 @@
 const std = @import("std");
 const geometry = @import("geometry");
+const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
@@ -11,6 +12,29 @@ const StrokeRect = drawing_model.StrokeRect;
 const DesignTokens = token_model.DesignTokens;
 const ControlVisualTokens = token_model.ControlVisualTokens;
 const Widget = widget_model.Widget;
+
+pub fn widgetBoxShadow(widget: Widget) ?canvas.Shadow {
+    for (widget.immediate_commands) |command| switch (command) {
+        .box_shadow => |shadow| return .{
+            .rect = widget.frame,
+            .offset = shadow.offset,
+            .blur = shadow.blur,
+            .spread = shadow.spread,
+            .color = shadow.color,
+            .inset = shadow.inset,
+        },
+        else => {},
+    };
+    return null;
+}
+
+pub fn widgetTextShadow(widget: Widget) ?canvas.TextShadow {
+    for (widget.immediate_commands) |command| switch (command) {
+        .text_shadow => |shadow| return shadow,
+        else => {},
+    };
+    return null;
+}
 const WidgetState = widget_model.WidgetState;
 
 /// Snap a hairline border to the device-pixel grid at emit time. A

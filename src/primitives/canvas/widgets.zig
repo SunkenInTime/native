@@ -9,6 +9,7 @@ const chart_model = @import("chart.zig");
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
 const ImageId = canvas.ImageId;
+const FontId = canvas.FontId;
 const Color = canvas.Color;
 const Affine = canvas.Affine;
 const ImageFit = canvas.ImageFit;
@@ -379,9 +380,6 @@ pub const WidgetLayoutStyle = struct {
     /// Anchored floating placement: non-null makes this widget a floating
     /// surface positioned against its parent (see `WidgetAnchor`).
     anchor: ?WidgetAnchor = null,
-    /// Whether the matching `Widget.frame` axis is an authored preferred
-    /// size. The bit is separate from the value so an explicit zero remains
-    /// distinct from an intrinsic/unset axis.
     min_size: geometry.SizeF = .{},
     /// Per-axis upper bound; 0 leaves the axis unbounded. Authored preferred
     /// sizes are independent of min/max and participate as flex bases.
@@ -761,6 +759,15 @@ pub const WidgetTextStyle = struct {
     }
 };
 
+/// Bundle-normalized path geometry for one retained icon node. Weaver owns
+/// the full SVG grammar; Native retains only already-decoded M/L/C/Z elements.
+pub const WidgetIconPath = struct {
+    view_box: geometry.RectF = geometry.RectF.init(0, 0, 24, 24),
+    elements: []const canvas.PathElement,
+    /// Zero fills the geometry; positive values stroke with round caps/joins.
+    stroke_width: f32 = 0,
+};
+
 /// One local-space immediate drawing command attached to a retained widget,
 /// or rare metadata sharing the same retained side channel. The renderer
 /// translates drawing coordinates into the laid-out frame and skips metadata.
@@ -772,6 +779,13 @@ pub const ImmediateCanvasCommand = union(enum) {
     polyline: struct { points: []const geometry.PointF, width: f32, color: Color },
     /// Rare retained metadata; never emitted as immediate paint.
     text_style: WidgetTextStyle,
+    box_shadow: struct { offset: geometry.OffsetF = .{}, blur: f32 = 0, spread: f32 = 0, color: Color, inset: bool = false },
+    text_shadow: canvas.TextShadow,
+    /// Per-text registered/built-in face override. Retaining this in the
+    /// existing command slice avoids enlarging every Widget for a rare style.
+    text_font: FontId,
+    /// Retained vector geometry for a path-authored icon. Metadata only.
+    icon_path: WidgetIconPath,
 };
 
 /// Where a control sits inside a FLUSH button group (`button_group`
@@ -951,6 +965,14 @@ pub const Widget = struct {
             else => {},
         };
         return .{};
+    }
+
+    pub fn iconPath(self: Widget) ?WidgetIconPath {
+        for (self.immediate_commands) |command| switch (command) {
+            .icon_path => |path| return path,
+            else => {},
+        };
+        return null;
     }
 };
 

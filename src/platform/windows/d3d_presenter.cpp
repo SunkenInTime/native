@@ -47,6 +47,10 @@ struct RetainedCommand {
     std::vector<Instance> instances;
 };
 
+// Must match serialization.zig `binary_packet_version`; the build-time
+// wire-format ratchet checks this independently of the macOS decoder.
+static constexpr uint8_t kBinaryPacketVersion = 5;
+
 struct PacketReader {
     const uint8_t *cursor;
     const uint8_t *end;
@@ -59,11 +63,13 @@ struct PacketReader {
     bool skip(size_t count) { return skipBytes(cursor, end, count); }
 };
 
-bool readRadius(PacketReader &reader, float *radius) {
-    float values[4];
-    if (!reader.f32(&values[0]) || !reader.f32(&values[1]) ||
-        !reader.f32(&values[2]) || !reader.f32(&values[3])) return false;
-    *radius = std::max(0.0f, *std::max_element(values, values + 4));
+bool readRadius(PacketReader &reader, F4 *radius) {
+    if (!reader.f32(&radius->x) || !reader.f32(&radius->y) ||
+        !reader.f32(&radius->z) || !reader.f32(&radius->w)) return false;
+    radius->x = std::max(0.0f, radius->x);
+    radius->y = std::max(0.0f, radius->y);
+    radius->z = std::max(0.0f, radius->z);
+    radius->w = std::max(0.0f, radius->w);
     return true;
 }
 
@@ -110,14 +116,14 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     std::vector<Instance> instances;
     Instance base = {};
     base.rect = bounds;
-    base.shape.y = 0;
+    base.extra.w = 0;
 
     if (shape_tag == 1) {
         if (!reader.rect(&base.rect)) return false;
-        base.shape.x = 0;
+        base.shape = {};
         instances.push_back(base);
     } else if (shape_tag == 2) {
-        if (!reader.rect(&base.rect) || !readRadius(reader, &base.shape.x)) return false;
+        if (!reader.rect(&base.rect) || !readRadius(reader, &base.shape)) return false;
         instances.push_back(base);
     } else if (shape_tag == 3) {
         // Stroked rounded rectangles require a ring SDF, not a filled quad.
@@ -129,8 +135,8 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
         const float half = width * 0.5f;
         base.rect = { std::min(x1, x2) - half, std::min(y1, y2) - half,
             std::abs(x2 - x1) + width, std::abs(y2 - y1) + width };
-        base.shape = { 0, 1, x1, y1 };
-        base.extra = { x2, y2, width, cap == 1 ? 1.0f : 0.0f };
+        base.shape = { x1, y1, 0, 0 };
+        base.extra = { x2, y2, width, 1.0f };
         instances.push_back(base);
     } else if (shape_tag == 5) {
         uint32_t count = 0;
@@ -154,8 +160,8 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
                 Instance line = base;
                 line.rect = { std::min(previous_x, last_x) - half, std::min(previous_y, last_y) - half,
                     std::abs(last_x - previous_x) + stroke_width, std::abs(last_y - previous_y) + stroke_width };
-                line.shape = { 0, 1, previous_x, previous_y };
-                line.extra = { last_x, last_y, stroke_width, cap == 1 ? 1.0f : 0.0f };
+                line.shape = { previous_x, previous_y, 0, 0 };
+                line.extra = { last_x, last_y, stroke_width, 1.0f };
                 instances.push_back(line);
                 previous_x = last_x;
                 previous_y = last_y;
@@ -164,8 +170,8 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
                 Instance line = base;
                 line.rect = { std::min(previous_x, start_x) - half, std::min(previous_y, start_y) - half,
                     std::abs(start_x - previous_x) + stroke_width, std::abs(start_y - previous_y) + stroke_width };
-                line.shape = { 0, 1, previous_x, previous_y };
-                line.extra = { start_x, start_y, stroke_width, cap == 1 ? 1.0f : 0.0f };
+                line.shape = { previous_x, previous_y, 0, 0 };
+                line.extra = { start_x, start_y, stroke_width, 1.0f };
                 instances.push_back(line);
                 previous_x = start_x;
                 previous_y = start_y;
@@ -200,13 +206,18 @@ Out vsMain(uint vertex:SV_VertexID, uint instance:SV_InstanceID) {
 }
 float4 psMain(Out i):SV_TARGET {
   float distance;
-  if (i.shape.y > 0.5) {
-    float2 a=i.shape.zw, b=i.extra.xy, pa=i.pixel-a, ba=b-a;
+  if (i.extra.w > 0.5) {
+    float2 a=i.shape.xy, b=i.extra.xy, pa=i.pixel-a, ba=b-a;
     float h=saturate(dot(pa,ba)/max(dot(ba,ba),0.0001));
     distance=length(pa-ba*h)-i.extra.z*0.5;
   } else {
-    float2 center=i.rect.xy+i.rect.zw*0.5, q=abs(i.pixel-center)-(i.rect.zw*0.5-i.shape.x);
-    distance=length(max(q,0))+min(max(q.x,q.y),0)-i.shape.x;
+    float2 center=i.rect.xy+i.rect.zw*0.5;
+    float radius = i.pixel.x < center.x
+      ? (i.pixel.y < center.y ? i.shape.x : i.shape.w)
+      : (i.pixel.y < center.y ? i.shape.y : i.shape.z);
+    radius=min(radius,min(i.rect.z,i.rect.w)*0.5);
+    float2 q=abs(i.pixel-center)-(i.rect.zw*0.5-radius);
+    distance=length(max(q,0))+min(max(q.x,q.y),0)-radius;
   }
   float coverage=saturate(0.5-distance); return i.color*coverage;
 })";
@@ -383,7 +394,7 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
     if (!r.skip(4) || memcmp(packet, "NSGP", 4) != 0) return false;
     uint8_t version = 0, load = 0, flags = 0, reserved = 0;
     uint64_t generation = 0;
-    if (!r.u8(&version) || version != 4 || !r.u8(&load) || !r.u8(&flags) ||
+    if (!r.u8(&version) || version != kBinaryPacketVersion || !r.u8(&load) || !r.u8(&flags) ||
         !r.u8(&reserved) || !r.u64(&generation)) return false;
     if (flags & 0x01) { F4 scissor; if (!r.rect(&scissor)) return false; }
     if (flags & 0x02) { uint32_t count; if (!r.u32(&count) || count > 8 || !r.skip((size_t)count * 16)) return false; }

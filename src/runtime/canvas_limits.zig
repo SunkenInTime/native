@@ -30,7 +30,7 @@ pub const max_canvas_gradient_stops_per_view: usize = 64;
 // each of the two per-view arrays (retained canvas + display-list
 // scratch), x 32 view slots ~ 3.6 MiB total, pages touched only as views
 // draw paths.
-pub const max_canvas_path_elements_per_view: usize = if (native_sdk_options.widget_profile) 256 else 2048;
+pub const max_canvas_path_elements_per_view: usize = 2048;
 pub const max_canvas_glyphs_per_view: usize = if (native_sdk_options.widget_profile) 512 else 8192;
 pub const max_canvas_text_bytes_per_view: usize = if (native_sdk_options.widget_profile) 4096 else 32768;
 // Retained packet commands per gpu-surface view: the host-side command

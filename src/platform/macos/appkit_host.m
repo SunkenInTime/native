@@ -2331,10 +2331,22 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
     CGFloat size = MAX(1, NativeSdkPacketNumber(text[@"size"], 12));
     NSFont *font = NativeSdkPacketPreferredFont(text, size);
     NSPoint origin = NativeSdkPacketPoint(text[@"origin"]);
-    NSDictionary *baseAttributes = @{
+    NSMutableDictionary *baseAttributes = [@{
         NSFontAttributeName: font,
         NSForegroundColorAttributeName: color,
-    };
+    } mutableCopy];
+    NSDictionary *textShadow = NativeSdkPacketDictionary(text[@"shadow"]);
+    if (textShadow) {
+        NSColor *shadowColor = NativeSdkPacketColor(textShadow[@"color"], opacity);
+        NSArray *shadowOffset = NativeSdkPacketArray(textShadow[@"offset"], 2);
+        if (shadowColor && shadowOffset) {
+            NSShadow *shadow = [[NSShadow alloc] init];
+            shadow.shadowColor = shadowColor;
+            shadow.shadowOffset = NSMakeSize(NativeSdkPacketNumber(shadowOffset[0], 0), NativeSdkPacketNumber(shadowOffset[1], 0));
+            shadow.shadowBlurRadius = MAX(0, NativeSdkPacketNumber(textShadow[@"blur"], 0));
+            baseAttributes[NSShadowAttributeName] = shadow;
+        }
+    }
     NSDictionary *layout = NativeSdkPacketDictionary(text[@"layout"]);
     if (!layout) {
         [value drawAtPoint:NSMakePoint(origin.x, origin.y - size) withAttributes:baseAttributes];
@@ -2416,6 +2428,19 @@ static BOOL NativeSdkPacketDrawEffect(NSDictionary *effect, CGFloat opacity, CGC
         shadow.shadowBlurRadius = MAX(0, NativeSdkPacketNumber(effect[@"blur"], 0));
         NSBezierPath *path = NativeSdkPacketRoundedRectPath(rect, effect[@"radius"]);
         [NSGraphicsContext saveGraphicsState];
+        if ([effect[@"inset"] boolValue]) {
+            [path addClip];
+            CGFloat spread = NativeSdkPacketNumber(effect[@"spread"], 0);
+            NSRect holeRect = NSInsetRect(NSOffsetRect(rect, shadowOffset.width, shadowOffset.height), spread, spread);
+            NSBezierPath *compound = [NSBezierPath bezierPathWithRect:NSInsetRect(rect, -MAX(rect.size.width, rect.size.height) * 2, -MAX(rect.size.width, rect.size.height) * 2)];
+            [compound appendBezierPath:NativeSdkPacketRoundedRectPath(holeRect, effect[@"radius"])];
+            compound.windingRule = NSEvenOddWindingRule;
+            [shadow set];
+            [[color colorWithAlphaComponent:0.01] setFill];
+            [compound fill];
+            [NSGraphicsContext restoreGraphicsState];
+            return YES;
+        }
         [shadow set];
         [[color colorWithAlphaComponent:0.01] setFill];
         [path fill];
@@ -2792,7 +2817,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
 }
 
 /* ---------------------------------------------------------------------------
- * Compact binary gpu-surface packet decoding (wire format v4).
+ * Compact binary gpu-surface packet decoding (wire format v5).
  *
  * Little-endian, length-prefixed, mirror of the engine's binary packet
  * encoder (serialization.zig, `writeCanvasGpuPacketBinary` and the patch
@@ -2807,7 +2832,8 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
  * keyed upserts + the full draw-order vector) against the view's retained
  * command dictionary; v3 added the flag-gated dirty rect list after the
  * scissor; v4 added the per-command stroke end-cap code after
- * stroke_width. The version this comment names and the encoder's spec
+ * stroke_width; v5 added optional text shadows and the shadow-effect inset
+ * flag. The version this comment names and the encoder's spec
  * comment must agree with `binary_packet_version` (serialization.zig);
  * the `test-wire-format-version-prose` build check pins all three.
  */
@@ -3043,6 +3069,15 @@ static NSDictionary *NativeSdkBinaryReadText(NativeSdkBinaryPacketReader *reader
         @"color" : color,
         @"text" : text,
     }];
+    uint8_t hasShadow = NativeSdkBinaryReadU8(reader);
+    if (reader->failed) return nil;
+    if (hasShadow) {
+        NSArray *shadowOffset = NativeSdkBinaryReadF32Array(reader, 2);
+        NSNumber *shadowBlur = NativeSdkBinaryReadF32Number(reader);
+        NSArray *shadowColor = NativeSdkBinaryReadF32Array(reader, 4);
+        if (reader->failed || !shadowOffset || !shadowColor) return nil;
+        result[@"shadow"] = @{ @"offset" : shadowOffset, @"blur" : shadowBlur, @"color" : shadowColor };
+    }
     uint8_t hasLayout = NativeSdkBinaryReadU8(reader);
     if (reader->failed) return nil;
     if (!hasLayout) return result;
@@ -3092,8 +3127,9 @@ static NSDictionary *NativeSdkBinaryReadEffect(NativeSdkBinaryPacketReader *read
         NSNumber *blur = NativeSdkBinaryReadF32Number(reader);
         NSNumber *spread = NativeSdkBinaryReadF32Number(reader);
         NSArray *color = NativeSdkBinaryReadF32Array(reader, 4);
+        NSNumber *inset = @(NativeSdkBinaryReadU8(reader) != 0);
         if (reader->failed || !rect || !radius || !offset || !color) return nil;
-        return @{ @"kind" : @"shadow", @"rect" : rect, @"radius" : radius, @"offset" : offset, @"blur" : blur, @"spread" : spread, @"color" : color };
+        return @{ @"kind" : @"shadow", @"rect" : rect, @"radius" : radius, @"offset" : offset, @"blur" : blur, @"spread" : spread, @"color" : color, @"inset" : inset };
     }
     case 2: {
         NSArray *rect = NativeSdkBinaryReadF32Array(reader, 4);
@@ -3195,7 +3231,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (memcmp(bytes, "NSGP", 4) != 0) return nil;
     reader.offset = 4;
     uint8_t version = NativeSdkBinaryReadU8(&reader);
-    if (version != 4) return nil;
+    if (version != 5) return nil;
     uint8_t loadActionCode = NativeSdkBinaryReadU8(&reader);
     uint8_t packetFlags = NativeSdkBinaryReadU8(&reader);
     (void)NativeSdkBinaryReadU8(&reader); /* reserved */

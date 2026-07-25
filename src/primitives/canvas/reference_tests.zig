@@ -1218,6 +1218,82 @@ test "reference renderer draws soft shadows" {
     try expectPixelRgba8(.{ 0, 0, 0, 64 }, surface, 3, 2);
 }
 
+test "reference renderer clips inset shadows to the rounded source rect" {
+    const commands = [_]CanvasCommand{.{ .shadow = .{
+        .id = 1,
+        .rect = geometry.RectF.init(1, 1, 6, 6),
+        .blur = 2,
+        .color = Color.rgba8(20, 40, 60, 200),
+        .inset = true,
+    } }};
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{ .surface_size = geometry.SizeF.init(8, 8) }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+    var pixels: [8 * 8 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(8, 8, &pixels);
+    try surface.renderPass(frame.renderPass(), Color.rgba8(0, 0, 0, 0));
+    try expectPixelRgba8(.{ 0, 0, 0, 0 }, surface, 0, 3);
+    try std.testing.expect(surface.pixels[(3 * 8 + 1) * 4 + 3] > 0);
+    try expectPixelRgba8(.{ 0, 0, 0, 0 }, surface, 4, 4);
+}
+
+test "reference renderer paints text shadow before foreground glyphs" {
+    const commands = [_]CanvasCommand{.{ .draw_text = .{
+        .id = 1,
+        .font_id = 9999,
+        .size = 4,
+        .origin = geometry.PointF.init(1, 5),
+        .color = Color.rgb8(0, 0, 0),
+        .text = "X",
+        .text_shadow = .{ .offset = .{ .dx = 3, .dy = 0 }, .color = Color.rgb8(255, 0, 0) },
+    } }};
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [4]GlyphAtlasEntry = undefined;
+    var glyph_cache_entries: [4]GlyphAtlasCacheEntry = undefined;
+    var glyph_cache_actions: [4]GlyphAtlasCacheAction = undefined;
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{ .surface_size = geometry.SizeF.init(10, 7) }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .glyph_atlas_cache_entries = &glyph_cache_entries,
+        .glyph_atlas_cache_actions = &glyph_cache_actions,
+        .changes = &changes,
+    });
+    var pixels: [10 * 7 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(10, 7, &pixels);
+    try surface.renderPass(frame.renderPass(), Color.rgba8(255, 255, 255, 255));
+    var saw_red_shadow = false;
+    var saw_dark_glyph = false;
+    var offset: usize = 0;
+    while (offset < pixels.len) : (offset += 4) {
+        saw_red_shadow = saw_red_shadow or (@as(u16, pixels[offset]) > @as(u16, pixels[offset + 1]) + 40);
+        saw_dark_glyph = saw_dark_glyph or (pixels[offset] < 240 and pixels[offset] == pixels[offset + 1] and pixels[offset + 1] == pixels[offset + 2]);
+    }
+    try std.testing.expect(saw_red_shadow);
+    try std.testing.expect(saw_dark_glyph);
+}
+
 test "reference renderer blurs with caller scratch storage" {
     const commands = [_]CanvasCommand{
         .{ .fill_rect = .{

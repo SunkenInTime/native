@@ -20,6 +20,7 @@ const widget_render_scroll = @import("widget_render_scroll.zig");
 const widget_render_surfaces = @import("widget_render_surfaces.zig");
 const widget_render_controls = @import("widget_render_controls.zig");
 const icon_model = @import("icons.zig");
+const svg_icon_model = @import("svg_icon.zig");
 const chart_model = @import("chart.zig");
 
 const Error = canvas.Error;
@@ -640,6 +641,16 @@ fn emitImmediateCanvas(builder: *Builder, widget: Widget) Error!void {
     for (widget.immediate_commands, 0..) |command, index| {
         const id = immediateCanvasCommandId(widget.id, index + 1);
         switch (command) {
+            .box_shadow => |value| try builder.shadow(.{
+                .id = id,
+                .rect = widget.frame,
+                .offset = value.offset,
+                .blur = value.blur,
+                .spread = value.spread,
+                .color = value.color,
+                .inset = value.inset,
+            }),
+            .text_shadow, .text_font, .icon_path => continue,
             .fill_rect => |value| try builder.fillRect(.{
                 .id = id,
                 .rect = value.rect.translate(.{ .dx = widget.frame.x, .dy = widget.frame.y }),
@@ -1015,6 +1026,7 @@ fn emitTextWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
             .overflow = widget.text_overflow,
             .measure = tokens.text_measure,
         },
+        .text_shadow = widget_render_style.widgetTextShadow(widget),
     });
     if (clip_overflow) try builder.popClip();
 }
@@ -1116,6 +1128,7 @@ fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
                 .alignment = .start,
                 .measure = tokens.text_measure,
             },
+            .text_shadow = widget_render_style.widgetTextShadow(widget),
         });
 
         const thickness = @max(1, tokens.stroke.hairline);
@@ -1173,6 +1186,30 @@ fn textSpanCommandId(seed: u64, widget_id: ObjectId, ordinal: usize) ObjectId {
 }
 
 fn emitIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (widget.iconPath()) |path| {
+        const style: svg_icon_model.IconStyle = if (path.stroke_width > 0)
+            .{
+                .fill = .none,
+                .stroke = .current_color,
+                .stroke_width = path.stroke_width,
+                .linecap = .round,
+                .linejoin = .round,
+            }
+        else
+            .{ .fill = .current_color };
+        const shapes = [_]svg_icon_model.IconShape{.{
+            .style = style,
+            .start = 0,
+            .len = path.elements.len,
+        }};
+        const icon = svg_icon_model.Icon{
+            .view_box = path.view_box,
+            .elements = path.elements,
+            .shapes = &shapes,
+        };
+        const color = widgetForegroundColor(widget, tokens, tokens.colors.text);
+        return widget_render_controls.emitVectorIcon(builder, widget.id, 1, widget.frame, color, &icon);
+    }
     // A vector icon name — built-in or app-registered
     // (`icons.registerAppIcons`) — draws crisp parsed paths: `widget.icon`
     // first (the explicit channel), then an icon-name `text`; any other

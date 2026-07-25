@@ -15,6 +15,7 @@ pub const GlyphAtlasCachePlanner = text_atlas.GlyphAtlasCachePlanner;
 pub const fallbackGlyphId = text_atlas.fallbackGlyphId;
 
 pub const DrawText = text_layout.DrawText;
+pub const TextShadow = text_layout.TextShadow;
 pub const TextWrap = text_layout.TextWrap;
 pub const TextOverflow = text_layout.TextOverflow;
 pub const TextAlign = text_layout.TextAlign;

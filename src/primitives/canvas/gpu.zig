@@ -19,6 +19,7 @@ const ImageFit = drawing_model.ImageFit;
 const ImageSampling = drawing_model.ImageSampling;
 const Glyph = text_model.Glyph;
 const TextLayoutOptions = text_model.TextLayoutOptions;
+const TextShadow = text_model.TextShadow;
 const GlyphAtlasCacheAction = text_model.GlyphAtlasCacheAction;
 const TextLayoutCacheAction = text_model.TextLayoutCacheAction;
 const RenderPipelineKind = render_model.RenderPipelineKind;
@@ -171,6 +172,7 @@ pub const CanvasGpuText = struct {
     text: []const u8 = "",
     glyphs: []const Glyph = &.{},
     text_layout: ?TextLayoutOptions = null,
+    text_shadow: ?TextShadow = null,
 };
 
 pub const CanvasGpuShadow = struct {
@@ -180,6 +182,7 @@ pub const CanvasGpuShadow = struct {
     blur: f32 = 0,
     spread: f32 = 0,
     color: Color = .{},
+    inset: bool = false,
 };
 
 pub const CanvasGpuBlur = struct {
@@ -575,6 +578,7 @@ pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: 
                 .text = value.text,
                 .glyphs = value.glyphs,
                 .text_layout = value.text_layout,
+                .text_shadow = value.text_shadow,
             };
             packet_command.uses_resource = true;
             packet_command.uses_glyph_atlas = true;
@@ -590,6 +594,7 @@ pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: 
                 .blur = value.blur,
                 .spread = value.spread,
                 .color = value.color,
+                .inset = value.inset,
             } };
             packet_command.uses_resource = true;
             packet_command.uses_visual_effect = true;

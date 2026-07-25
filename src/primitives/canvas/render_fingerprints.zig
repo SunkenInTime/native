@@ -106,6 +106,13 @@ pub fn drawTextFingerprint(text: DrawText) u64 {
         hash = resourceHashUsize(hash, glyph.text_len);
     }
     hash = resourceHashOptionalTextLayoutOptions(hash, text.text_layout);
+    if (text.text_shadow) |shadow| {
+        hash = resourceHashU8(hash, 1);
+        hash = resourceHashF32(hash, shadow.offset.dx);
+        hash = resourceHashF32(hash, shadow.offset.dy);
+        hash = resourceHashF32(hash, shadow.blur);
+        hash = resourceHashColor(hash, shadow.color);
+    } else hash = resourceHashU8(hash, 0);
     return hash;
 }
 
@@ -122,6 +129,7 @@ pub fn shadowFingerprint(shadow: Shadow) u64 {
     hash = resourceHashF32(hash, shadow.blur);
     hash = resourceHashF32(hash, shadow.spread);
     hash = resourceHashColor(hash, shadow.color);
+    hash = resourceHashU8(hash, @intFromBool(shadow.inset));
     return hash;
 }
 
