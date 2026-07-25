@@ -1,0 +1,1 @@
+feature: **Per-corner retained surfaces**: widget styles can override every corner independently while fills, strokes, shadows, and stateful control chrome share the exact same radius geometry. Unset corner overrides use an in-band sentinel so the common retained-node style pays four floats instead of four optional-float payload/tag pairs.

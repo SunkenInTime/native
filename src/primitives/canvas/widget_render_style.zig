@@ -179,13 +179,25 @@ pub fn widgetAccentForegroundColor(widget: Widget, tokens: DesignTokens, fallbac
 }
 
 pub fn widgetRadius(widget: Widget, fallback: f32) Radius {
-    if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
-    return Radius.all(nonNegative(widgetSizedRadiusValue(widget, fallback)));
+    return styleRadius(widget, Radius.all(nonNegative(widget.style.radius orelse widgetSizedRadiusValue(widget, fallback))));
 }
 
 pub fn controlRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32) Radius {
-    if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
-    return Radius.all(nonNegative(widgetSizedRadiusValue(widget, visual.radius orelse fallback)));
+    return styleRadius(widget, Radius.all(nonNegative(widget.style.radius orelse widgetSizedRadiusValue(widget, visual.radius orelse fallback))));
+}
+
+pub fn styleRadius(widget: Widget, base: Radius) Radius {
+    return .{
+        .top_left = cornerRadius(widget.style.radius_top_left, base.top_left),
+        .top_right = cornerRadius(widget.style.radius_top_right, base.top_right),
+        .bottom_right = cornerRadius(widget.style.radius_bottom_right, base.bottom_right),
+        .bottom_left = cornerRadius(widget.style.radius_bottom_left, base.bottom_left),
+    };
+}
+
+fn cornerRadius(authored: f32, fallback: f32) f32 {
+    if (authored == widget_model.unset_widget_corner_radius) return nonNegative(fallback);
+    return nonNegative(authored);
 }
 
 /// Button corners: 10 (the lg radius token) at the default and lg
@@ -194,12 +206,11 @@ pub fn controlRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32)
 /// never the full size-stepped scale of `controlRadius` (a lg button
 /// with a 12px corner starts reading as a card).
 pub fn buttonControlRadius(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Radius {
-    if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
     const fallback = switch (widget.size) {
         .sm => tokens.radius.md,
         .default, .icon, .heading, .display, .lg => tokens.radius.lg,
     };
-    return Radius.all(nonNegative(visual.radius orelse fallback));
+    return styleRadius(widget, Radius.all(nonNegative(widget.style.radius orelse visual.radius orelse fallback)));
 }
 
 pub fn widgetSizedRadiusValue(widget: Widget, fallback: f32) f32 {

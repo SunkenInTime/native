@@ -36,14 +36,11 @@ const Md = markdown.Markdown(Msg);
 const Ui = Md.Ui;
 
 /// Arena growth bound for a build: parsing must stay LINEAR in the
-/// source. The constant is honest about the mapper's real shape — every
-/// container block eagerly allocates a `max_markdown_blocks_per_container`
-/// node buffer (64 nodes x a multi-KiB `Ui.Node`), and one table costs a
-/// 64-row buffer (~315 KiB measured), so container-dense documents run
-/// ~180x their source bytes (measured: 100-deep nesting 15 KiB -> 2.7 MiB).
-/// 256x + a one-table floor keeps the assert green for every legitimate
-/// shape while a quadratic join (megabytes-per-source-KiB) still blows
-/// through it by orders of magnitude.
+/// source. Node buffers are capped and pre-sized from safe source-line upper
+/// bounds.
+/// Deeply nested/container-dense documents still carry both builder nodes
+/// and finalized widgets, so 256x plus a one-table floor leaves honest linear
+/// headroom while a quadratic join still exceeds it by orders of magnitude.
 fn arenaBound(source_len: usize) usize {
     return source_len * 256 + 512 * 1024;
 }
