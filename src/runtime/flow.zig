@@ -309,7 +309,17 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     if (WindowViewMethods().findWindowIndexById(self, window_id)) |index| WindowViewMethods().setFocusedIndex(self, index);
                     self.invalidated = true;
                 },
-                .frame_requested => try frame(self, app),
+                // Same contract as the interactive-surface family below:
+                // a capacity or render fault while planning/presenting a
+                // retained frame lands in the dispatch-error ring instead
+                // of latching the platform callback and exiting the app.
+                // This was the one surface event still propagating — a
+                // display-list overflow on a frame tick crash-looped the
+                // process while the identical fault on a rebuild degraded.
+                .frame_requested => frame(self, app) catch |err| {
+                    recordDispatchError(self, "frame_requested", err);
+                    if (self.dispatch_error_policy == .propagate) return err;
+                },
                 .bridge_message => |message| try handleBridgeMessage(self, app, message),
                 .tray_action => |item_id| {
                     log(self, "tray.action", "tray item selected", &.{trace.uint("item_id", item_id)});
