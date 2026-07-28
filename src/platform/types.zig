@@ -250,7 +250,7 @@ pub const max_gpu_surface_packet_json_bytes: usize = 128 * 1024;
 /// 512 KiB leaves headroom for gradients, paths, and format growth. The
 /// buffer is a single static per UiApp instance, so the cost is fixed
 /// address space, not per-frame allocation.
-pub const max_gpu_surface_packet_binary_bytes: usize = if (native_sdk_options.widget_profile) 64 * 1024 else 512 * 1024;
+pub const max_gpu_surface_packet_binary_bytes: usize = 512 * 1024;
 /// Bound for the fallback-detail command-kind name recorded when a
 /// packet present falls back because a command is not representable
 /// (fits every `CanvasCommand` tag name).

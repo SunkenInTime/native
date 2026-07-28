@@ -309,7 +309,17 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     if (WindowViewMethods().findWindowIndexById(self, window_id)) |index| WindowViewMethods().setFocusedIndex(self, index);
                     self.invalidated = true;
                 },
-                .frame_requested => try frame(self, app),
+                // Same contract as the interactive-surface family below:
+                // a capacity or render fault while planning/presenting a
+                // retained frame lands in the dispatch-error ring instead
+                // of latching the platform callback and exiting the app.
+                // This was the one surface event still propagating — a
+                // display-list overflow on a frame tick crash-looped the
+                // process while the identical fault on a rebuild degraded.
+                .frame_requested => frame(self, app) catch |err| {
+                    recordDispatchError(self, "frame_requested", err);
+                    if (self.dispatch_error_policy == .propagate) return err;
+                },
                 .bridge_message => |message| try handleBridgeMessage(self, app, message),
                 .tray_action => |item_id| {
                     log(self, "tray.action", "tray item selected", &.{trace.uint("item_id", item_id)});
@@ -1138,7 +1148,8 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         /// A handler/update error must degrade, never terminate the
         /// app: record it in the bounded ring (queryable through
         /// `Runtime.dispatchErrors` and the automation snapshot), trace
-        /// it at `.err`, and republish observable state.
+        /// it at `.err`, write its name through the host-visible log
+        /// channel, and republish observable state.
         fn recordDispatchError(self: *Runtime, event_name: []const u8, err: anyerror) void {
             recordDispatchErrorDetail(self, event_name, err, "");
         }
@@ -1162,6 +1173,12 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 self.dispatch_errors[self.dispatch_error_len] = record;
                 self.dispatch_error_len += 1;
             }
+            // The platform callback deliberately does not fail in the
+            // production degrade path, so its outer failure logger never
+            // runs. Keep the actual error name visible to supervisors and
+            // per-widget logs while the app continues with its last good
+            // frame.
+            std.log.warn("dispatch error: {s} (event {s})", .{ @errorName(err), event_name });
             logAt(self, .err, "dispatch.error", @errorName(err), &.{trace.string("event", event_name)});
             self.invalidateFor(.state, null);
         }

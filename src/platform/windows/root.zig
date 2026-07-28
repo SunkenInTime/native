@@ -415,7 +415,14 @@ const RunState = struct {
     fn emit(self: *RunState, event: platform_mod.Event) void {
         const handler = self.handler orelse return;
         const context = self.handler_context orelse return;
-        handler(context, event) catch {
+        handler(context, event) catch |err| {
+            // The app is about to terminate through `CallbackFailed`;
+            // name the error that latched the failure so the exit is
+            // attributable instead of a bare CallbackFailed. std.log so
+            // hosts that install a logFn (the widget runtime routes it
+            // to the per-widget log file) keep the name.
+            std.log.err("platform callback failed: {s} (event {s})", .{ @errorName(err), @tagName(event) });
+            if (@errorReturnTrace()) |error_trace| std.debug.dumpErrorReturnTrace(error_trace);
             self.failed = true;
             if (self.self) |windows| native_sdk_windows_stop(windows.host);
         };

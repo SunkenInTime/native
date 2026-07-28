@@ -1,6 +1,5 @@
 const std = @import("std");
 const geometry = @import("geometry");
-const native_sdk_options = @import("native_sdk_options");
 const platform = @import("../platform/root.zig");
 const protocol = @import("protocol.zig");
 
@@ -10,7 +9,7 @@ pub const max_views: usize = platform.max_windows + platform.max_views + platfor
 // cannot import the runtime); a lockstep test in
 // canvas_widget_layout_tests.zig fails if they drift, so snapshots never
 // silently truncate widget enumeration below the node budget.
-pub const max_widgets_per_view: usize = if (native_sdk_options.widget_profile) 128 else 1024;
+pub const max_widgets_per_view: usize = 1024;
 pub const max_widgets: usize = platform.max_views * max_widgets_per_view;
 
 pub const Window = struct {
