@@ -4,6 +4,16 @@ const native_sdk_options = @import("native_sdk_options");
 // time constants sized for a dense desktop view, overflow errors name the
 // budget, and the automation snapshot reports headroom (widget_nodes=N/MAX).
 //
+// The widget profile shares these per-view budgets. Its memory savings come
+// from the platform shape (1 window / 1 view / 1 webview vs 32 view slots),
+// not from starving per-view capacity: a starved widget tier turned the
+// budgets into a design constraint (a 24-panel row overflowed the old
+// 128-command widget cap and took the process down), while the per-view cost
+// of the stock budgets at one view slot is a few MiB of fixed address space
+// with pages touched only as the view uses its capacity. Per-ITEM byte
+// bounds (registered image/font sizes, font slots) stay profile-split below
+// because those bound resident memory directly.
+//
 // Raised after measuring a real three-pane desktop app (sidebar tree +
 // markdown detail pane + run surface): it spent more design effort
 // budgeting nodes than building UI at the old 256-node cap. The
@@ -16,7 +26,7 @@ const native_sdk_options = @import("native_sdk_options");
 // in the Runtime (in-place constructed, large fields left uninitialized),
 // measured at 61.3 MiB -> 119.3 MiB (RuntimeView 1.12 MiB -> 2.65 MiB x 32
 // view slots); pages are only touched as views use their capacity.
-pub const max_canvas_commands_per_view: usize = if (native_sdk_options.widget_profile) 128 else 2048;
+pub const max_canvas_commands_per_view: usize = 2048;
 pub const max_canvas_gradient_stops_per_view: usize = 64;
 // Raised 128 -> 2048 with icon-in-button and the 41-icon registry: vector
 // icons are path commands, and a curated stroke icon lowers to ~10-25
@@ -31,8 +41,8 @@ pub const max_canvas_gradient_stops_per_view: usize = 64;
 // scratch), x 32 view slots ~ 3.6 MiB total, pages touched only as views
 // draw paths.
 pub const max_canvas_path_elements_per_view: usize = 2048;
-pub const max_canvas_glyphs_per_view: usize = if (native_sdk_options.widget_profile) 512 else 8192;
-pub const max_canvas_text_bytes_per_view: usize = if (native_sdk_options.widget_profile) 4096 else 32768;
+pub const max_canvas_glyphs_per_view: usize = 8192;
+pub const max_canvas_text_bytes_per_view: usize = 32768;
 // Retained packet commands per gpu-surface view: the host-side command
 // dictionary that incremental (`patch`) presents edit, and the engine's
 // per-view key+fingerprint mirror that derives those patches. Derived
@@ -94,7 +104,7 @@ pub const max_canvas_text_layouts_per_view: usize = max_canvas_commands_per_view
 // real view. TextLine is 56 B: 56 B x 8192 = 448 KiB of threadlocal
 // scratch (was 28 KiB at the old shared 512 cap). Overflow stays a loud
 // `TextLayoutLineListFull` with a teaching diagnostic naming this budget.
-pub const max_canvas_text_layout_lines_per_view: usize = if (native_sdk_options.widget_profile) 512 else 8192;
+pub const max_canvas_text_layout_lines_per_view: usize = 8192;
 
 // Runtime-registered canvas images: decoded RGBA pixel buffers apps
 // register under a caller-chosen ImageId and reference from image/icon/
@@ -133,19 +143,19 @@ pub const max_registered_canvas_font_bytes: usize = if (native_sdk_options.widge
 // mirrors the node cap so snapshots never silently truncate widget
 // enumeration; a test in canvas_widget_layout_tests.zig keeps them in
 // lockstep.
-pub const max_canvas_widget_nodes_per_view: usize = if (native_sdk_options.widget_profile) 128 else 1024;
-pub const max_canvas_widget_semantics_per_view: usize = if (native_sdk_options.widget_profile) 128 else 1024;
+pub const max_canvas_widget_nodes_per_view: usize = 1024;
+pub const max_canvas_widget_semantics_per_view: usize = 1024;
 // Raised from 2048 with the inline-span/markdown work: a rendered document
 // retains its full plain text (paragraph bytes are stored once; span slices
 // rebase into them) plus link payloads, and 2048 bytes could not hold a
 // README-sized document. Raised again with the node-budget raise:
 // a 1024-node view retains proportionally more text.
-pub const max_canvas_widget_text_bytes_per_view: usize = if (native_sdk_options.widget_profile) 8192 else 65536;
-pub const max_canvas_widget_source_text_entries_per_view: usize = if (native_sdk_options.widget_profile) 64 else 256;
+pub const max_canvas_widget_text_bytes_per_view: usize = 65536;
+pub const max_canvas_widget_source_text_entries_per_view: usize = 256;
 // Inline styled runs retained across all `.text` widgets of a view. Each
 // span is a small struct (style flags + slices into the widget text
 // bytes); per-paragraph capacity is `canvas.max_text_spans_per_paragraph`.
-pub const max_canvas_widget_spans_per_view: usize = if (native_sdk_options.widget_profile) 128 else 1024;
+pub const max_canvas_widget_spans_per_view: usize = 1024;
 // Declared native context-menu entries retained across all widgets of a
 // view (labels live in the widget text bytes). Raised because the budget
 // sums across every widget of the view, and a real desktop view hit 128
@@ -163,7 +173,7 @@ pub const max_canvas_widget_spans_per_view: usize = if (native_sdk_options.widge
 // pointer, truncated at presentation) — that stays small deliberately
 // because a menu nobody can scan is a design bug, while this budget
 // bounds the retained declarations across all widgets of the view.
-pub const max_canvas_widget_context_menu_items_per_view: usize = if (native_sdk_options.widget_profile) 64 else 512;
+pub const max_canvas_widget_context_menu_items_per_view: usize = 512;
 // Window-drag region mirror per view (the Windows WM_NCHITTEST seam):
 // drag-region rects plus the press-claiming exclusions inside them. A
 // hidden-titlebar app has ONE header band and a handful of controls in
@@ -189,8 +199,8 @@ pub const max_canvas_widget_window_drag_regions_per_view: usize = 32;
 // chart. Overflow is loud (`WidgetChartSeriesLimitReached` /
 // `WidgetChartPointsLimitReached`), same contract as every widget budget;
 // series labels ride the existing widget-text budget.
-pub const max_canvas_widget_chart_series_per_view: usize = if (native_sdk_options.widget_profile) 8 else 64;
-pub const max_canvas_widget_chart_points_per_view: usize = if (native_sdk_options.widget_profile) 1024 else 16384;
+pub const max_canvas_widget_chart_series_per_view: usize = 64;
+pub const max_canvas_widget_chart_points_per_view: usize = 16384;
 // Chart x-axis category labels retained across all `.chart` widgets of
 // a view: one entry per labeled sample (a slice header; the bytes ride
 // the widget-text budget like series labels). `Ui.chart` drops labels
@@ -199,7 +209,7 @@ pub const max_canvas_widget_chart_points_per_view: usize = if (native_sdk_option
 // labeled charts fill the pool, a dashboard of month-scale charts (12
 // labels) fits dozens. Entries are 16 B x 512 = 8 KiB per view.
 // Overflow is loud (`WidgetChartLabelsLimitReached`).
-pub const max_canvas_widget_chart_x_labels_per_view: usize = if (native_sdk_options.widget_profile) 64 else 512;
+pub const max_canvas_widget_chart_x_labels_per_view: usize = 512;
 pub const max_canvas_widget_invalidations_per_view: usize = max_canvas_widget_nodes_per_view * 2 + 1;
 // Scroll containers whose offset changed since the last app dispatch:
 // entries are node ids, deduped, and the dispatched event reads the

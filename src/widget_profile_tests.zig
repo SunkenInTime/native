@@ -8,9 +8,12 @@ test "widget profile selects the bounded platform and runtime capacities" {
     try std.testing.expectEqual(@as(usize, 1), native_sdk.platform.max_windows);
     try std.testing.expectEqual(@as(usize, 1), native_sdk.platform.max_views);
     try std.testing.expectEqual(@as(usize, 1), native_sdk.platform.max_webviews);
-    try std.testing.expectEqual(@as(usize, 128), native_sdk.runtime.max_canvas_commands_per_view);
+    // The widget profile bounds the platform shape (one window/view/webview);
+    // per-view budgets stay at the stock, measured capacities so widget UI
+    // never budgets commands or nodes differently from desktop UI.
+    try std.testing.expectEqual(@as(usize, 2048), native_sdk.runtime.max_canvas_commands_per_view);
     try std.testing.expectEqual(@as(usize, 2048), native_sdk.runtime.max_canvas_path_elements_per_view);
-    try std.testing.expectEqual(@as(usize, 128), native_sdk.runtime.max_canvas_widget_nodes_per_view);
+    try std.testing.expectEqual(@as(usize, 1024), native_sdk.runtime.max_canvas_widget_nodes_per_view);
     try std.testing.expectEqual(native_sdk.runtime.max_canvas_path_elements_per_view, native_sdk.canvas.max_chart_path_elements_per_frame);
 }
 
