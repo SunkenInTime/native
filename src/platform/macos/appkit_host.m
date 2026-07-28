@@ -7143,6 +7143,12 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
     NSView *container = [[NSView alloc] initWithFrame:rect];
     container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    // Give AppKit an initialized clear backing layer before either the
+    // WebView or Metal surface is attached. Without this, the first
+    // compositor transaction can briefly expose undefined backing-store
+    // pixels (seen as an indigo rectangle on transparent widget windows).
+    container.wantsLayer = YES;
+    container.layer.backgroundColor = NSColor.clearColor.CGColor;
     window.contentView = container;
     // The window's MAIN WebView is created lazily
     // (`ensureMainWebViewForWindowId:`): a canvas-first app never loads
