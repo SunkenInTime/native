@@ -755,8 +755,12 @@ const RunState = struct {
             // The app is about to terminate through `CallbackFailed`;
             // name the error that latched the failure (and, in builds
             // that carry one, its return trace) so the exit is
-            // attributable instead of a bare CallbackFailed.
-            std.debug.print("platform callback failed: {s} (event {s})\n", .{ @errorName(err), @tagName(event) });
+            // attributable instead of a bare CallbackFailed. std.log
+            // rather than std.debug.print so hosts that install a logFn
+            // (the widget runtime routes it to the per-widget log file)
+            // keep the name; stderr-only made this line unrecoverable
+            // under a supervisor that discards stderr.
+            std.log.err("platform callback failed: {s} (event {s})", .{ @errorName(err), @tagName(event) });
             if (@errorReturnTrace()) |error_trace| std.debug.dumpErrorReturnTrace(error_trace);
             self.failed = true;
             if (self.self) |mac| native_sdk_appkit_stop(mac.host);
