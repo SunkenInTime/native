@@ -393,7 +393,7 @@ pub const LinuxPlatform = struct {
         };
         native_sdk_gtk_set_bridge_callback(self.host, gtkBridgeCallback, &self.state);
         native_sdk_gtk_run(self.host, gtkCallback, &self.state);
-        if (self.state.failed) return error.CallbackFailed;
+        if (self.state.failure) |err| return err;
     }
 
     fn windowById(self: *const LinuxPlatform, window_id: platform_mod.WindowId) platform_mod.WindowOptions {
@@ -410,7 +410,7 @@ const RunState = struct {
     self: ?*LinuxPlatform = null,
     handler: ?platform_mod.EventHandler = null,
     handler_context: ?*anyopaque = null,
-    failed: bool = false,
+    failure: ?anyerror = null,
 
     fn emit(self: *RunState, event: platform_mod.Event) void {
         const handler = self.handler orelse return;
@@ -423,8 +423,14 @@ const RunState = struct {
             // to the per-widget log file) keep the name.
             std.log.err("platform callback failed: {s} (event {s})", .{ @errorName(err), @tagName(event) });
             if (@errorReturnTrace()) |error_trace| std.debug.dumpErrorReturnTrace(error_trace);
-            self.failed = true;
-            if (self.self) |linux| native_sdk_gtk_stop(linux.host);
+            self.failure = err;
+            if (self.self) |linux| {
+                var index: usize = 0;
+                while (index < linux.app_info.startupWindowCount()) : (index += 1) {
+                    _ = native_sdk_gtk_close_window(linux.host, linux.app_info.resolvedStartupWindow(index).id);
+                }
+                native_sdk_gtk_stop(linux.host);
+            }
         };
     }
 };
