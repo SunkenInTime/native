@@ -15,6 +15,8 @@
 #import <CoreText/CoreText.h>
 #import <ImageIO/ImageIO.h>
 #import <dispatch/dispatch.h>
+#import <mach/mach.h>
+#import <mach/task_info.h>
 #import <Security/Security.h>
 #include <dlfcn.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -4944,7 +4946,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             (unsigned long)firstX, (unsigned long)firstY);
 }
 
-/* Visual spot-check dump: the composited texture readback as PNG. */
+/* Visual spot-check dump: the composited texture readback as PNG plus a
+ * machine-readable receipt for the retained textures that produced it.
+ * Both artifacts stay behind NATIVE_SDK_GPU_SHOT_DIR; production pays
+ * neither the readback nor the cache walk. */
 - (void)dumpCompositeShotWithPixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight {
     const char *dir = NativeSdkGpuShotDir();
     if (!dir || !self.canvasTexture || !self.canvasColorSpace) return;
@@ -4968,6 +4973,51 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         CFRelease(destination);
     }
     CGImageRelease(image);
+
+    NSUInteger sourceImageTextureBytes = 0;
+    for (id<MTLTexture> texture in self.host.canvasImageTextureStore.allValues) {
+        sourceImageTextureBytes += texture.width * texture.height * 4;
+    }
+    task_vm_info_data_t taskInfo = {0};
+    mach_msg_type_number_t taskInfoCount = TASK_VM_INFO_COUNT;
+    const kern_return_t taskInfoResult = task_info(
+        mach_task_self(),
+        TASK_VM_INFO,
+        (task_info_t)&taskInfo,
+        &taskInfoCount);
+    NSMutableDictionary *receipt = [@{
+        @"schema": @1,
+        @"surface": label,
+        @"present": @(self.canvasCompositePresentCount),
+        @"pixelWidth": @(pixelWidth),
+        @"pixelHeight": @(pixelHeight),
+        @"rasterCacheEntries": @(self.canvasCommandRasterCache.count),
+        @"rasterCacheBytes": @(self.canvasCommandRasterCacheBytes),
+        @"scratchTextureEntries": @(self.canvasCompositeScratchTextures.count),
+        @"scratchTextureBytes": @(self.canvasCompositeScratchTextureBytes),
+        @"sourceImageTextureEntries": @(self.host.canvasImageTextureStore.count),
+        @"sourceImageTextureBytes": @(sourceImageTextureBytes),
+        @"drawnCommands": @(self.canvasTraceDrawnCount),
+        @"cacheHits": @(self.canvasTraceCacheHitCount),
+        @"cacheFills": @(self.canvasTraceCacheFillCount),
+        @"directCommands": @(self.canvasTraceDirectCount),
+        @"taskVmInfoResult": @(taskInfoResult),
+    } mutableCopy];
+    if (taskInfoResult == KERN_SUCCESS) {
+        receipt[@"taskPhysFootprintBytes"] = @(taskInfo.phys_footprint);
+        receipt[@"taskPhysFootprintPeakBytes"] = @(taskInfo.ledger_phys_footprint_peak);
+        receipt[@"taskResidentBytes"] = @(taskInfo.resident_size);
+        receipt[@"taskInternalBytes"] = @(taskInfo.internal);
+        receipt[@"taskExternalBytes"] = @(taskInfo.external);
+        receipt[@"taskCompressedBytes"] = @(taskInfo.compressed);
+        receipt[@"taskGraphicsFootprintBytes"] = @(taskInfo.ledger_tag_graphics_footprint);
+        receipt[@"taskGraphicsNoFootprintBytes"] = @(taskInfo.ledger_tag_graphics_nofootprint);
+    }
+    NSData *receiptData = [NSJSONSerialization dataWithJSONObject:receipt options:NSJSONWritingPrettyPrinted error:nil];
+    if (receiptData) {
+        NSString *receiptPath = [NSString stringWithFormat:@"%s/%@-p%lu.json", dir, label, (unsigned long)self.canvasCompositePresentCount];
+        [receiptData writeToURL:[NSURL fileURLWithPath:receiptPath] options:NSDataWritingAtomic error:nil];
+    }
 }
 
 - (void)rasterCacheWipe {
