@@ -8,6 +8,7 @@ const event_model = @import("events.zig");
 const equality_model = @import("equality.zig");
 const widget_tree = @import("widget_tree.zig");
 const widget_access = @import("widget_access.zig");
+const widget_limits = @import("widget_limits.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -31,7 +32,7 @@ const affinesEqual = equality_model.affinesEqual;
 const widgetIndexById = widget_tree.widgetIndexById;
 const isWidgetHiddenInAncestors = widget_tree.isWidgetHiddenInAncestors;
 
-const max_widget_depth: usize = 32;
+const max_widget_depth = widget_limits.max_widget_depth;
 
 pub fn hitTestWidgetLayout(layout: anytype, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
     // Anchored floating surfaces paint in the late z-pass — topmost — so
