@@ -914,9 +914,15 @@ static const mach_msg_timeout_t NativeSdkSharedRendererReplyTimeoutMs = 5000;
     hello.version = kWeaverRendererMachVersion;
     hello.struct_size = sizeof(hello);
     hello.widget_pid = (uint32_t)getpid();
-    kr = mach_msg(&hello.header, MACH_SEND_MSG, sizeof(hello), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    /* Send timeout too: a host that is alive but not draining its queue
+     * must trip the same 5 s tripwire as a silent one — without it the
+     * blocking send freezes the widget main thread before the reply
+     * timeout ever starts. A timed-out send pseudo-receives the message
+     * back; destroy it so its rights are disposed. */
+    kr = mach_msg(&hello.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(hello), 0, MACH_PORT_NULL, NativeSdkSharedRendererReplyTimeoutMs, MACH_PORT_NULL);
     mach_port_deallocate(mach_task_self(), service);
     if (kr != KERN_SUCCESS) {
+        mach_msg_destroy(&hello.header);
         mach_port_mod_refs(mach_task_self(), replyPort, MACH_PORT_RIGHT_RECEIVE, -1);
         return NO;
     }
@@ -978,9 +984,13 @@ static const mach_msg_timeout_t NativeSdkSharedRendererReplyTimeoutMs = 5000;
     frame.command_count = (uint32_t)commandCount;
     frame.unsupported_command_count = 0;
     frame.representable = 1;
-    kern_return_t kr = mach_msg(&frame.header, MACH_SEND_MSG, sizeof(frame), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    /* Same send tripwire as the hello: a wedged-but-alive host must not
+     * freeze the widget; the timed-out message pseudo-receives back and
+     * is destroyed with its rights. */
+    kern_return_t kr = mach_msg(&frame.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(frame), 0, MACH_PORT_NULL, NativeSdkSharedRendererReplyTimeoutMs, MACH_PORT_NULL);
     if (kr != KERN_SUCCESS) {
-        fprintf(stderr, "weaver-shared-renderer: frame send failed kr=0x%x — host gone, will reconnect\n", kr);
+        fprintf(stderr, "weaver-shared-renderer: frame send failed kr=0x%x — host gone or wedged, will reconnect\n", kr);
+        mach_msg_destroy(&frame.header);
         [self disconnect];
         return 0;
     }
