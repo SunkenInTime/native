@@ -919,6 +919,15 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
 @property(nonatomic, assign) mach_port_t sessionPort;
 @property(nonatomic, assign) mach_port_t replyPort;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, id> *surfacesById;
+/* Replay source for host crashes: the runtime's image cache rightly
+ * believes an unchanged image is already registered (it emits `retain`,
+ * not `upload`), so a REPLACEMENT host would never receive the pixels.
+ * The connection therefore keeps each registered image's bytes and
+ * replays them after every reconnect — the mach analog of the Windows
+ * client re-supplying retained content to a replacement renderer.
+ * Bounded by the SDK's image registry (16 ids; 256 KiB each in the
+ * widget profile — <= 4 MiB worst case, CPU-side). */
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSDictionary *> *registeredImagesById;
 @property(nonatomic, assign) uint32_t surfacePixelWidth;
 @property(nonatomic, assign) uint32_t surfacePixelHeight;
 @property(nonatomic, assign) BOOL loggedWaitingForHost;
@@ -933,6 +942,7 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
     dispatch_once(&once, ^{
         connection = [[NativeSdkSharedRendererConnection alloc] init];
         connection.surfacesById = [NSMutableDictionary dictionary];
+        connection.registeredImagesById = [NSMutableDictionary dictionary];
     });
     return connection;
 }
@@ -1004,6 +1014,22 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
     self.replyPort = replyPort;
     self.loggedWaitingForHost = NO;
     fprintf(stderr, "weaver-shared-renderer: connected to render host\n");
+    /* A fresh host starts with an empty per-client image store, but the
+     * runtime's cache still (correctly) retains unchanged ids — replay
+     * every registered image so the first post-reconnect frame's retain
+     * actions resolve. */
+    for (NSNumber *imageIdNumber in [self.registeredImagesById.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        NSDictionary *entry = self.registeredImagesById[imageIdNumber];
+        NSData *pixels = entry[@"pixels"];
+        if (![self sendImageWithId:imageIdNumber.unsignedLongLongValue
+                             width:[entry[@"width"] unsignedIntegerValue]
+                            height:[entry[@"height"] unsignedIntegerValue]
+                             rgba8:(const uint8_t *)pixels.bytes
+                        byteLength:pixels.length]) {
+            fprintf(stderr, "weaver-shared-renderer: image replay failed for id=%llu\n", imageIdNumber.unsignedLongLongValue);
+            return NO;
+        }
+    }
     return YES;
 }
 
@@ -1107,7 +1133,26 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
  * in-process side channel. One reply per request, same tripwires as
  * frames. */
 - (BOOL)uploadImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
+    /* Record the replay copy FIRST: even if the host is down right now,
+     * the eventual reconnect replays it (ensureConnected refuses this
+     * call, the runtime keeps its pixel fallback, and recovery follows
+     * the usual retry cadence). */
+    if (rgba8 && byteLength > 0) {
+        self.registeredImagesById[@(imageId)] = @{
+            @"width" : @(width),
+            @"height" : @(height),
+            @"pixels" : [NSData dataWithBytes:rgba8 length:byteLength],
+        };
+    } else {
+        [self.registeredImagesById removeObjectForKey:@(imageId)];
+    }
     if (![self ensureConnected]) return NO;
+    return [self sendImageWithId:imageId width:width height:height rgba8:rgba8 byteLength:byteLength];
+}
+
+/* The wire round trip alone — used by uploads and by the reconnect
+ * replay (which must not run ensureConnected re-entrantly). */
+- (BOOL)sendImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
     WeaverRendererMachImageUpload upload = {0};
     upload.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
     upload.header.msgh_remote_port = self.sessionPort;
@@ -3153,6 +3198,20 @@ static BOOL NativeSdkPacketApplyImageActions(NSArray *actions, NSArray *images, 
     for (id actionObject in actions ?: @[]) {
         NSDictionary *action = NativeSdkPacketDictionary(actionObject);
         NSString *kind = [action[@"kind"] isKindOfClass:[NSString class]] ? action[@"kind"] : @"";
+        if ([kind isEqualToString:@"retain"]) {
+            /* A retained image the view cache no longer holds is
+             * recoverable when the store still has the pixels: a fresh
+             * renderer (the render host after a crash, with the client's
+             * registered images replayed into the store) sees `retain`
+             * for content it has never installed. Installing from the
+             * store keeps the draw instead of silently skipping it. */
+            NSDictionary *key = NativeSdkPacketDictionary(action[@"key"]);
+            NSString *cacheKey = NativeSdkPacketImageCacheKey(key[@"imageId"]);
+            if (cacheKey && !imageCache[cacheKey] && imageStore[cacheKey]) {
+                imageCache[cacheKey] = imageStore[cacheKey];
+            }
+            continue;
+        }
         if (![kind isEqualToString:@"upload"]) continue;
         NSInteger imageIndex = [action[@"imageIndex"] respondsToSelector:@selector(integerValue)] ? [action[@"imageIndex"] integerValue] : -1;
         if (imageIndex < 0 || (NSUInteger)imageIndex >= images.count) return NO;

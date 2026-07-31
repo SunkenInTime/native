@@ -619,6 +619,11 @@ pub fn build(b: *std.Build) void {
         // An image arriving before the first frame constructs the
         // renderer; the export completion binds lazily so that order works.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!client.renderer.headlessExportCompletion) {" },
+        // A replacement host gets every registered image replayed on
+        // reconnect, and a retain action installs from the store when the
+        // fresh view cache lacks the entry — art survives host crashes.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "registeredImagesById" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (cacheKey && !imageCache[cacheKey] && imageStore[cacheKey]) {" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-shared-renderer-client", "Verify the device-less widget client keeps the shared-renderer contract", &.{
         // No Metal object is ever created in client mode; availability is
