@@ -12087,6 +12087,22 @@ void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_
 }
 @end
 
+/* Drain a message too large for the caller's fixed buffer: re-receive it
+ * into a right-sized allocation and destroy it whole. Without this, an
+ * oversized message from a same-user peer stays queued forever and the
+ * dispatch source spins on it — a poison pill wedging the port. */
+static void NativeSdkRenderHostDrainOversized(mach_port_t port, mach_msg_size_t neededSize) {
+    const mach_msg_size_t allocSize = neededSize + (mach_msg_size_t)sizeof(mach_msg_trailer_t) + 64;
+    mach_msg_header_t *buffer = calloc(1, allocSize);
+    if (!buffer) return;
+    const kern_return_t kr = mach_msg(buffer, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, allocSize, port, 0, MACH_PORT_NULL);
+    if (kr == KERN_SUCCESS) {
+        fprintf(stderr, "weaver-render-host: destroyed oversized message (%u bytes)\n", neededSize);
+        mach_msg_destroy(buffer);
+    }
+    free(buffer);
+}
+
 static void NativeSdkRenderHostSendFrameReply(mach_port_t replyPort, int32_t status, IOSurfaceRef surface, uint32_t pixelWidth, uint32_t pixelHeight) {
     if (replyPort == MACH_PORT_NULL) return;
     WeaverRendererMachFrameReply reply = {0};
@@ -12149,9 +12165,15 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
     }
     if (!client.renderer) {
         client.renderer = [[NativeSdkMetalSurfaceView alloc] initHeadlessRendererWithFrame:NSMakeRect(0, 0, frame->surface_width, frame->surface_height)];
-        NativeSdkRenderHostClient *weakClientCapture = client; /* client outlives renderer; cycle broken at teardown */
+        /* Deliberately a STRONG capture: an export in flight must be able
+         * to answer (or destroy) its reply right even if the client
+         * disconnects mid-frame, so the completion keeps the client
+         * object alive until it has run. The renderer->completion->client
+         * ->renderer cycle is broken at teardown, which nils
+         * headlessExportCompletion. */
+        NativeSdkRenderHostClient *capturedClient = client;
         client.renderer.headlessExportCompletion = ^(BOOL completed, IOSurfaceRef surface, NSUInteger pixelWidth, NSUInteger pixelHeight) {
-            NativeSdkRenderHostClient *strongClient = weakClientCapture;
+            NativeSdkRenderHostClient *strongClient = capturedClient;
             const mach_port_t pending = strongClient.pendingReplyPort;
             strongClient.pendingReplyPort = MACH_PORT_NULL;
             if (completed && surface) {
@@ -12223,6 +12245,10 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
         @autoreleasepool {
             struct { WeaverRendererMachHello hello; mach_msg_trailer_t trailer; } message = {0};
             kern_return_t rcv = mach_msg(&message.hello.header, MACH_RCV_MSG, 0, sizeof(message), servicePort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+            if (rcv == MACH_RCV_TOO_LARGE) {
+                NativeSdkRenderHostDrainOversized(servicePort, message.hello.header.msgh_size);
+                return;
+            }
             if (rcv != KERN_SUCCESS) return;
             if ((message.hello.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0 ||
                 message.hello.header.msgh_id != kWeaverRendererMachMsgHello) {
@@ -12273,6 +12299,10 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
                     if (!strongClient) return;
                     struct { WeaverRendererMachFrame frame; mach_msg_trailer_t trailer; } frameMessage = {0};
                     kern_return_t frameRcv = mach_msg(&frameMessage.frame.header, MACH_RCV_MSG, 0, sizeof(frameMessage), strongClient.sessionPort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+                    if (frameRcv == MACH_RCV_TOO_LARGE) {
+                        NativeSdkRenderHostDrainOversized(strongClient.sessionPort, frameMessage.frame.header.msgh_size);
+                        return;
+                    }
                     if (frameRcv != KERN_SUCCESS) return;
                     if (frameMessage.frame.header.msgh_id == MACH_NOTIFY_NO_SENDERS) {
                         fprintf(stderr, "weaver-render-host: client pid=%d disconnected\n", strongClient.widgetPid);
