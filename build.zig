@@ -592,6 +592,31 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSAccessibilityProgressIndicatorRole" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "view.accessibilityRole = NativeSdkAccessibilityRoleForNativeViewKind(kind)" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-render-host", "Verify the macOS render host keeps the shared-renderer contract", &.{
+        // Versioned handshake separate from frame framing, same policy as
+        // the Windows renderer_protocol.h contract.
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "kWeaverRendererMachMagic = 0x314d5257" },
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "kWeaverRendererMachMaxPacket = 8 * 1024 * 1024" },
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "weaverRendererMachHelloValid" },
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "weaverRendererMachFrameValid" },
+        // The host claims a dynamic per-user bootstrap name (measured
+        // receipt in the weaver repo's macos-memory-handoff doc).
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "bootstrap_check_in(bootstrap_port, name, &servicePort)" },
+        // Client death is a no-senders notification; teardown releases the
+        // renderer and the session receive right.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "MACH_NOTIFY_NO_SENDERS" },
+        // Out-of-line packet memory is deallocated on every path — the
+        // refusal path included.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "vm_deallocate(mach_task_self(), (vm_address_t)packetBytes, packetSize)" },
+        // Per-frame pool in the host's hot loop (the Phase 1 spike's
+        // measured 180 KB/min lesson).
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "and an undrained loop was the Phase 1 spike's" },
+        // The reply is the completion signal: it is sent from the export
+        // completion, after the GPU finished the surface; the synchronous
+        // in-flight flag is what tells the host a completion is coming.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (client.renderer.headlessExportInFlight) return;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "self.headlessExportInFlight = YES;" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-iosurface-presenter", "Verify the IOSurface presentation path keeps drawable-path semantics", &.{
         // The flag and the plain content layer (no CAMetalLayer in this mode).
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NATIVE_SDK_GPU_IOSURFACE_PRESENT" },
