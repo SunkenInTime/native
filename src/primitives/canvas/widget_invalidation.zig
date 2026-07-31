@@ -14,6 +14,7 @@ const widget_render_surfaces = @import("widget_render_surfaces.zig");
 const widget_render_controls = @import("widget_render_controls.zig");
 const textSpansEqual = @import("text_spans.zig").textSpansEqual;
 const chartDataEqual = @import("chart.zig").chartDataEqual;
+const widget_limits = @import("widget_limits.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -59,7 +60,7 @@ const textInputControlVisualTokens = widget_render.textInputControlVisualTokens;
 const selectionControlVisualTokens = widget_render.selectionControlVisualTokens;
 const listItemControlVisualTokens = widget_render.listItemControlVisualTokens;
 
-const max_widget_depth: usize = 32;
+const max_widget_depth = widget_limits.max_widget_depth;
 
 fn widgetWithFrame(widget: Widget, frame: geometry.RectF) Widget {
     var copy = widget;

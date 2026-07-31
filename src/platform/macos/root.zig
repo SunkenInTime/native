@@ -729,7 +729,7 @@ pub const MacPlatform = struct {
         native_sdk_appkit_set_bridge_callback(self.host, appkitBridgeCallback, &self.state);
         native_sdk_appkit_set_tray_callback(self.host, appkitTrayCallback, &self.state);
         native_sdk_appkit_run(self.host, appkitCallback, &self.state);
-        if (self.state.failed) return error.CallbackFailed;
+        if (self.state.failure) |err| return err;
     }
 
     fn windowById(self: *const MacPlatform, window_id: platform_mod.WindowId) platform_mod.WindowOptions {
@@ -746,7 +746,7 @@ const RunState = struct {
     self: ?*MacPlatform = null,
     handler: ?platform_mod.EventHandler = null,
     handler_context: ?*anyopaque = null,
-    failed: bool = false,
+    failure: ?anyerror = null,
 
     fn emit(self: *RunState, event: platform_mod.Event) void {
         const handler = self.handler orelse return;
@@ -762,8 +762,14 @@ const RunState = struct {
             // under a supervisor that discards stderr.
             std.log.err("platform callback failed: {s} (event {s})", .{ @errorName(err), @tagName(event) });
             if (@errorReturnTrace()) |error_trace| std.debug.dumpErrorReturnTrace(error_trace);
-            self.failed = true;
-            if (self.self) |mac| native_sdk_appkit_stop(mac.host);
+            self.failure = err;
+            if (self.self) |mac| {
+                var index: usize = 0;
+                while (index < mac.app_info.startupWindowCount()) : (index += 1) {
+                    _ = native_sdk_appkit_close_window(mac.host, mac.app_info.resolvedStartupWindow(index).id);
+                }
+                native_sdk_appkit_stop(mac.host);
+            }
         };
     }
 };

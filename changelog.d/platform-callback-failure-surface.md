@@ -1,0 +1,1 @@
+fix: **Platform callback failures keep their cause**: platform runners now return the original callback error, log its event name, and close affected windows before exiting so a dead process cannot leave a stale GPU surface visible.

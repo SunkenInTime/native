@@ -257,8 +257,11 @@ pub const max_gpu_surface_packet_binary_bytes: usize = 512 * 1024;
 pub const max_gpu_present_fallback_detail_bytes: usize = 32;
 /// Per-image bound for the binary gpu-surface image upload side-channel;
 /// matches the runtime registry's per-slot bound
-/// (`canvas_limits.max_registered_canvas_image_pixel_bytes`).
-pub const max_gpu_surface_image_pixel_bytes: usize = if (native_sdk_options.widget_profile) 256 * 1024 else 1024 * 1024;
+/// (`canvas_limits.max_registered_canvas_image_pixel_bytes` = 1 MiB). The
+/// runtime receipt is the shipped 256x256 album art plus 4x byte headroom;
+/// the upload buffer is undefined fixed address space and touches pages only
+/// for the uploaded payload.
+pub const max_gpu_surface_image_pixel_bytes: usize = 1024 * 1024;
 /// Per-font bound for the gpu-surface font registration side-channel;
 /// matches the runtime registry's per-slot bound
 /// (`canvas_limits.max_registered_canvas_font_bytes`).

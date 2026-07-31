@@ -111,11 +111,14 @@ pub const max_canvas_text_layout_lines_per_view: usize = 8192;
 // avatar widgets. Slots are runtime-wide (all views share the registry;
 // the frame planner threads it into every view's `image_resources`), and
 // the runtime owns the pixel copies — the app's source buffer is free the
-// moment registration returns. The per-image ceiling is avatar/icon
-// scale (512x512 RGBA8), not photo scale; oversized registrations and
-// decodes fail loudly with `error.ImageTooLarge`.
+// moment registration returns. The per-image ceiling is album-art scale
+// (512x512 RGBA8), not photo scale. Weaver's shipped noro/retro covers both
+// measure 256x256 = 256 KiB decoded and sat exactly on the old widget-profile
+// cap; 1 MiB leaves 4x byte headroom. Each of 16 slots reserves 1 MiB (16 MiB
+// total address space), with pages touched only as an image is registered.
+// Oversized registrations and decodes fail loudly with `error.ImageTooLarge`.
 pub const max_registered_canvas_images: usize = 16;
-pub const max_registered_canvas_image_pixel_bytes: usize = if (native_sdk_options.widget_profile) 256 * 1024 else 1024 * 1024;
+pub const max_registered_canvas_image_pixel_bytes: usize = 1024 * 1024;
 
 // Runtime-registered font faces: TrueType bytes apps register under a
 // caller-chosen FontId (>= canvas.min_registered_font_id) so their own
