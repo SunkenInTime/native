@@ -6,6 +6,7 @@ const widget_model = @import("widgets.zig");
 const event_model = @import("events.zig");
 const widget_access = @import("widget_access.zig");
 const widget_tree = @import("widget_tree.zig");
+const widget_limits = @import("widget_limits.zig");
 
 const Error = canvas.Error;
 const Widget = widget_model.Widget;
@@ -20,7 +21,7 @@ const VirtualListRange = token_model.VirtualListRange;
 const virtualListRange = token_model.virtualListRange;
 const semanticActions = event_model.semanticActions;
 
-const max_widget_depth: usize = 32;
+const max_widget_depth = widget_limits.max_widget_depth;
 
 pub fn collectWidgetSemantics(layout: anytype, output: []WidgetSemanticsNode, scroll_semantics_fn: anytype) Error![]const WidgetSemanticsNode {
     var len: usize = 0;

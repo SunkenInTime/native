@@ -22,6 +22,7 @@ const widget_render_controls = @import("widget_render_controls.zig");
 const icon_model = @import("icons.zig");
 const svg_icon_model = @import("svg_icon.zig");
 const chart_model = @import("chart.zig");
+const widget_limits = @import("widget_limits.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -112,7 +113,7 @@ pub const radioWidgetCircleRect = widget_render_controls.radioWidgetCircleRect;
 pub const toggleWidgetTrackRect = widget_render_controls.toggleWidgetTrackRect;
 pub const sliderWidgetKnobRect = widget_render_controls.sliderWidgetKnobRect;
 
-const max_widget_depth: usize = 32;
+const max_widget_depth = widget_limits.max_widget_depth;
 
 // Widget-built path elements (`.chart` lines/bands, the `.spinner` arc
 // and segments, the `.checkbox` check mark — unlike icons, whose

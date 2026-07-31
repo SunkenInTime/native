@@ -11,6 +11,7 @@ const widget_tree = @import("widget_tree.zig");
 const widget_access = @import("widget_access.zig");
 const widget_metrics = @import("widget_metrics.zig");
 const widget_render = @import("widget_render.zig");
+const widget_limits = @import("widget_limits.zig");
 
 const Error = canvas.Error;
 const Widget = widget_model.Widget;
@@ -67,7 +68,7 @@ const controlStrokeWidth = widget_render.controlStrokeWidth;
 const componentControlVisualTokens = widget_render.componentControlVisualTokens;
 const widgetTextSpanLayoutOptions = widget_metrics.widgetTextSpanLayoutOptions;
 
-pub const max_widget_depth: usize = 32;
+pub const max_widget_depth = widget_limits.max_widget_depth;
 
 pub fn layoutWidgetDepth(
     widget: Widget,
