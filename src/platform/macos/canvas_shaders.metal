@@ -34,13 +34,32 @@ struct NativeSdkCompositeUniforms {
     float2 shape_size;
     float4 color;
     float4 corner_radius;
+    float2 clip_origin;
+    float2 clip_size;
+    float4 clip_corner_radius;
+    float stroke_width;
+    float image_scale;
     uint primitive;
-    uint3 pad;
+    uint has_rounded_clip;
 };
 
 struct NativeSdkCompositeVertexOut {
     float4 position [[position]];
 };
+
+float native_sdk_rounded_rect_distance(
+    float2 point,
+    float2 origin,
+    float2 size,
+    float4 corner_radius) {
+    float2 half_extent = size * 0.5;
+    float2 local = point - (origin + half_extent);
+    float radius = local.x < 0.0
+        ? (local.y < 0.0 ? corner_radius.x : corner_radius.w)
+        : (local.y < 0.0 ? corner_radius.y : corner_radius.z);
+    float2 q = abs(local) - half_extent + radius;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+}
 
 vertex NativeSdkCompositeVertexOut native_sdk_composite_vertex(
     uint vertex_id [[vertex_id]],
@@ -55,18 +74,36 @@ vertex NativeSdkCompositeVertexOut native_sdk_composite_vertex(
 fragment float4 native_sdk_composite_fragment(
     NativeSdkCompositeVertexOut in [[stage_in]],
     constant NativeSdkCompositeUniforms &uniforms [[buffer(0)]],
-    texture2d<float, access::read> quad_texture [[texture(0)]]) {
+    texture2d<float> quad_texture [[texture(0)]],
+    sampler quad_sampler [[sampler(0)]]) {
     if (uniforms.primitive == 0u) return uniforms.color;
-    if (uniforms.primitive == 2u) {
-        float2 half_extent = uniforms.shape_size * 0.5;
-        float2 local = in.position.xy - (uniforms.shape_origin + half_extent);
-        float radius = local.x < 0.0
-            ? (local.y < 0.0 ? uniforms.corner_radius.x : uniforms.corner_radius.w)
-            : (local.y < 0.0 ? uniforms.corner_radius.y : uniforms.corner_radius.z);
-        float2 q = abs(local) - half_extent + radius;
-        float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+    if (uniforms.primitive == 2u || uniforms.primitive == 3u) {
+        float distance = native_sdk_rounded_rect_distance(
+            in.position.xy, uniforms.shape_origin, uniforms.shape_size, uniforms.corner_radius);
         float coverage = clamp(0.5 - distance, 0.0, 1.0);
+        if (uniforms.primitive == 3u) {
+            coverage = clamp(0.5 - abs(distance) + uniforms.stroke_width * 0.5, 0.0, 1.0);
+        }
+        if (uniforms.has_rounded_clip != 0u) {
+            float clip_distance = native_sdk_rounded_rect_distance(
+                in.position.xy, uniforms.clip_origin, uniforms.clip_size, uniforms.clip_corner_radius);
+            coverage *= clamp(0.5 - clip_distance, 0.0, 1.0);
+        }
         return uniforms.color * coverage;
+    }
+    if (uniforms.primitive == 4u) {
+        float2 texture_size = float2(quad_texture.get_width(), quad_texture.get_height());
+        float2 uv = (in.position.xy - uniforms.shape_origin) /
+            max(uniforms.image_scale, 0.0001) / texture_size;
+        float4 sampled = quad_texture.sample(quad_sampler, uv);
+        float alpha = sampled.a * uniforms.color.a;
+        float coverage = 1.0;
+        if (uniforms.has_rounded_clip != 0u) {
+            float clip_distance = native_sdk_rounded_rect_distance(
+                in.position.xy, uniforms.clip_origin, uniforms.clip_size, uniforms.clip_corner_radius);
+            coverage = clamp(0.5 - clip_distance, 0.0, 1.0);
+        }
+        return float4(sampled.rgb * alpha, alpha) * coverage;
     }
     int2 pixel = int2(in.position.xy);
     int2 texel = pixel - int2(uniforms.rect_origin) + int2(uniforms.tex_origin);
