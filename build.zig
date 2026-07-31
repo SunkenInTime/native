@@ -600,7 +600,7 @@ pub fn build(b: *std.Build) void {
         // Lazy connect + reconnect-after-crash, the Windows
         // shared_renderer_client semantics.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "will keep retrying" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "host gone, will reconnect" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "host gone or wedged, will reconnect" },
         // A hung host trips the reply tripwire and is treated as crashed;
         // the widget's main thread never blocks indefinitely.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkSharedRendererReplyTimeoutMs = 5000" },
