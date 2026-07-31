@@ -1,4 +1,5 @@
 #import "appkit_host.h"
+#import "renderer_protocol_mach.h"
 
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -747,8 +748,13 @@ static const NSUInteger NativeSdkIOSurfacePresentRingDepth = 3;
             clearColor:(MTLClearColor)clearColor
           sampleBuffer:(id<MTLBuffer>)sampleBuffer
                  layer:(CALayer *)layer
-            completion:(void (^)(BOOL completed))completion {
-    if (pixelWidth == 0 || pixelHeight == 0 || !layer || !completion) return NO;
+            completion:(void (^)(BOOL completed, IOSurfaceRef presentedSurface))completion {
+    /* Two consumers, one ring: the in-process path passes the window's
+     * content layer and the flip happens here; the render host passes a
+     * nil layer and exports the completed surface to its widget instead
+     * (the completion's surface argument, valid for the callback's
+     * duration). */
+    if (pixelWidth == 0 || pixelHeight == 0 || !completion) return NO;
     if (![self ensureRingWithPixelWidth:pixelWidth pixelHeight:pixelHeight]) return NO;
     NativeSdkIOSurfacePresentBuffer *buffer = [self acquireBuffer];
     if (!buffer) return NO;
@@ -803,8 +809,8 @@ static const NSUInteger NativeSdkIOSurfacePresentRingDepth = 3;
                 strongLayer.contents = (__bridge id)presentedSurface;
                 [CATransaction commit];
             }
+            completion(completed, completed ? presentedSurface : NULL);
             CFRelease(presentedSurface);
-            completion(completed);
         });
     }];
     [commandBuffer commit];
@@ -1031,6 +1037,26 @@ static const NSUInteger NativeSdkIOSurfacePresentRingDepth = 3;
 @property(nonatomic, assign) uint64_t scrollDriverEventLastEmitNs;
 @property(nonatomic, assign) BOOL controlClickActive;
 @property(nonatomic, strong) NativeSdkIOSurfacePresenter *iosurfacePresenter;
+/* Headless renderer mode (the render host's per-client renderer): no
+ * window, no layer, no display timer — every present exports through the
+ * IOSurface presenter and hands the completed surface to
+ * headlessExportCompletion instead of touching glass. The view class is
+ * deliberately reused rather than extracting a renderer object: packet
+ * decode, retained-command state, the raster cache, and the composite
+ * pass are one code path for the in-process and shared-renderer worlds,
+ * exactly like the Windows presenter shares its draw core — and the
+ * view's UI machinery is inert without a window (no tracking areas, no
+ * events, no accessibility queries). Measured host cost stays in the
+ * Phase 1 spike's envelope (~1.75 MB per client). */
+@property(nonatomic, assign) BOOL headlessExport;
+/* Set synchronously by the composite seam when an export was committed,
+ * cleared when its completion fires: the host reads it right after the
+ * present ABI returns to know whether a completion (and therefore the
+ * frame reply) is coming, or whether it must reply itself (static fast
+ * path, refusal). The async completion alone cannot carry that fact. */
+@property(nonatomic, assign) BOOL headlessExportInFlight;
+@property(nonatomic, copy) void (^headlessExportCompletion)(BOOL completed, IOSurfaceRef surface, NSUInteger pixelWidth, NSUInteger pixelHeight);
+- (instancetype)initHeadlessRendererWithFrame:(NSRect)frameRect;
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
 - (void)renderFrameThroughIOSurfacePresenter;
 - (void)applySurfaceLayerOpacity;
@@ -3643,6 +3669,29 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 
 @implementation NativeSdkMetalSurfaceView
 
+/* The render host's per-client construction path: identical renderer
+ * state to initWithFrame, minus everything that needs a window — no
+ * content layer, no placeholder display timer (renderFrame is never
+ * called in this mode; the composite seam exports instead). */
+- (instancetype)initHeadlessRendererWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (!self) return nil;
+    _headlessExport = YES;
+    NativeSdkMetalProcessResources *resources = [NativeSdkMetalProcessResources sharedResources];
+    _device = resources.device;
+    if (!_device) return self;
+    _commandQueue = resources.commandQueue;
+    _iosurfacePresenter = [[NativeSdkIOSurfacePresenter alloc] initWithDevice:_device commandQueue:_commandQueue];
+    _canvasImageCache = [NSMutableDictionary dictionary];
+    _windowDragRegions = @[];
+    _windowDragExclusions = @[];
+    self.markedText = @"";
+    self.markedTextRange = NSMakeRange(NSNotFound, 0);
+    self.selectedTextRange = NSMakeRange(0, 0);
+    self.lastScale = 1;
+    return self;
+}
+
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (!self) return nil;
@@ -3745,6 +3794,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 
 - (BOOL)isAvailable {
     if (self.device == nil || self.commandQueue == nil) return NO;
+    if (self.headlessExport) return self.iosurfacePresenter != nil;
     if (NativeSdkIOSurfacePresentEnabled()) return self.iosurfacePresenter != nil && self.layer != nil;
     return self.metalLayer != nil;
 }
@@ -5042,8 +5092,32 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     self.canvasPacketPixelsValid = NO;
     self.hasCanvasTexture = YES;
     self.canvasCompositePresentCount += 1;
-    [self stopDisplayTimer];
-    [self renderFrame];
+    if (self.headlessExport) {
+        /* Render host mode: the frame's destination is an exported
+         * IOSurface, not this process's glass. The export completion is
+         * the frame's completion signal — the host replies to its widget
+         * from it, only after the GPU finished writing the surface. */
+        void (^exportCompletion)(BOOL, IOSurfaceRef, NSUInteger, NSUInteger) = self.headlessExportCompletion;
+        __weak NativeSdkMetalSurfaceView *weakSelf = self;
+        const BOOL exported = exportCompletion != nil && [self.iosurfacePresenter
+            presentTexture:self.canvasTexture
+                  pipeline:self.canvasRenderPipeline
+                   sampler:self.canvasSampler
+                pixelWidth:pixelWidth
+               pixelHeight:pixelHeight
+                clearColor:MTLClearColorMake(0, 0, 0, 0)
+              sampleBuffer:nil
+                     layer:nil
+                completion:^(BOOL completed, IOSurfaceRef surface) {
+            weakSelf.headlessExportInFlight = NO;
+            exportCompletion(completed, surface, pixelWidth, pixelHeight);
+        }];
+        if (!exported) return -1;
+        self.headlessExportInFlight = YES;
+    } else {
+        [self stopDisplayTimer];
+        [self renderFrame];
+    }
     if (NativeSdkGpuDrawTraceEnabled()) {
         const uint64_t tracePresentEndNs = NativeSdkTimestampNanoseconds();
         fprintf(stderr, "native-sdk: gpu draw-trace action=%s mode=gpu scissor=%d rect=%.0fx%.0f rects=%lu draw_us=%llu present_us=%llu drawn=%lu hit=%lu fill=%lu/%lluus direct=%lu/%lluus quads=%lu binds=%lu\n",
@@ -6585,7 +6659,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             clearColor:MTLClearColorMake(red, green, blue, 1.0)
           sampleBuffer:sampleBuffer
                  layer:self.layer
-            completion:^(BOOL completed) {
+            completion:^(BOOL completed, IOSurfaceRef presentedSurface) {
+        (void)presentedSurface; /* the layer flip already happened in the presenter */
         NativeSdkMetalSurfaceView *strongSelf = weakSelf;
         if (!strongSelf) return;
         if (!completed) {
@@ -11975,3 +12050,236 @@ void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_
     object.trayCallback = callback;
     object.trayContext = context;
 }
+
+#include <bootstrap.h>
+#include <servers/bootstrap.h>
+
+/* ===== The macOS render host (shared renderer, host side) =====
+ * One process owns the only Metal device for every widget: it claims the
+ * per-user bootstrap name from renderer_protocol_mach.h, accepts one
+ * session per widget process, decodes each forwarded NSGP packet with the
+ * SAME headless renderer code the in-process path uses, and replies with
+ * the completed frame's IOSurface send right. The widget side (device-
+ * less client) is the next slice; the protocol receipt trail lives in the
+ * weaver repo's docs/macos-memory-handoff.md. Everything here runs on the
+ * main queue: per-client dispatch mach sources serialize naturally, and
+ * Metal work is asynchronous behind the export completion. */
+
+@interface NativeSdkRenderHostClient : NSObject
+@property(nonatomic, assign) pid_t widgetPid;
+@property(nonatomic, assign) mach_port_t sessionPort;
+@property(nonatomic, strong) dispatch_source_t frameSource;
+@property(nonatomic, strong) NativeSdkMetalSurfaceView *renderer;
+/* The reply right for the frame in flight (send-once). One frame per
+ * client is ever outstanding — the widget's scheduler waits for the
+ * reply, which is also its completion signal. */
+@property(nonatomic, assign) mach_port_t pendingReplyPort;
+/* The most recently exported surface, re-sent for static frames
+ * (requiresRender == 0 never reaches the composite pass). */
+@property(nonatomic, assign) IOSurfaceRef lastSurface;
+@property(nonatomic, assign) uint32_t lastPixelWidth;
+@property(nonatomic, assign) uint32_t lastPixelHeight;
+@end
+
+@implementation NativeSdkRenderHostClient
+- (void)dealloc {
+    if (_lastSurface) CFRelease(_lastSurface);
+}
+@end
+
+static void NativeSdkRenderHostSendFrameReply(mach_port_t replyPort, int32_t status, IOSurfaceRef surface, uint32_t pixelWidth, uint32_t pixelHeight) {
+    if (replyPort == MACH_PORT_NULL) return;
+    WeaverRendererMachFrameReply reply = {0};
+    reply.header.msgh_remote_port = replyPort;
+    reply.header.msgh_size = sizeof(reply);
+    reply.magic = kWeaverRendererMachMagic;
+    reply.version = kWeaverRendererMachVersion;
+    reply.status = status;
+    mach_port_t surfacePort = MACH_PORT_NULL;
+    if (status == kWeaverRendererMachStatusOk && surface) {
+        surfacePort = IOSurfaceCreateMachPort(surface);
+    }
+    if (surfacePort != MACH_PORT_NULL) {
+        reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0) | MACH_MSGH_BITS_COMPLEX;
+        reply.body.msgh_descriptor_count = 1;
+        reply.surface_port.name = surfacePort;
+        reply.surface_port.disposition = MACH_MSG_TYPE_MOVE_SEND;
+        reply.surface_port.type = MACH_MSG_PORT_DESCRIPTOR;
+        reply.surface_id = IOSurfaceGetID(surface);
+        reply.pixel_width = pixelWidth;
+        reply.pixel_height = pixelHeight;
+    } else {
+        reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+        reply.body.msgh_descriptor_count = 0;
+        if (status == kWeaverRendererMachStatusOk) {
+            /* Static frame with no surface ever exported: honest zero. */
+            reply.surface_id = 0;
+        }
+    }
+    const kern_return_t kr = mach_msg(&reply.header, MACH_SEND_MSG, reply.header.msgh_size, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS) {
+        /* The client vanished mid-frame; its no-senders notification tears
+         * the session down. The moved rights are destroyed by the kernel
+         * on send failure via the pseudo-receive, but be loud. */
+        fprintf(stderr, "weaver-render-host: frame reply send failed kr=0x%x\n", kr);
+        mach_msg_destroy(&reply.header);
+    }
+}
+
+static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, WeaverRendererMachFrame *frame) {
+    mach_port_t replyPort = frame->header.msgh_remote_port;
+    void *packetBytes = frame->packet.address;
+    const mach_msg_size_t packetSize = frame->packet.size;
+    if (!weaverRendererMachFrameValid(frame)) {
+        fprintf(stderr, "weaver-render-host: invalid frame from pid=%d (len=%u)\n", client.widgetPid, frame->packet_len);
+        if (packetBytes) vm_deallocate(mach_task_self(), (vm_address_t)packetBytes, packetSize);
+        NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusRefused, NULL, 0, 0);
+        return;
+    }
+    if (!client.renderer) {
+        client.renderer = [[NativeSdkMetalSurfaceView alloc] initHeadlessRendererWithFrame:NSMakeRect(0, 0, frame->surface_width, frame->surface_height)];
+        NativeSdkRenderHostClient *weakClientCapture = client; /* client outlives renderer; cycle broken at teardown */
+        client.renderer.headlessExportCompletion = ^(BOOL completed, IOSurfaceRef surface, NSUInteger pixelWidth, NSUInteger pixelHeight) {
+            NativeSdkRenderHostClient *strongClient = weakClientCapture;
+            const mach_port_t pending = strongClient.pendingReplyPort;
+            strongClient.pendingReplyPort = MACH_PORT_NULL;
+            if (completed && surface) {
+                if (strongClient.lastSurface != surface) {
+                    if (strongClient.lastSurface) CFRelease(strongClient.lastSurface);
+                    strongClient.lastSurface = (IOSurfaceRef)CFRetain(surface);
+                }
+                strongClient.lastPixelWidth = (uint32_t)pixelWidth;
+                strongClient.lastPixelHeight = (uint32_t)pixelHeight;
+                NativeSdkRenderHostSendFrameReply(pending, kWeaverRendererMachStatusOk, surface, (uint32_t)pixelWidth, (uint32_t)pixelHeight);
+            } else {
+                NativeSdkRenderHostSendFrameReply(pending, kWeaverRendererMachStatusFailed, NULL, 0, 0);
+            }
+        };
+        fprintf(stderr, "weaver-render-host: client pid=%d renderer %.0fx%.0f@%.2f\n",
+                client.widgetPid, frame->surface_width, frame->surface_height, frame->scale);
+    }
+    client.pendingReplyPort = replyPort;
+    const NSInteger result = [client.renderer
+        presentGpuPacketBinaryWithSurfaceWidth:frame->surface_width
+                                        height:frame->surface_height
+                                         scale:frame->scale
+                                        clearR:frame->clear_r clearG:frame->clear_g clearB:frame->clear_b clearA:frame->clear_a
+                                requiresRender:frame->requires_render != 0
+                                  commandCount:frame->command_count
+                       unsupportedCommandCount:frame->unsupported_command_count
+                                 representable:frame->representable != 0
+                                        packet:(const uint8_t *)packetBytes
+                                    byteLength:frame->packet_len];
+    if (packetBytes) vm_deallocate(mach_task_self(), (vm_address_t)packetBytes, packetSize);
+    if (client.renderer.headlessExportInFlight) return; /* the export completion sends the reply */
+    if (result == 1) {
+        /* Static fast path (requiresRender == 0): nothing recomposited;
+         * re-offer the retained surface so a fresh client still gets
+         * pixels. */
+        client.pendingReplyPort = MACH_PORT_NULL;
+        NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusOk, client.lastSurface, client.lastPixelWidth, client.lastPixelHeight);
+        return;
+    }
+    /* Export is in flight only when the composite returned 1, so any
+     * other result means no completion will fire: reply now. Refusals
+     * (0) tell the client to resync with a full present, exactly like
+     * the in-process path's contract. */
+    client.pendingReplyPort = MACH_PORT_NULL;
+    NativeSdkRenderHostSendFrameReply(replyPort, result == 0 ? kWeaverRendererMachStatusRefused : kWeaverRendererMachStatusFailed, NULL, 0, 0);
+}
+
+int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
+    const char *envName = getenv(WEAVER_RENDER_HOST_NAME_ENV);
+    const char *name = bootstrap_name && bootstrap_name[0] ? bootstrap_name
+        : (envName && envName[0] ? envName : WEAVER_RENDER_HOST_DEFAULT_NAME);
+    mach_port_t servicePort = MACH_PORT_NULL;
+    kern_return_t kr = bootstrap_check_in(bootstrap_port, name, &servicePort);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "weaver-render-host: bootstrap_check_in(%s) failed: %s (0x%x)\n", name, bootstrap_strerror(kr), kr);
+        return 1;
+    }
+    NSApplicationLoad();
+    NSMutableSet<NativeSdkRenderHostClient *> *clients = [NSMutableSet set];
+
+    dispatch_source_t helloSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, servicePort, 0, dispatch_get_main_queue());
+    dispatch_source_set_event_handler(helloSource, ^{
+        @autoreleasepool {
+            struct { WeaverRendererMachHello hello; mach_msg_trailer_t trailer; } message = {0};
+            kern_return_t rcv = mach_msg(&message.hello.header, MACH_RCV_MSG, 0, sizeof(message), servicePort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+            if (rcv != KERN_SUCCESS) return;
+            const mach_port_t replyPort = message.hello.header.msgh_remote_port;
+            WeaverRendererMachHelloReply reply = {0};
+            reply.header.msgh_remote_port = replyPort;
+            reply.header.msgh_size = sizeof(reply);
+            reply.magic = kWeaverRendererMachMagic;
+            reply.version = kWeaverRendererMachVersion;
+            if (!weaverRendererMachHelloValid(&message.hello)) {
+                reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+                reply.status = kWeaverRendererMachStatusVersionMismatch;
+                mach_msg(&reply.header, MACH_SEND_MSG, sizeof(reply), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+                fprintf(stderr, "weaver-render-host: rejected hello (version/shape mismatch)\n");
+                return;
+            }
+
+            NativeSdkRenderHostClient *client = [[NativeSdkRenderHostClient alloc] init];
+            client.widgetPid = (pid_t)message.hello.widget_pid;
+            mach_port_t sessionPort = MACH_PORT_NULL;
+            mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &sessionPort);
+            client.sessionPort = sessionPort;
+            /* Client death = no more send rights on the session port. The
+             * notification arrives on the session port itself, in the same
+             * source as frames. */
+            mach_port_t previous = MACH_PORT_NULL;
+            mach_port_request_notification(mach_task_self(), sessionPort, MACH_NOTIFY_NO_SENDERS, 1, sessionPort, MACH_MSG_TYPE_MAKE_SEND_ONCE, &previous);
+
+            dispatch_source_t frameSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, sessionPort, 0, dispatch_get_main_queue());
+            client.frameSource = frameSource;
+            NativeSdkRenderHostClient *blockClient = client;
+            dispatch_source_set_event_handler(frameSource, ^{
+                @autoreleasepool {
+                    /* Per-frame pool: this handler is the host's hot loop,
+                     * and an undrained loop was the Phase 1 spike's
+                     * measured 180 KB/min leak. */
+                    struct { WeaverRendererMachFrame frame; mach_msg_trailer_t trailer; } frameMessage = {0};
+                    kern_return_t frameRcv = mach_msg(&frameMessage.frame.header, MACH_RCV_MSG, 0, sizeof(frameMessage), blockClient.sessionPort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+                    if (frameRcv != KERN_SUCCESS) return;
+                    if (frameMessage.frame.header.msgh_id == MACH_NOTIFY_NO_SENDERS) {
+                        fprintf(stderr, "weaver-render-host: client pid=%d disconnected\n", blockClient.widgetPid);
+                        dispatch_source_cancel(blockClient.frameSource);
+                        blockClient.renderer.headlessExportCompletion = nil;
+                        blockClient.renderer = nil;
+                        mach_port_mod_refs(mach_task_self(), blockClient.sessionPort, MACH_PORT_RIGHT_RECEIVE, -1);
+                        [clients removeObject:blockClient];
+                        return;
+                    }
+                    if (frameMessage.frame.header.msgh_id != kWeaverRendererMachMsgFrame) {
+                        mach_msg_destroy(&frameMessage.frame.header);
+                        return;
+                    }
+                    NativeSdkRenderHostHandleFrame(blockClient, &frameMessage.frame);
+                }
+            });
+            dispatch_resume(frameSource);
+            [clients addObject:client];
+
+            reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0) | MACH_MSGH_BITS_COMPLEX;
+            reply.body.msgh_descriptor_count = 1;
+            reply.session_port.name = sessionPort;
+            reply.session_port.disposition = MACH_MSG_TYPE_MAKE_SEND;
+            reply.session_port.type = MACH_MSG_PORT_DESCRIPTOR;
+            reply.status = kWeaverRendererMachStatusOk;
+            kern_return_t sent = mach_msg(&reply.header, MACH_SEND_MSG, sizeof(reply), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+            if (sent != KERN_SUCCESS) {
+                fprintf(stderr, "weaver-render-host: hello reply failed kr=0x%x\n", sent);
+                mach_msg_destroy(&reply.header);
+            } else {
+                fprintf(stderr, "weaver-render-host: hello from pid=%d\n", client.widgetPid);
+            }
+        }
+    });
+    dispatch_resume(helloSource);
+    fprintf(stderr, "weaver-render-host: listening name=%s pid=%d\n", name, getpid());
+    CFRunLoopRun();
+    return 0;
+}
+/* ===== end render host ===== */

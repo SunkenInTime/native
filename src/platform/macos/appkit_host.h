@@ -610,6 +610,14 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, const c
 void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host);
 void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_callback_t callback, void *context);
 
+/// Run this process as the shared render host: claim the per-user
+/// bootstrap name (argument, else WEAVER_RENDER_HOST_NAME, else the
+/// default from renderer_protocol_mach.h), own the process Metal device,
+/// render forwarded NSGP packets with the same code the in-process path
+/// uses, and reply with IOSurface send rights. Blocks on the main run
+/// loop; returns nonzero only on startup failure.
+int native_sdk_appkit_render_host_run(const char *bootstrap_name);
+
 #ifdef __cplusplus
 }
 #endif
