@@ -605,8 +605,8 @@ pub fn build(b: *std.Build) void {
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-shared-renderer-images", "Verify registered images cross the renderer channel ahead of their packets", &.{
         // The protocol message and its validator (pixels_len == 0 is a
         // removal; the ceiling mirrors canvas_limits).
-        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "kWeaverRendererMachMsgImageUpload" },
-        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "weaverRendererMachImageUploadValid" },
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "kWeaverRendererMachMsgResourceUpload" },
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "weaverRendererMachResourceUploadValid" },
         .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "kWeaverRendererMachMaxImageBytes = 1024 * 1024" },
         // One storage implementation for both worlds: the app host's
         // stores in-process, the per-client headless stores in the host.
@@ -615,7 +615,7 @@ pub fn build(b: *std.Build) void {
         // The device-less client forwards uploads (and removals) instead
         // of storing locally; the host stores into the client's renderer.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "uploadImageWithId:image_id width:width height:height rgba8:rgba8 byteLength:rgba8_len" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostHandleImageUpload(strongClient, &message.image.upload);" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostHandleResourceUpload(strongClient, &message.resource.upload);" },
         // An image arriving before the first frame constructs the
         // renderer; the export completion binds lazily so that order works.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!client.renderer.headlessExportCompletion) {" },
