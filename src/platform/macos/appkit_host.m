@@ -1021,15 +1021,24 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
     for (NSNumber *imageIdNumber in [self.registeredImagesById.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
         NSDictionary *entry = self.registeredImagesById[imageIdNumber];
         NSData *pixels = entry[@"pixels"];
-        if (![self sendImageWithId:imageIdNumber.unsignedLongLongValue
-                             width:[entry[@"width"] unsignedIntegerValue]
-                            height:[entry[@"height"] unsignedIntegerValue]
-                             rgba8:(const uint8_t *)pixels.bytes
-                        byteLength:pixels.length]) {
+        const NSInteger replayed = [self sendImageWithId:imageIdNumber.unsignedLongLongValue
+                                                   width:[entry[@"width"] unsignedIntegerValue]
+                                                  height:[entry[@"height"] unsignedIntegerValue]
+                                                   rgba8:(const uint8_t *)pixels.bytes
+                                              byteLength:pixels.length];
+        if (replayed == 0) {
+            /* Refused by a live host: the image can never be accepted and
+             * would poison every future replay. Drop it and keep going —
+             * the draws referencing it skip, like in-process. */
+            fprintf(stderr, "weaver-shared-renderer: replay refused for image id=%llu; dropping it\n", imageIdNumber.unsignedLongLongValue);
+            [self.registeredImagesById removeObjectForKey:imageIdNumber];
+            continue;
+        }
+        if (replayed < 0) {
             /* A half-replayed session must not survive: the next attempt
              * reconnects and replays from the top, or the host would
              * render retained draws without their pixels. */
-            fprintf(stderr, "weaver-shared-renderer: image replay failed for id=%llu; reconnecting from scratch\n", imageIdNumber.unsignedLongLongValue);
+            fprintf(stderr, "weaver-shared-renderer: image replay transport failure for id=%llu; reconnecting from scratch\n", imageIdNumber.unsignedLongLongValue);
             [self disconnect];
             return NO;
         }
@@ -1151,12 +1160,23 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
         [self.registeredImagesById removeObjectForKey:@(imageId)];
     }
     if (![self ensureConnected]) return NO;
-    return [self sendImageWithId:imageId width:width height:height rgba8:rgba8 byteLength:byteLength];
+    const NSInteger sent = [self sendImageWithId:imageId width:width height:height rgba8:rgba8 byteLength:byteLength];
+    if (sent == 0) {
+        /* The host refused the image outright (it can never be accepted);
+         * keeping it would poison every reconnect's replay. Drop it — the
+         * draws referencing it skip, exactly like an unregistered image
+         * in-process. */
+        [self.registeredImagesById removeObjectForKey:@(imageId)];
+    }
+    return sent == 1;
 }
 
 /* The wire round trip alone — used by uploads and by the reconnect
- * replay (which must not run ensureConnected re-entrantly). */
-- (BOOL)sendImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
+ * replay (which must not run ensureConnected re-entrantly). Returns 1
+ * accepted, 0 refused by the host (the image can never be accepted —
+ * callers drop it), -1 transport failure (the session is torn down and
+ * the entry stays for the next reconnect's replay). */
+- (NSInteger)sendImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
     WeaverRendererMachImageUpload upload = {0};
     upload.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
     upload.header.msgh_remote_port = self.sessionPort;
@@ -1184,16 +1204,16 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
         fprintf(stderr, "weaver-shared-renderer: image upload send failed kr=0x%x — host gone or wedged, will reconnect\n", kr);
         mach_msg_destroy(&upload.header);
         [self disconnect];
-        return NO;
+        return -1;
     }
     struct { WeaverRendererMachImageUploadReply reply; mach_msg_trailer_t trailer; } uploadReply = {0};
     kr = mach_msg(&uploadReply.reply.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(uploadReply), self.replyPort, NativeSdkSharedRendererReplyTimeoutMs, MACH_PORT_NULL);
     if (kr != KERN_SUCCESS) {
         fprintf(stderr, "weaver-shared-renderer: image upload reply timed out (kr=0x%x) — treating host as crashed\n", kr);
         [self disconnect];
-        return NO;
+        return -1;
     }
-    return uploadReply.reply.status == kWeaverRendererMachStatusOk;
+    return uploadReply.reply.status == kWeaverRendererMachStatusOk ? 1 : 0;
 }
 
 @end
