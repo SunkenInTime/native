@@ -556,6 +556,10 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkFramework("Security", .{});
         app_mod.linkFramework("Metal", .{});
         app_mod.linkFramework("QuartzCore", .{});
+        // IOSurface presentation path (NATIVE_SDK_GPU_IOSURFACE_PRESENT):
+        // the surface view can present through IOSurface-backed layer
+        // contents — the shared-renderer widget contract.
+        app_mod.linkFramework("IOSurface", .{});
         app_mod.linkSystemLibrary("c", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("c++", .{});
     } else if (platform == .linux) {
