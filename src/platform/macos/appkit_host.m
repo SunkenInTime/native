@@ -101,6 +101,10 @@ static BOOL NativeSdkShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventM
 static NSEventModifierFlags NativeSdkMenuModifierFlags(uint32_t modifiers);
 static uint32_t NativeSdkModifierFlagsForEvent(NSEvent *event);
 static uint64_t NativeSdkTimestampNanoseconds(void);
+static NSImage *NativeSdkCreateRGBA8Image(NSUInteger width, NSUInteger height, NSData *pixelData);
+static BOOL NativeSdkCanvasStoreImage(uint64_t imageId, NSUInteger width, NSUInteger height, const uint8_t *rgba8, NSUInteger byteLength, NSMutableDictionary *imageStore, NSMutableDictionary *pixelStore, NSMutableDictionary *textureStore);
+static void NativeSdkCanvasRemoveImage(uint64_t imageId, NSMutableDictionary *imageStore, NSMutableDictionary *pixelStore, NSMutableDictionary *textureStore);
+static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutableDictionary *pixelStore, NSMutableDictionary *textureStore);
 static BOOL NativeSdkRendererBakeoffTraceEnabled(void);
 static uint64_t NativeSdkRetainedFrameIntervalNanoseconds(NSScreen *screen);
 static NSAccessibilityRole NativeSdkAccessibilityRoleForNativeViewKind(NSInteger kind);
@@ -846,6 +850,66 @@ static BOOL NativeSdkSharedRendererClientEnabled(void) {
  * treated as a crash, with the reconnect path taking over. */
 static const mach_msg_timeout_t NativeSdkSharedRendererReplyTimeoutMs = 5000;
 
+/* The one implementation of registered-image storage, shared by the app
+ * host's stores (in-process rendering) and the render host's per-client
+ * headless stores. Copies the caller's bytes: the runtime's slot pool is
+ * reused on register/unregister, while the stored NSImage lives until
+ * the id is removed or replaced. */
+static BOOL NativeSdkCanvasStoreImage(uint64_t imageId, NSUInteger width, NSUInteger height, const uint8_t *rgba8, NSUInteger byteLength, NSMutableDictionary *imageStore, NSMutableDictionary *pixelStore, NSMutableDictionary *textureStore) {
+    if (imageId == 0 || !rgba8 || width == 0 || height == 0) return NO;
+    if (width > NSUIntegerMax / height || width * height > NSUIntegerMax / 4) return NO;
+    if (byteLength != width * height * 4) return NO;
+    if (!imageStore || !pixelStore || !textureStore) return NO;
+    NSData *pixelData = [NSData dataWithBytes:rgba8 length:byteLength];
+    NSImage *image = NativeSdkCreateRGBA8Image(width, height, pixelData);
+    if (!image) return NO;
+    NSString *key = [NSString stringWithFormat:@"%llu", (unsigned long long)imageId];
+    imageStore[key] = image;
+    pixelStore[key] = @{
+        @"width" : @(width),
+        @"height" : @(height),
+        @"pixels" : pixelData,
+    };
+    [textureStore removeObjectForKey:key];
+    if (NativeSdkRendererBakeoffTraceEnabled()) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=image_upload bytes=%lu store_entries=%lu\n",
+                (unsigned long)byteLength,
+                (unsigned long)imageStore.count);
+    }
+    return YES;
+}
+
+static void NativeSdkCanvasRemoveImage(uint64_t imageId, NSMutableDictionary *imageStore, NSMutableDictionary *pixelStore, NSMutableDictionary *textureStore) {
+    if (imageId == 0) return;
+    NSString *key = [NSString stringWithFormat:@"%llu", (unsigned long long)imageId];
+    [imageStore removeObjectForKey:key];
+    [pixelStore removeObjectForKey:key];
+    [textureStore removeObjectForKey:key];
+}
+
+static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutableDictionary *pixelStore, NSMutableDictionary *textureStore) {
+    if (key.length == 0 || !pixelStore || !textureStore) return nil;
+    id<MTLTexture> cached = textureStore[key];
+    if (cached) return cached;
+    NSDictionary *source = pixelStore[key];
+    NSData *pixels = [source[@"pixels"] isKindOfClass:[NSData class]] ? source[@"pixels"] : nil;
+    NSUInteger width = [source[@"width"] unsignedIntegerValue];
+    NSUInteger height = [source[@"height"] unsignedIntegerValue];
+    if (!pixels || width == 0 || height == 0 || width > NSUIntegerMax / height ||
+        width * height > NSUIntegerMax / 4 || pixels.length != width * height * 4) return nil;
+    NativeSdkMetalProcessResources *resources = [NativeSdkMetalProcessResources sharedResources];
+    id<MTLDevice> device = resources.device;
+    if (!device) return nil;
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+    descriptor.usage = MTLTextureUsageShaderRead;
+    descriptor.storageMode = MTLStorageModeShared;
+    id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+    if (!texture) return nil;
+    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.bytes bytesPerRow:width * 4];
+    textureStore[key] = texture;
+    return texture;
+}
+
 /// The widget process's one connection to the render host. Connection is
 /// lazy (widgets launch safely while weaverd is still bringing the host
 /// up) and reconnects after a host crash: any mach failure tears the
@@ -1036,6 +1100,51 @@ static const mach_msg_timeout_t NativeSdkSharedRendererReplyTimeoutMs = 5000;
     mach_port_deallocate(mach_task_self(), frameReply.reply.surface_port.name);
     if (outSurface) *outSurface = (__bridge IOSurfaceRef)surfaceObject;
     return 1;
+}
+
+/* Registered-image upload (or removal, rgba8 == NULL): rides the session
+ * ahead of the packets that reference the image, exactly like the
+ * in-process side channel. One reply per request, same tripwires as
+ * frames. */
+- (BOOL)uploadImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
+    if (![self ensureConnected]) return NO;
+    WeaverRendererMachImageUpload upload = {0};
+    upload.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+    upload.header.msgh_remote_port = self.sessionPort;
+    upload.header.msgh_local_port = self.replyPort;
+    upload.header.msgh_size = sizeof(upload);
+    upload.header.msgh_id = kWeaverRendererMachMsgImageUpload;
+    upload.magic = kWeaverRendererMachMagic;
+    upload.version = kWeaverRendererMachVersion;
+    upload.struct_size = sizeof(upload);
+    upload.image_id = imageId;
+    if (rgba8 && byteLength > 0) {
+        upload.header.msgh_bits |= MACH_MSGH_BITS_COMPLEX;
+        upload.body.msgh_descriptor_count = 1;
+        upload.pixels.address = (void *)rgba8;
+        upload.pixels.size = (mach_msg_size_t)byteLength;
+        upload.pixels.copy = MACH_MSG_VIRTUAL_COPY;
+        upload.pixels.deallocate = FALSE;
+        upload.pixels.type = MACH_MSG_OOL_DESCRIPTOR;
+        upload.pixels_len = (uint32_t)byteLength;
+        upload.width = (uint32_t)width;
+        upload.height = (uint32_t)height;
+    }
+    kern_return_t kr = mach_msg(&upload.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(upload), 0, MACH_PORT_NULL, NativeSdkSharedRendererReplyTimeoutMs, MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "weaver-shared-renderer: image upload send failed kr=0x%x — host gone or wedged, will reconnect\n", kr);
+        mach_msg_destroy(&upload.header);
+        [self disconnect];
+        return NO;
+    }
+    struct { WeaverRendererMachImageUploadReply reply; mach_msg_trailer_t trailer; } uploadReply = {0};
+    kr = mach_msg(&uploadReply.reply.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(uploadReply), self.replyPort, NativeSdkSharedRendererReplyTimeoutMs, MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "weaver-shared-renderer: image upload reply timed out (kr=0x%x) — treating host as crashed\n", kr);
+        [self disconnect];
+        return NO;
+    }
+    return uploadReply.reply.status == kWeaverRendererMachStatusOk;
 }
 
 @end
@@ -1269,6 +1378,12 @@ static const mach_msg_timeout_t NativeSdkSharedRendererReplyTimeoutMs = 5000;
  * view's UI machinery is inert without a window (no tracking areas, no
  * events, no accessibility queries). Measured host cost stays in the
  * Phase 1 spike's envelope (~1.75 MB per client). */
+/* Headless (render host) image stores: the widget's image uploads ride
+ * the renderer channel ahead of the packets that reference them, and
+ * land here — the per-client mirror of NativeSdkAppKitHost's stores. */
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSImage *> *headlessImageStore;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *headlessImagePixelStore;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, id<MTLTexture>> *headlessImageTextureStore;
 @property(nonatomic, assign) BOOL headlessExport;
 /* Set synchronously by the composite seam when an export was committed,
  * cleared when its completion fires: the host reads it right after the
@@ -1278,6 +1393,8 @@ static const mach_msg_timeout_t NativeSdkSharedRendererReplyTimeoutMs = 5000;
 @property(nonatomic, assign) BOOL headlessExportInFlight;
 @property(nonatomic, copy) void (^headlessExportCompletion)(BOOL completed, IOSurfaceRef surface, NSUInteger pixelWidth, NSUInteger pixelHeight);
 - (instancetype)initHeadlessRendererWithFrame:(NSRect)frameRect;
+- (NSMutableDictionary<NSString *, NSImage *> *)activeCanvasImageStore;
+- (id<MTLTexture>)activeTextureForImageKey:(NSString *)key;
 - (NSInteger)sharedRendererPresentPacket:(const uint8_t *)packet byteLength:(NSUInteger)byteLength surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA commandCount:(NSUInteger)commandCount;
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
 - (void)renderFrameThroughIOSurfacePresenter;
@@ -3904,6 +4021,9 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (!_device) return self;
     _commandQueue = resources.commandQueue;
     _iosurfacePresenter = [[NativeSdkIOSurfacePresenter alloc] initWithDevice:_device commandQueue:_commandQueue];
+    _headlessImageStore = [NSMutableDictionary dictionary];
+    _headlessImagePixelStore = [NSMutableDictionary dictionary];
+    _headlessImageTextureStore = [NSMutableDictionary dictionary];
     _canvasImageCache = [NSMutableDictionary dictionary];
     _windowDragRegions = @[];
     _windowDragExclusions = @[];
@@ -4066,6 +4186,19 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     } else if (NativeSdkIOSurfacePresentEnabled() || NativeSdkSharedRendererClientEnabled()) {
         self.layer.opaque = opaque;
     }
+}
+
+/* One truth for where registered images live: the app host's stores
+ * in-process, the per-client headless stores in the render host. */
+- (NSMutableDictionary<NSString *, NSImage *> *)activeCanvasImageStore {
+    return self.headlessExport ? self.headlessImageStore : self.host.canvasImageStore;
+}
+
+- (id<MTLTexture>)activeTextureForImageKey:(NSString *)key {
+    if (self.headlessExport) {
+        return NativeSdkCanvasTextureForImageKey(key, self.headlessImagePixelStore, self.headlessImageTextureStore);
+    }
+    return [self.host gpuSurfaceTextureForImageKey:key];
 }
 
 - (void)viewDidMoveToWindow {
@@ -5096,7 +5229,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                 packetImage[@"src"] == nil && NativeSdkPacketRadiusIsZero(packetImage[@"radius"]) &&
                 (command[@"clip"] == nil || clipArray != nil) && cacheKey && self.canvasImageCache[cacheKey];
             if (directTile) {
-                id<MTLTexture> texture = [self.host gpuSurfaceTextureForImageKey:cacheKey];
+                id<MTLTexture> texture = [self activeTextureForImageKey:cacheKey];
                 NSRect requested = CGRectStandardize(NativeSdkPacketRect(packetImage[@"dst"]));
                 NSRect drawRect = requested;
                 if (clipArray) drawRect = NSIntersectionRect(drawRect, CGRectStandardize(NativeSdkPacketRect(clipArray)));
@@ -6117,7 +6250,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     NSArray *images = NativeSdkPacketArray(packet[@"images"], 0) ?: @[];
     NSArray *imageActions = NativeSdkPacketArray(packet[@"imageActions"], 0) ?: @[];
     if (!self.canvasImageCache) self.canvasImageCache = [NSMutableDictionary dictionary];
-    if (!NativeSdkPacketApplyImageActions(imageActions, images, self.canvasImageCache, self.host.canvasImageStore)) {
+    if (!NativeSdkPacketApplyImageActions(imageActions, images, self.canvasImageCache, [self activeCanvasImageStore])) {
         if (patchLoadAction) self.hasCanvasRetainedState = NO;
         return 0;
     }
@@ -8939,65 +9072,19 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 }
 
 - (BOOL)uploadGpuSurfaceImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
-    if (imageId == 0 || !rgba8 || width == 0 || height == 0) return NO;
-    if (width > NSUIntegerMax / height || width * height > NSUIntegerMax / 4) return NO;
-    if (byteLength != width * height * 4) return NO;
-    // Copy the caller's bytes: the runtime's slot pool is reused on
-    // register/unregister, while the store's NSImage lives until the id
-    // is removed or replaced.
-    NSData *pixelData = [NSData dataWithBytes:rgba8 length:byteLength];
-    NSImage *image = NativeSdkCreateRGBA8Image(width, height, pixelData);
-    if (!image) return NO;
     if (!self.canvasImageStore) self.canvasImageStore = [[NSMutableDictionary alloc] init];
     if (!self.canvasImagePixelStore) self.canvasImagePixelStore = [[NSMutableDictionary alloc] init];
     if (!self.canvasImageTextureStore) self.canvasImageTextureStore = [[NSMutableDictionary alloc] init];
-    NSString *key = [NSString stringWithFormat:@"%llu", (unsigned long long)imageId];
-    self.canvasImageStore[key] = image;
-    self.canvasImagePixelStore[key] = @{
-        @"width" : @(width),
-        @"height" : @(height),
-        @"pixels" : pixelData,
-    };
-    [self.canvasImageTextureStore removeObjectForKey:key];
-    if (NativeSdkRendererBakeoffTraceEnabled()) {
-        fprintf(stderr, "native-sdk: renderer-bakeoff stage=image_upload bytes=%lu store_entries=%lu\n",
-                (unsigned long)byteLength,
-                (unsigned long)self.canvasImageStore.count);
-    }
-    return YES;
+    return NativeSdkCanvasStoreImage(imageId, width, height, rgba8, byteLength, self.canvasImageStore, self.canvasImagePixelStore, self.canvasImageTextureStore);
 }
 
 - (BOOL)removeGpuSurfaceImageWithId:(uint64_t)imageId {
-    if (imageId == 0) return NO;
-    NSString *key = [NSString stringWithFormat:@"%llu", (unsigned long long)imageId];
-    [self.canvasImageStore removeObjectForKey:key];
-    [self.canvasImagePixelStore removeObjectForKey:key];
-    [self.canvasImageTextureStore removeObjectForKey:key];
-    return YES;
+    NativeSdkCanvasRemoveImage(imageId, self.canvasImageStore, self.canvasImagePixelStore, self.canvasImageTextureStore);
+    return imageId != 0;
 }
 
 - (id<MTLTexture>)gpuSurfaceTextureForImageKey:(NSString *)key {
-    if (key.length == 0) return nil;
-    id<MTLTexture> cached = self.canvasImageTextureStore[key];
-    if (cached) return cached;
-    NSDictionary *source = self.canvasImagePixelStore[key];
-    NSData *pixels = [source[@"pixels"] isKindOfClass:[NSData class]] ? source[@"pixels"] : nil;
-    NSUInteger width = [source[@"width"] unsignedIntegerValue];
-    NSUInteger height = [source[@"height"] unsignedIntegerValue];
-    if (!pixels || width == 0 || height == 0 || width > NSUIntegerMax / height ||
-        width * height > NSUIntegerMax / 4 || pixels.length != width * height * 4) return nil;
-    NativeSdkMetalProcessResources *resources = [NativeSdkMetalProcessResources sharedResources];
-    id<MTLDevice> device = resources.device;
-    if (!device) return nil;
-    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
-    descriptor.usage = MTLTextureUsageShaderRead;
-    descriptor.storageMode = MTLStorageModeShared;
-    id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
-    if (!texture) return nil;
-    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.bytes bytesPerRow:width * 4];
-    if (!self.canvasImageTextureStore) self.canvasImageTextureStore = [[NSMutableDictionary alloc] init];
-    self.canvasImageTextureStore[key] = texture;
-    return texture;
+    return NativeSdkCanvasTextureForImageKey(key, self.canvasImagePixelStore, self.canvasImageTextureStore);
 }
 
 - (BOOL)setNativeViewCursorInWindow:(uint64_t)windowId label:(NSString *)label cursor:(NSInteger)cursor {
@@ -11954,11 +12041,20 @@ int native_sdk_appkit_show_context_menu(native_sdk_appkit_host_t *host, uint64_t
 }
 
 int native_sdk_appkit_upload_gpu_surface_image(native_sdk_appkit_host_t *host, uint64_t image_id, size_t width, size_t height, const uint8_t *rgba8, size_t rgba8_len) {
+    if (NativeSdkSharedRendererClientEnabled()) {
+        /* Device-less widget: the pixels belong in the render host's
+         * per-client store, ahead of the packets that reference them.
+         * Nothing is kept locally — the local raster paths never run. */
+        return [[NativeSdkSharedRendererConnection sharedConnection] uploadImageWithId:image_id width:width height:height rgba8:rgba8 byteLength:rgba8_len] ? 1 : 0;
+    }
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     return [object uploadGpuSurfaceImageWithId:image_id width:width height:height rgba8:rgba8 byteLength:rgba8_len] ? 1 : 0;
 }
 
 int native_sdk_appkit_remove_gpu_surface_image(native_sdk_appkit_host_t *host, uint64_t image_id) {
+    if (NativeSdkSharedRendererClientEnabled()) {
+        return [[NativeSdkSharedRendererConnection sharedConnection] uploadImageWithId:image_id width:0 height:0 rgba8:NULL byteLength:0] ? 1 : 0;
+    }
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     return [object removeGpuSurfaceImageWithId:image_id] ? 1 : 0;
 }
@@ -12501,6 +12597,42 @@ static void NativeSdkRenderHostSendFrameReply(mach_port_t replyPort, int32_t sta
     }
 }
 
+/* One registered image, into this client's headless store — ahead of the
+ * packets that will reference it, mirroring the in-process side channel.
+ * A renderer-less client (image before first frame) gets one constructed
+ * on the spot: uploads precede presents by contract. */
+static void NativeSdkRenderHostHandleImageUpload(NativeSdkRenderHostClient *client, WeaverRendererMachImageUpload *upload) {
+    const mach_port_t replyPort = upload->header.msgh_remote_port;
+    void *pixelBytes = upload->body.msgh_descriptor_count == 1 ? upload->pixels.address : NULL;
+    const mach_msg_size_t pixelSize = upload->body.msgh_descriptor_count == 1 ? upload->pixels.size : 0;
+    BOOL stored = NO;
+    if (weaverRendererMachImageUploadValid(upload)) {
+        if (!client.renderer) {
+            client.renderer = [[NativeSdkMetalSurfaceView alloc] initHeadlessRendererWithFrame:NSMakeRect(0, 0, 1, 1)];
+        }
+        if (upload->pixels_len == 0) {
+            NativeSdkCanvasRemoveImage(upload->image_id, client.renderer.headlessImageStore, client.renderer.headlessImagePixelStore, client.renderer.headlessImageTextureStore);
+            stored = YES;
+        } else if (pixelBytes) {
+            stored = NativeSdkCanvasStoreImage(upload->image_id, upload->width, upload->height, (const uint8_t *)pixelBytes, upload->pixels_len,
+                                               client.renderer.headlessImageStore, client.renderer.headlessImagePixelStore, client.renderer.headlessImageTextureStore);
+        }
+    } else {
+        fprintf(stderr, "weaver-render-host: invalid image upload from pid=%d (id=%llu %ux%u len=%u)\n",
+                client.widgetPid, (unsigned long long)upload->image_id, upload->width, upload->height, upload->pixels_len);
+    }
+    if (pixelBytes) vm_deallocate(mach_task_self(), (vm_address_t)pixelBytes, pixelSize);
+    WeaverRendererMachImageUploadReply reply = {0};
+    reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+    reply.header.msgh_remote_port = replyPort;
+    reply.header.msgh_size = sizeof(reply);
+    reply.magic = kWeaverRendererMachMagic;
+    reply.version = kWeaverRendererMachVersion;
+    reply.status = stored ? kWeaverRendererMachStatusOk : kWeaverRendererMachStatusRefused;
+    const kern_return_t kr = mach_msg(&reply.header, MACH_SEND_MSG, sizeof(reply), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS) mach_msg_destroy(&reply.header);
+}
+
 static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, WeaverRendererMachFrame *frame) {
     mach_port_t replyPort = frame->header.msgh_remote_port;
     void *packetBytes = frame->packet.address;
@@ -12530,7 +12662,11 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
     }
     if (!client.renderer) {
         client.renderer = [[NativeSdkMetalSurfaceView alloc] initHeadlessRendererWithFrame:NSMakeRect(0, 0, frame->surface_width, frame->surface_height)];
-        /* Deliberately a STRONG capture: an export in flight must be able
+    }
+    if (!client.renderer.headlessExportCompletion) {
+        /* Bound here rather than at construction: an image upload may
+         * have created the renderer before the first frame arrived.
+         * Deliberately a STRONG capture: an export in flight must be able
          * to answer (or destroy) its reply right even if the client
          * disconnects mid-frame, so the completion keeps the client
          * object alive until it has run. The renderer->completion->client
@@ -12664,14 +12800,18 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
                      * measured 180 KB/min leak. */
                     NativeSdkRenderHostClient *strongClient = weakClient;
                     if (!strongClient) return;
-                    struct { WeaverRendererMachFrame frame; mach_msg_trailer_t trailer; } frameMessage = {0};
-                    kern_return_t frameRcv = mach_msg(&frameMessage.frame.header, MACH_RCV_MSG, 0, sizeof(frameMessage), strongClient.sessionPort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+                    union {
+                        struct { WeaverRendererMachFrame frame; mach_msg_trailer_t trailer; } framed;
+                        struct { WeaverRendererMachImageUpload upload; mach_msg_trailer_t trailer; } image;
+                    } message;
+                    memset(&message, 0, sizeof(message));
+                    kern_return_t frameRcv = mach_msg(&message.framed.frame.header, MACH_RCV_MSG, 0, sizeof(message), strongClient.sessionPort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
                     if (frameRcv == MACH_RCV_TOO_LARGE) {
-                        NativeSdkRenderHostDrainOversized(strongClient.sessionPort, frameMessage.frame.header.msgh_size);
+                        NativeSdkRenderHostDrainOversized(strongClient.sessionPort, message.framed.frame.header.msgh_size);
                         return;
                     }
                     if (frameRcv != KERN_SUCCESS) return;
-                    if (frameMessage.frame.header.msgh_id == MACH_NOTIFY_NO_SENDERS) {
+                    if (message.framed.frame.header.msgh_id == MACH_NOTIFY_NO_SENDERS) {
                         fprintf(stderr, "weaver-render-host: client pid=%d disconnected\n", strongClient.widgetPid);
                         /* An export in flight still answers through its
                          * captured completion (the send fails harmlessly
@@ -12687,21 +12827,25 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
                         [clients removeObject:strongClient];
                         return;
                     }
+                    if (message.framed.frame.header.msgh_id == kWeaverRendererMachMsgImageUpload) {
+                        NativeSdkRenderHostHandleImageUpload(strongClient, &message.image.upload);
+                        return;
+                    }
                     /* Shape before content: a frame must be a complex
                      * message carrying exactly one out-of-line descriptor.
                      * Anything else — extra descriptors, port rights where
                      * bytes belong — is destroyed WHOLE, so every
                      * transferred right is disposed and a malformed peer
                      * cannot exhaust the host's port space. */
-                    if (frameMessage.frame.header.msgh_id != kWeaverRendererMachMsgFrame ||
-                        (frameMessage.frame.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) == 0 ||
-                        frameMessage.frame.body.msgh_descriptor_count != 1 ||
-                        frameMessage.frame.packet.type != MACH_MSG_OOL_DESCRIPTOR) {
+                    if (message.framed.frame.header.msgh_id != kWeaverRendererMachMsgFrame ||
+                        (message.framed.frame.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) == 0 ||
+                        message.framed.frame.body.msgh_descriptor_count != 1 ||
+                        message.framed.frame.packet.type != MACH_MSG_OOL_DESCRIPTOR) {
                         fprintf(stderr, "weaver-render-host: malformed message from pid=%d destroyed\n", strongClient.widgetPid);
-                        mach_msg_destroy(&frameMessage.frame.header);
+                        mach_msg_destroy(&message.framed.frame.header);
                         return;
                     }
-                    NativeSdkRenderHostHandleFrame(strongClient, &frameMessage.frame);
+                    NativeSdkRenderHostHandleFrame(strongClient, &message.framed.frame);
                 }
             });
             /* The receive right dies only after dispatch guarantees the

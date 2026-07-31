@@ -37,7 +37,16 @@ static const uint32_t kWeaverRendererMachMaxPacket = 8 * 1024 * 1024;
 enum {
     kWeaverRendererMachMsgHello = 0x57520001,
     kWeaverRendererMachMsgFrame = 0x57520002,
+    kWeaverRendererMachMsgImageUpload = 0x57520003,
 };
+
+/* Image pixels ride a side channel, exactly like the in-process binary
+ * ABI (`uploadGpuSurfaceImage` runs BEFORE the packet referencing the
+ * image is presented): packets carry only id + fingerprint references.
+ * The ceiling mirrors canvas_limits.max_registered_canvas_image_pixel_bytes
+ * for the stock profile (1 MiB; the widget profile's 256 KiB is enforced
+ * client-side by the SDK before bytes ever reach this channel). */
+static const uint32_t kWeaverRendererMachMaxImageBytes = 1024 * 1024;
 
 enum {
     kWeaverRendererMachStatusFailed = 0,
@@ -108,6 +117,46 @@ typedef struct {
     uint32_t pixel_width;
     uint32_t pixel_height;
 } WeaverRendererMachFrameReply;
+
+/* One registered image, uploaded (or removed) ahead of the packets that
+ * reference it. pixels_len == 0 (with a null descriptor size) is a
+ * removal; the reply is the completion signal, mirroring frames. */
+typedef struct {
+    mach_msg_header_t header;
+    mach_msg_body_t body;
+    mach_msg_ool_descriptor_t pixels;
+    uint32_t magic;
+    uint32_t version;
+    uint32_t struct_size;
+    uint32_t pixels_len;
+    uint64_t image_id;
+    uint32_t width;
+    uint32_t height;
+} WeaverRendererMachImageUpload;
+
+typedef struct {
+    mach_msg_header_t header;
+    uint32_t magic;
+    uint32_t version;
+    uint32_t status;
+    uint32_t reserved;
+} WeaverRendererMachImageUploadReply;
+
+static inline bool weaverRendererMachImageUploadValid(const WeaverRendererMachImageUpload *upload) {
+    if (upload->magic != kWeaverRendererMachMagic ||
+        upload->version != kWeaverRendererMachVersion ||
+        upload->struct_size != sizeof(WeaverRendererMachImageUpload) ||
+        upload->image_id == 0) return false;
+    if (upload->pixels_len == 0) {
+        /* removal */
+        return upload->width == 0 && upload->height == 0 && upload->pixels.size == 0;
+    }
+    return upload->width > 0 && upload->height > 0 &&
+        upload->width <= 4096 && upload->height <= 4096 &&
+        upload->pixels_len == upload->width * upload->height * 4 &&
+        upload->pixels_len <= kWeaverRendererMachMaxImageBytes &&
+        upload->pixels.size == upload->pixels_len;
+}
 
 static inline bool weaverRendererMachHelloValid(const WeaverRendererMachHello *hello) {
     return hello->magic == kWeaverRendererMachMagic &&
