@@ -1026,7 +1026,11 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
                             height:[entry[@"height"] unsignedIntegerValue]
                              rgba8:(const uint8_t *)pixels.bytes
                         byteLength:pixels.length]) {
-            fprintf(stderr, "weaver-shared-renderer: image replay failed for id=%llu\n", imageIdNumber.unsignedLongLongValue);
+            /* A half-replayed session must not survive: the next attempt
+             * reconnects and replays from the top, or the host would
+             * render retained draws without their pixels. */
+            fprintf(stderr, "weaver-shared-renderer: image replay failed for id=%llu; reconnecting from scratch\n", imageIdNumber.unsignedLongLongValue);
+            [self disconnect];
             return NO;
         }
     }
@@ -12887,6 +12891,21 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
                         return;
                     }
                     if (message.framed.frame.header.msgh_id == kWeaverRendererMachMsgImageUpload) {
+                        /* Same shape-before-content rule as frames: an
+                         * upload is either non-complex (a removal) or
+                         * complex with exactly one out-of-line descriptor.
+                         * Anything else — a smuggled port right where
+                         * pixels belong — is destroyed whole. */
+                        const BOOL uploadComplex = (message.image.upload.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0;
+                        const BOOL uploadShapeOk = uploadComplex
+                            ? (message.image.upload.body.msgh_descriptor_count == 1 &&
+                               message.image.upload.pixels.type == MACH_MSG_OOL_DESCRIPTOR)
+                            : message.image.upload.body.msgh_descriptor_count == 0;
+                        if (!uploadShapeOk) {
+                            fprintf(stderr, "weaver-render-host: malformed image upload from pid=%d destroyed\n", strongClient.widgetPid);
+                            mach_msg_destroy(&message.image.upload.header);
+                            return;
+                        }
                         NativeSdkRenderHostHandleImageUpload(strongClient, &message.image.upload);
                         return;
                     }
