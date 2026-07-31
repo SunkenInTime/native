@@ -12417,9 +12417,17 @@ void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_
  * until a real starvation case earns one. */
 static const uint64_t NativeSdkRenderHostFrameBudgetNs = 250ull * 1000 * 1000;
 
+/* Monotonic, suspend-excluding clock for frame durations: the file's
+ * NSDate-based timestamps serve event ordering, but a wall-clock step
+ * (NTP, manual change) mid-frame would corrupt an unsigned elapsed
+ * subtraction into a false (or suppressed) budget trip. */
+static uint64_t NativeSdkRenderHostMonotonicNanoseconds(void) {
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}
+
 static void NativeSdkRenderHostNoteFrameDuration(NativeSdkRenderHostClient *client) {
     if (client.frameRenderBeginNs == 0) return;
-    const uint64_t elapsedNs = NativeSdkTimestampNanoseconds() - client.frameRenderBeginNs;
+    const uint64_t elapsedNs = NativeSdkRenderHostMonotonicNanoseconds() - client.frameRenderBeginNs;
     client.frameRenderBeginNs = 0;
     client.framesRendered += 1;
     if (NativeSdkGpuFrameTraceEnabled()) {
@@ -12508,9 +12516,15 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
         NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusRefused, NULL, 0, 0);
         return;
     }
+    /* The budget clock starts at frame ARRIVAL (after the overlap guard,
+     * which must not clobber the in-flight frame's stamp): validation,
+     * first-frame renderer construction, and refusals are host work this
+     * frame caused, so they count. */
+    client.frameRenderBeginNs = NativeSdkRenderHostMonotonicNanoseconds();
     if (!weaverRendererMachFrameValid(frame)) {
         fprintf(stderr, "weaver-render-host: invalid frame from pid=%d (len=%u)\n", client.widgetPid, frame->packet_len);
         if (packetBytes) vm_deallocate(mach_task_self(), (vm_address_t)packetBytes, packetSize);
+        NativeSdkRenderHostNoteFrameDuration(client);
         NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusRefused, NULL, 0, 0);
         return;
     }
@@ -12544,7 +12558,6 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
                 client.widgetPid, frame->surface_width, frame->surface_height, frame->scale);
     }
     client.pendingReplyPort = replyPort;
-    client.frameRenderBeginNs = NativeSdkTimestampNanoseconds();
     const NSInteger result = [client.renderer
         presentGpuPacketBinaryWithSurfaceWidth:frame->surface_width
                                         height:frame->surface_height
