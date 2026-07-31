@@ -599,8 +599,37 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "FRAME BUDGET EXCEEDED pid=%d took=%llums budget=%llums" },
         // Every frame is measured (trace-gated per-frame line for future
         // receipts), on both the export and static/refusal paths.
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "client.frameRenderBeginNs = NativeSdkTimestampNanoseconds();" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "client.frameRenderBeginNs = NativeSdkRenderHostMonotonicNanoseconds();" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "weaver-render-host: frame-trace pid=%d" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-shared-renderer-images", "Verify registered images cross the renderer channel ahead of their packets", &.{
+        // The protocol message and its validator (pixels_len == 0 is a
+        // removal; the ceiling mirrors canvas_limits).
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "kWeaverRendererMachMsgResourceUpload" },
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "weaverRendererMachResourceUploadValid" },
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "kWeaverRendererMachMaxImageBytes = 1024 * 1024" },
+        // One storage implementation for both worlds: the app host's
+        // stores in-process, the per-client headless stores in the host.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static BOOL NativeSdkCanvasStoreImage(" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (NSMutableDictionary<NSString *, NSImage *> *)activeCanvasImageStore" },
+        // The device-less client forwards uploads (and removals) instead
+        // of storing locally; the host stores into the client's renderer.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "uploadImageWithId:image_id width:width height:height rgba8:rgba8 byteLength:rgba8_len" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostHandleResourceUpload(strongClient, &message.resource.upload);" },
+        // An image arriving before the first frame constructs the
+        // renderer; the export completion binds lazily so that order works.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!client.renderer.headlessExportCompletion) {" },
+        // A replacement host gets every registered image replayed on
+        // reconnect, and a retain action installs from the store when the
+        // fresh view cache lacks the entry — art survives host crashes.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "registeredImagesById" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (cacheKey && !imageCache[cacheKey] && imageStore[cacheKey]) {" },
+        // Fonts ride the same resource channel into a PER-CLIENT table,
+        // swapped in around each present so widgets' font ids can never
+        // collide in the shared host; faces replay after reconnect.
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "kWeaverRendererMachResourceFont" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostSetActiveFontTable" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "registeredFontsById" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-shared-renderer-client", "Verify the device-less widget client keeps the shared-renderer contract", &.{
         // No Metal object is ever created in client mode; availability is
