@@ -592,6 +592,22 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSAccessibilityProgressIndicatorRole" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "view.accessibilityRole = NativeSdkAccessibilityRoleForNativeViewKind(kind)" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-iosurface-presenter", "Verify the IOSurface presentation path keeps drawable-path semantics", &.{
+        // The flag and the plain content layer (no CAMetalLayer in this mode).
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NATIVE_SDK_GPU_IOSURFACE_PRESENT" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)renderFrameThroughIOSurfacePresenter" },
+        // Contents flip only after GPU completion — the window server
+        // never composites a half-rendered frame.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "strongLayer.contents = (__bridge id)presentedSurface;" },
+        // Ring exhaustion refuses instead of blocking the main thread;
+        // refused presents complete logically like the nil-drawable path.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!buffer.inFlight && !IOSurfaceIsInUse(buffer.surface)) return buffer;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "path=%s frame=%lu" },
+        // Occlusion policy parity with the drawable path.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (occluded && self.hasEverPresented) {" },
+        // Alpha-mode truth flows to whichever layer kind is live.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)applySurfaceLayerOpacity" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-input-repaints-retained-canvas", "Verify GPU input wakes retained canvas frames", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)requestRetainedCanvasFrame" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self requestRetainedCanvasFrame];" },
