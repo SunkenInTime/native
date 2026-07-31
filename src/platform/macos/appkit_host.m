@@ -20,6 +20,7 @@
 #import <Security/Security.h>
 #include <dlfcn.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <IOSurface/IOSurface.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -629,6 +630,189 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 
 @end
 
+/* IOSurface presentation (NATIVE_SDK_GPU_IOSURFACE_PRESENT=1): the surface
+ * view's window content is a plain CALayer whose contents are IOSurfaces
+ * the renderer draws into, instead of a CAMetalLayer drawable. This is the
+ * presentation contract a device-less widget process needs — the widget
+ * side of the shared renderer shows frames by layer contents only, and the
+ * compositing charge lands in WindowServer, not on the widget's graphics
+ * ledger. Off by default until the shared-renderer cutover; the Metal
+ * drawable path is unchanged when the flag is unset. */
+static BOOL NativeSdkIOSurfacePresentEnabled(void) {
+    static BOOL enabled;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *value = getenv("NATIVE_SDK_GPU_IOSURFACE_PRESENT");
+        enabled = value && value[0] != 0 && strcmp(value, "0") != 0;
+    });
+    return enabled;
+}
+
+/* One slot of the presenter's buffer ring: the exported IOSurface and the
+ * BGRA render target aliasing it. `inFlight` covers the GPU write; the
+ * window server's read is covered by IOSurfaceIsInUse at pick time. */
+@interface NativeSdkIOSurfacePresentBuffer : NSObject
+@property(nonatomic, assign) IOSurfaceRef surface;
+@property(nonatomic, strong) id<MTLTexture> texture;
+@property(nonatomic, assign) BOOL inFlight;
+@end
+
+@implementation NativeSdkIOSurfacePresentBuffer
+- (void)dealloc {
+    if (_surface) CFRelease(_surface);
+}
+@end
+
+/// Presents composited canvas textures through IOSurface-backed CALayer
+/// contents. A ring of three buffers mirrors the CAMetalLayer drawable
+/// pool's depth; unlike nextDrawable (which BLOCKS with its timeout
+/// disallowed), an exhausted ring refuses the present so the caller
+/// completes the frame logically from retained state — the same policy as
+/// the occluded and nil-drawable paths, and never a main-thread stall.
+@interface NativeSdkIOSurfacePresenter : NSObject
+@property(nonatomic, strong) id<MTLDevice> device;
+@property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
+@property(nonatomic, strong) NSMutableArray<NativeSdkIOSurfacePresentBuffer *> *buffers;
+@property(nonatomic, assign) NSUInteger pixelWidth;
+@property(nonatomic, assign) NSUInteger pixelHeight;
+@property(nonatomic, assign) NSUInteger nextBufferIndex;
+@end
+
+static const NSUInteger NativeSdkIOSurfacePresentRingDepth = 3;
+
+@implementation NativeSdkIOSurfacePresenter
+
+- (instancetype)initWithDevice:(id<MTLDevice>)device commandQueue:(id<MTLCommandQueue>)commandQueue {
+    self = [super init];
+    if (!self) return nil;
+    _device = device;
+    _commandQueue = commandQueue;
+    _buffers = [NSMutableArray arrayWithCapacity:NativeSdkIOSurfacePresentRingDepth];
+    return self;
+}
+
+- (BOOL)ensureRingWithPixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight {
+    if (self.buffers.count == NativeSdkIOSurfacePresentRingDepth &&
+        self.pixelWidth == pixelWidth && self.pixelHeight == pixelHeight) return YES;
+    [self.buffers removeAllObjects];
+    NSDictionary *properties = @{
+        (id)kIOSurfaceWidth: @(pixelWidth),
+        (id)kIOSurfaceHeight: @(pixelHeight),
+        (id)kIOSurfaceBytesPerElement: @4,
+        (id)kIOSurfacePixelFormat: @((uint32_t)'BGRA'),
+    };
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:pixelWidth height:pixelHeight mipmapped:NO];
+    descriptor.usage = MTLTextureUsageRenderTarget;
+    descriptor.storageMode = MTLStorageModeShared;
+    for (NSUInteger index = 0; index < NativeSdkIOSurfacePresentRingDepth; index += 1) {
+        IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef)properties);
+        if (!surface) {
+            [self.buffers removeAllObjects];
+            return NO;
+        }
+        id<MTLTexture> texture = [self.device newTextureWithDescriptor:descriptor iosurface:surface plane:0];
+        if (!texture) {
+            CFRelease(surface);
+            [self.buffers removeAllObjects];
+            return NO;
+        }
+        NativeSdkIOSurfacePresentBuffer *buffer = [[NativeSdkIOSurfacePresentBuffer alloc] init];
+        buffer.surface = surface;
+        buffer.texture = texture;
+        [self.buffers addObject:buffer];
+    }
+    self.pixelWidth = pixelWidth;
+    self.pixelHeight = pixelHeight;
+    self.nextBufferIndex = 0;
+    return YES;
+}
+
+/* A buffer is writable when our own GPU write finished AND the window
+ * server is not scanning it out. Rotation keeps picks fair; one full lap
+ * with no writable buffer refuses the present. */
+- (NativeSdkIOSurfacePresentBuffer *)acquireBuffer {
+    for (NSUInteger attempt = 0; attempt < self.buffers.count; attempt += 1) {
+        NativeSdkIOSurfacePresentBuffer *buffer = self.buffers[self.nextBufferIndex % self.buffers.count];
+        self.nextBufferIndex += 1;
+        if (!buffer.inFlight && !IOSurfaceIsInUse(buffer.surface)) return buffer;
+    }
+    return nil;
+}
+
+- (BOOL)presentTexture:(id<MTLTexture>)texture
+              pipeline:(id<MTLRenderPipelineState>)pipeline
+               sampler:(id<MTLSamplerState>)sampler
+            pixelWidth:(NSUInteger)pixelWidth
+           pixelHeight:(NSUInteger)pixelHeight
+            clearColor:(MTLClearColor)clearColor
+          sampleBuffer:(id<MTLBuffer>)sampleBuffer
+                 layer:(CALayer *)layer
+            completion:(void (^)(BOOL completed))completion {
+    if (pixelWidth == 0 || pixelHeight == 0 || !layer || !completion) return NO;
+    if (![self ensureRingWithPixelWidth:pixelWidth pixelHeight:pixelHeight]) return NO;
+    NativeSdkIOSurfacePresentBuffer *buffer = [self acquireBuffer];
+    if (!buffer) return NO;
+
+    MTLRenderPassDescriptor *descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
+    descriptor.colorAttachments[0].texture = buffer.texture;
+    descriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
+    descriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
+    descriptor.colorAttachments[0].clearColor = clearColor;
+    id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
+    if (!commandBuffer) return NO;
+    id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:descriptor];
+    if (texture && pipeline && sampler) {
+        [encoder setRenderPipelineState:pipeline];
+        [encoder setFragmentTexture:texture atIndex:0];
+        [encoder setFragmentSamplerState:sampler atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    }
+    [encoder endEncoding];
+    if (sampleBuffer) {
+        NSUInteger sampleX = pixelWidth > 1 ? pixelWidth / 2 : 0;
+        NSUInteger sampleY = pixelHeight > 1 ? pixelHeight / 2 : 0;
+        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+        [blit copyFromTexture:buffer.texture
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(sampleX, sampleY, 0)
+                   sourceSize:MTLSizeMake(1, 1, 1)
+                     toBuffer:sampleBuffer
+            destinationOffset:0
+       destinationBytesPerRow:256
+     destinationBytesPerImage:256];
+        [blit endEncoding];
+    }
+
+    buffer.inFlight = YES;
+    IOSurfaceRef presentedSurface = buffer.surface;
+    CFRetain(presentedSurface);
+    __weak CALayer *weakLayer = layer;
+    [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
+        const BOOL completed = completedBuffer.status == MTLCommandBufferStatusCompleted;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            buffer.inFlight = NO;
+            CALayer *strongLayer = weakLayer;
+            if (completed && strongLayer) {
+                /* Contents flip only after the GPU finished writing the
+                 * surface: the window server never composites a
+                 * half-rendered frame. Disabled actions keep the flip a
+                 * plain swap, not an implicit fade. */
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                strongLayer.contents = (__bridge id)presentedSurface;
+                [CATransaction commit];
+            }
+            CFRelease(presentedSurface);
+            completion(completed);
+        });
+    }];
+    [commandBuffer commit];
+    return YES;
+}
+
+@end
+
 @interface NativeSdkWidgetAccessibilityElement : NSAccessibilityElement
 @property(nonatomic, assign) NativeSdkMetalSurfaceView *surfaceView;
 @property(nonatomic, assign) uint64_t widgetId;
@@ -846,7 +1030,10 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) double pendingScrollDriverOffsetY;
 @property(nonatomic, assign) uint64_t scrollDriverEventLastEmitNs;
 @property(nonatomic, assign) BOOL controlClickActive;
+@property(nonatomic, strong) NativeSdkIOSurfacePresenter *iosurfacePresenter;
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
+- (void)renderFrameThroughIOSurfacePresenter;
+- (void)applySurfaceLayerOpacity;
 - (BOOL)isAvailable;
 - (void)updateDrawableSize;
 - (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight dirtyRects:(NSArray<NSValue *> *)dirtyRects rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
@@ -3471,6 +3658,18 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         fprintf(stderr, "native-sdk: renderer-bakeoff stage=resource_init device=process queue=process us=%llu\n",
                 (unsigned long long)((NativeSdkTimestampNanoseconds() - resourceBeginNs) / 1000));
     }
+    if (NativeSdkIOSurfacePresentEnabled()) {
+        // IOSurface presentation: the window content is a plain layer
+        // whose contents the presenter swaps per frame. The renderer's
+        // Metal objects above are unchanged — only the last hop to the
+        // glass differs.
+        CALayer *contentLayer = [CALayer layer];
+        contentLayer.opaque = YES;
+        contentLayer.contentsGravity = kCAGravityTopLeft;
+        self.wantsLayer = YES;
+        self.layer = contentLayer;
+        _iosurfacePresenter = [[NativeSdkIOSurfacePresenter alloc] initWithDevice:_device commandQueue:_commandQueue];
+    } else {
     _metalLayer = [CAMetalLayer layer];
     _metalLayer.device = _device;
     _metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -3495,6 +3694,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 
     self.wantsLayer = YES;
     self.layer = _metalLayer;
+    }
     self.layerContentsRedrawPolicy = NSViewLayerContentsRedrawDuringViewResize;
     self.accessibilityRole = NSAccessibilityGroupRole;
     _surfaceCursor = [NSCursor arrowCursor];
@@ -3544,11 +3744,25 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 }
 
 - (BOOL)isAvailable {
-    return self.device != nil && self.commandQueue != nil && self.metalLayer != nil;
+    if (self.device == nil || self.commandQueue == nil) return NO;
+    if (NativeSdkIOSurfacePresentEnabled()) return self.iosurfacePresenter != nil && self.layer != nil;
+    return self.metalLayer != nil;
 }
 
 - (BOOL)isOpaque {
     return self.gpuAlphaMode != 2;
+}
+
+/* The one place layer opacity follows the surface's alpha mode, for both
+ * layer kinds — the CAMetalLayer drawable path and the IOSurface content
+ * layer read the same truth. */
+- (void)applySurfaceLayerOpacity {
+    const BOOL opaque = self.gpuAlphaMode != 2;
+    if (self.metalLayer) {
+        self.metalLayer.opaque = opaque;
+    } else if (NativeSdkIOSurfacePresentEnabled()) {
+        self.layer.opaque = opaque;
+    }
 }
 
 - (void)viewDidMoveToWindow {
@@ -3623,7 +3837,8 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 }
 
 - (void)updateDrawableSize {
-    if (!self.metalLayer) return;
+    const BOOL iosurfacePresent = NativeSdkIOSurfacePresentEnabled();
+    if (!self.metalLayer && !iosurfacePresent) return;
     CGFloat scale = self.window.backingScaleFactor;
     if (scale <= 0) scale = NSScreen.mainScreen.backingScaleFactor;
     if (scale <= 0) scale = 1;
@@ -3632,8 +3847,14 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     BOOL changed = fabs(self.lastDrawableSize.width - drawableSize.width) > 0.5 ||
         fabs(self.lastDrawableSize.height - drawableSize.height) > 0.5 ||
         fabs(self.lastScale - scale) > 0.001;
-    self.metalLayer.contentsScale = scale;
-    self.metalLayer.drawableSize = drawableSize;
+    if (iosurfacePresent) {
+        // The presenter's ring re-sizes lazily at the next present; only
+        // the layer's point<->pixel mapping needs to be current here.
+        self.layer.contentsScale = scale;
+    } else {
+        self.metalLayer.contentsScale = scale;
+        self.metalLayer.drawableSize = drawableSize;
+    }
     self.lastDrawableSize = drawableSize;
     self.lastScale = scale;
     if (changed) {
@@ -5730,7 +5951,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
 - (BOOL)ensureCanvasPresenter {
     if (self.canvasRenderPipeline && self.canvasSampler) return YES;
-    if (!self.device || !self.metalLayer) return NO;
+    if (!self.device || ![self isAvailable]) return NO;
     NativeSdkMetalProcessResources *resources = [NativeSdkMetalProcessResources sharedResources];
     if (![resources ensureImmutableResources]) return NO;
     self.canvasRenderPipeline = resources.presenterPipeline;
@@ -6111,6 +6332,10 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
 - (void)renderFrame {
     if (![self isAvailable] || self.hidden || self.bounds.size.width <= 0 || self.bounds.size.height <= 0) return;
+    if (NativeSdkIOSurfacePresentEnabled()) {
+        [self renderFrameThroughIOSurfacePresenter];
+        return;
+    }
     [self updateDrawableSize];
     const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
 
@@ -6302,6 +6527,95 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [commandBuffer commit];
     self.hasEverPresented = YES;
 
+    self.frameIndex += 1;
+}
+
+/* renderFrame's IOSurface twin: identical guards, occlusion policy,
+ * verdict folding, and frame-index accounting — only the last hop
+ * differs (presenter ring -> layer contents instead of drawable ->
+ * presentDrawable). A refused present (ring exhausted, encoder failure)
+ * completes the frame logically from retained state, exactly like the
+ * nil-drawable path: a frame requested by the runtime always completes;
+ * only the glass flush is deferred. */
+- (void)renderFrameThroughIOSurfacePresenter {
+    [self updateDrawableSize];
+    NSWindow *window = self.window;
+    const BOOL occluded = window != nil && (window.occlusionState & NSWindowOcclusionStateVisible) == 0;
+    if (occluded && self.hasEverPresented) {
+        if (NativeSdkGpuFrameTraceEnabled()) {
+            fprintf(stderr, "native-sdk: gpu frame-trace path=occluded frame=%lu\n", (unsigned long)self.frameIndex);
+        }
+        self.glassFlushPending = YES;
+        [self scheduleFrameEventEmission];
+        return;
+    }
+    const NSUInteger pixelWidth = (NSUInteger)self.lastDrawableSize.width;
+    const NSUInteger pixelHeight = (NSUInteger)self.lastDrawableSize.height;
+    [self ensureCanvasPresenter];
+
+    const double phase = (double)(self.frameIndex % 360) / 360.0;
+    const double red = self.hasCanvasTexture ? 0.965 : 0.10 + 0.08 * sin(phase * 6.283185307179586);
+    const double green = self.hasCanvasTexture ? 0.973 : 0.18 + 0.10 * sin((phase + 0.33) * 6.283185307179586);
+    const double blue = self.hasCanvasTexture ? 0.988 : 0.34 + 0.16 * sin((phase + 0.66) * 6.283185307179586);
+
+    const BOOL canvasTextureMatchesTarget = self.canvasTextureWidth == pixelWidth &&
+        self.canvasTextureHeight == pixelHeight;
+    const BOOL presenterTextured = self.hasCanvasTexture && canvasTextureMatchesTarget &&
+        self.canvasTexture && self.canvasRenderPipeline && self.canvasSampler;
+
+#if defined(NATIVE_SDK_AUTOMATION)
+    const BOOL shouldSample = !self.verifiedNonblankFrame;
+#else
+    /* Production establishes nonblank state from the successfully retained
+     * canvas itself; the 1x1 readback is automation's explicit verdict. */
+    const BOOL shouldSample = NO;
+#endif
+    if (shouldSample && !self.sampleBuffer) {
+        self.sampleBuffer = [self.device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    }
+    id<MTLBuffer> sampleBuffer = shouldSample ? self.sampleBuffer : nil;
+
+    __weak NativeSdkMetalSurfaceView *weakSelf = self;
+    const BOOL presented = [self.iosurfacePresenter
+        presentTexture:presenterTextured ? self.canvasTexture : nil
+              pipeline:self.canvasRenderPipeline
+               sampler:self.canvasSampler
+            pixelWidth:pixelWidth
+           pixelHeight:pixelHeight
+            clearColor:MTLClearColorMake(red, green, blue, 1.0)
+          sampleBuffer:sampleBuffer
+                 layer:self.layer
+            completion:^(BOOL completed) {
+        NativeSdkMetalSurfaceView *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (!completed) {
+            strongSelf.canvasCompositeContentValid = NO;
+            strongSelf.hasCanvasRetainedState = NO;
+            [strongSelf noteRendererPixelFallback];
+        }
+        if (sampleBuffer && completed) {
+            const uint8_t *bytes = (const uint8_t *)sampleBuffer.contents;
+            const uint32_t sampleColor = ((uint32_t)bytes[3] << 24) | ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[1] << 8) | (uint32_t)bytes[0];
+            if (bytes[0] != 0 || bytes[1] != 0 || bytes[2] != 0) {
+                strongSelf.verifiedNonblankFrame = YES;
+                strongSelf.lastSampleColor = sampleColor;
+            }
+        }
+        strongSelf.renderedFrame = YES;
+        [strongSelf scheduleFrameEventEmissionForPresentCompletion:YES];
+    }];
+    if (NativeSdkGpuFrameTraceEnabled()) {
+        fprintf(stderr, "native-sdk: gpu frame-trace path=%s frame=%lu\n",
+                presented ? "iosurface-present" : "iosurface-refused",
+                (unsigned long)self.frameIndex);
+    }
+    if (!presented) {
+        self.glassFlushPending = YES;
+        [self scheduleFrameEventEmission];
+        return;
+    }
+    self.glassFlushPending = NO;
+    self.hasEverPresented = YES;
     self.frameIndex += 1;
 }
 
@@ -8022,7 +8336,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         surface.requestedGpuBackend = gpuBackend == 3 ? 3 : 1;
         surface.gpuBackend = surface.requestedGpuBackend;
         surface.gpuAlphaMode = alphaMode == 2 ? 2 : 1;
-        surface.metalLayer.opaque = surface.gpuAlphaMode != 2;
+        [surface applySurfaceLayerOpacity];
         [surface configureWithHost:self windowId:windowId label:label];
     }
     self.nativeViews[key] = view;
