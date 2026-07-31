@@ -12173,11 +12173,17 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
     if (packetBytes) vm_deallocate(mach_task_self(), (vm_address_t)packetBytes, packetSize);
     if (client.renderer.headlessExportInFlight) return; /* the export completion sends the reply */
     if (result == 1) {
-        /* Static fast path (requiresRender == 0): nothing recomposited;
-         * re-offer the retained surface so a fresh client still gets
-         * pixels. */
+        /* Static fast path (requiresRender == 0): nothing recomposited —
+         * re-offer the retained surface. A host holding NO surface yet
+         * cannot satisfy a static frame, and "Ok without pixels" would be
+         * a lie the widget displays as a blank window: refuse instead, so
+         * the client resyncs with a full present. */
         client.pendingReplyPort = MACH_PORT_NULL;
-        NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusOk, client.lastSurface, client.lastPixelWidth, client.lastPixelHeight);
+        if (client.lastSurface) {
+            NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusOk, client.lastSurface, client.lastPixelWidth, client.lastPixelHeight);
+        } else {
+            NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusRefused, NULL, 0, 0);
+        }
         return;
     }
     /* Export is in flight only when the composite returned 1, so any
@@ -12207,6 +12213,13 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
             struct { WeaverRendererMachHello hello; mach_msg_trailer_t trailer; } message = {0};
             kern_return_t rcv = mach_msg(&message.hello.header, MACH_RCV_MSG, 0, sizeof(message), servicePort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
             if (rcv != KERN_SUCCESS) return;
+            if ((message.hello.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0 ||
+                message.hello.header.msgh_id != kWeaverRendererMachMsgHello) {
+                /* A hello carries no descriptors; destroy anything else
+                 * whole so smuggled rights are disposed. */
+                mach_msg_destroy(&message.hello.header);
+                return;
+            }
             const mach_port_t replyPort = message.hello.header.msgh_remote_port;
             WeaverRendererMachHelloReply reply = {0};
             reply.header.msgh_remote_port = replyPort;
@@ -12234,30 +12247,51 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
 
             dispatch_source_t frameSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, sessionPort, 0, dispatch_get_main_queue());
             client.frameSource = frameSource;
-            NativeSdkRenderHostClient *blockClient = client;
+            /* The clients set is the ONLY strong anchor: the handler holds
+             * the client weakly, so removing it from the set (after
+             * cancellation) releases the whole session — no
+             * client->source->handler->client cycle to leak across widget
+             * reconnects. */
+            __weak NativeSdkRenderHostClient *weakClient = client;
             dispatch_source_set_event_handler(frameSource, ^{
                 @autoreleasepool {
                     /* Per-frame pool: this handler is the host's hot loop,
                      * and an undrained loop was the Phase 1 spike's
                      * measured 180 KB/min leak. */
+                    NativeSdkRenderHostClient *strongClient = weakClient;
+                    if (!strongClient) return;
                     struct { WeaverRendererMachFrame frame; mach_msg_trailer_t trailer; } frameMessage = {0};
-                    kern_return_t frameRcv = mach_msg(&frameMessage.frame.header, MACH_RCV_MSG, 0, sizeof(frameMessage), blockClient.sessionPort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+                    kern_return_t frameRcv = mach_msg(&frameMessage.frame.header, MACH_RCV_MSG, 0, sizeof(frameMessage), strongClient.sessionPort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
                     if (frameRcv != KERN_SUCCESS) return;
                     if (frameMessage.frame.header.msgh_id == MACH_NOTIFY_NO_SENDERS) {
-                        fprintf(stderr, "weaver-render-host: client pid=%d disconnected\n", blockClient.widgetPid);
-                        dispatch_source_cancel(blockClient.frameSource);
-                        blockClient.renderer.headlessExportCompletion = nil;
-                        blockClient.renderer = nil;
-                        mach_port_mod_refs(mach_task_self(), blockClient.sessionPort, MACH_PORT_RIGHT_RECEIVE, -1);
-                        [clients removeObject:blockClient];
+                        fprintf(stderr, "weaver-render-host: client pid=%d disconnected\n", strongClient.widgetPid);
+                        strongClient.renderer.headlessExportCompletion = nil;
+                        strongClient.renderer = nil;
+                        dispatch_source_cancel(strongClient.frameSource);
+                        [clients removeObject:strongClient];
                         return;
                     }
-                    if (frameMessage.frame.header.msgh_id != kWeaverRendererMachMsgFrame) {
+                    /* Shape before content: a frame must be a complex
+                     * message carrying exactly one out-of-line descriptor.
+                     * Anything else — extra descriptors, port rights where
+                     * bytes belong — is destroyed WHOLE, so every
+                     * transferred right is disposed and a malformed peer
+                     * cannot exhaust the host's port space. */
+                    if (frameMessage.frame.header.msgh_id != kWeaverRendererMachMsgFrame ||
+                        (frameMessage.frame.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) == 0 ||
+                        frameMessage.frame.body.msgh_descriptor_count != 1 ||
+                        frameMessage.frame.packet.type != MACH_MSG_OOL_DESCRIPTOR) {
+                        fprintf(stderr, "weaver-render-host: malformed message from pid=%d destroyed\n", strongClient.widgetPid);
                         mach_msg_destroy(&frameMessage.frame.header);
                         return;
                     }
-                    NativeSdkRenderHostHandleFrame(blockClient, &frameMessage.frame);
+                    NativeSdkRenderHostHandleFrame(strongClient, &frameMessage.frame);
                 }
+            });
+            /* The receive right dies only after dispatch guarantees the
+             * handler can no longer run. */
+            dispatch_source_set_cancel_handler(frameSource, ^{
+                mach_port_mod_refs(mach_task_self(), sessionPort, MACH_PORT_RIGHT_RECEIVE, -1);
             });
             dispatch_resume(frameSource);
             [clients addObject:client];
