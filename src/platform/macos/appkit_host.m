@@ -12391,6 +12391,12 @@ void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_
 @property(nonatomic, assign) IOSurfaceRef lastSurface;
 @property(nonatomic, assign) uint32_t lastPixelWidth;
 @property(nonatomic, assign) uint32_t lastPixelHeight;
+/* Frame budget bookkeeping: when this frame's render began, and how many
+ * frames have tripped the budget (each trip logs; the count keeps the
+ * log line honest about repeat offenders). */
+@property(nonatomic, assign) uint64_t frameRenderBeginNs;
+@property(nonatomic, assign) uint64_t frameBudgetTrips;
+@property(nonatomic, assign) uint64_t framesRendered;
 @end
 
 @implementation NativeSdkRenderHostClient
@@ -12398,6 +12404,39 @@ void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_
     if (_lastSurface) CFRelease(_lastSurface);
 }
 @end
+
+/* Per-client frame budget: one host serving N widgets means a
+ * pathological widget can starve its neighbors, and a starved neighbor
+ * looks like OUR bug — the budget names the real offender. The tripwire
+ * is placed far past any good widget (measured receipt, M3 Pro, live
+ * myclock through this host: median 1.4 ms per frame, worst 21.9 ms on
+ * the warmup first present, n=20 — the 250 ms budget is >11x the worst
+ * observed), so only broken widgets feel it exists. Each trip logs the budget, the
+ * measured cost, and the client — enough for an agent to act without
+ * reading this code. Enforcement stays measurement-first: no throttle
+ * until a real starvation case earns one. */
+static const uint64_t NativeSdkRenderHostFrameBudgetNs = 250ull * 1000 * 1000;
+
+static void NativeSdkRenderHostNoteFrameDuration(NativeSdkRenderHostClient *client) {
+    if (client.frameRenderBeginNs == 0) return;
+    const uint64_t elapsedNs = NativeSdkTimestampNanoseconds() - client.frameRenderBeginNs;
+    client.frameRenderBeginNs = 0;
+    client.framesRendered += 1;
+    if (NativeSdkGpuFrameTraceEnabled()) {
+        fprintf(stderr, "weaver-render-host: frame-trace pid=%d frame=%llu render_us=%llu\n",
+                client.widgetPid, (unsigned long long)client.framesRendered,
+                (unsigned long long)(elapsedNs / 1000));
+    }
+    if (elapsedNs > NativeSdkRenderHostFrameBudgetNs) {
+        client.frameBudgetTrips += 1;
+        fprintf(stderr,
+                "weaver-render-host: FRAME BUDGET EXCEEDED pid=%d took=%llums budget=%llums trips=%llu — this widget is starving its neighbors; look at its packet size/content\n",
+                client.widgetPid,
+                (unsigned long long)(elapsedNs / 1000000),
+                (unsigned long long)(NativeSdkRenderHostFrameBudgetNs / 1000000),
+                (unsigned long long)client.frameBudgetTrips);
+    }
+}
 
 /* Drain a message too large for the caller's fixed buffer: re-receive it
  * into a right-sized allocation and destroy it whole. Without this, an
@@ -12488,6 +12527,7 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
             NativeSdkRenderHostClient *strongClient = capturedClient;
             const mach_port_t pending = strongClient.pendingReplyPort;
             strongClient.pendingReplyPort = MACH_PORT_NULL;
+            NativeSdkRenderHostNoteFrameDuration(strongClient);
             if (completed && surface) {
                 if (strongClient.lastSurface != surface) {
                     if (strongClient.lastSurface) CFRelease(strongClient.lastSurface);
@@ -12504,6 +12544,7 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
                 client.widgetPid, frame->surface_width, frame->surface_height, frame->scale);
     }
     client.pendingReplyPort = replyPort;
+    client.frameRenderBeginNs = NativeSdkTimestampNanoseconds();
     const NSInteger result = [client.renderer
         presentGpuPacketBinaryWithSurfaceWidth:frame->surface_width
                                         height:frame->surface_height
@@ -12516,7 +12557,8 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
                                         packet:(const uint8_t *)packetBytes
                                     byteLength:frame->packet_len];
     if (packetBytes) vm_deallocate(mach_task_self(), (vm_address_t)packetBytes, packetSize);
-    if (client.renderer.headlessExportInFlight) return; /* the export completion sends the reply */
+    if (client.renderer.headlessExportInFlight) return; /* the export completion sends the reply (and notes the duration) */
+    NativeSdkRenderHostNoteFrameDuration(client);
     if (result == 1) {
         /* Static fast path (requiresRender == 0): nothing recomposited —
          * re-offer the retained surface. A host holding NO surface yet
