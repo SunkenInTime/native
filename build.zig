@@ -592,6 +592,28 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSAccessibilityProgressIndicatorRole" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "view.accessibilityRole = NativeSdkAccessibilityRoleForNativeViewKind(kind)" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-shared-renderer-client", "Verify the device-less widget client keeps the shared-renderer contract", &.{
+        // No Metal object is ever created in client mode; availability is
+        // device-less by design.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NATIVE_SDK_GPU_SHARED_RENDERER" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (NativeSdkSharedRendererClientEnabled()) return self.layer != nil;" },
+        // Lazy connect + reconnect-after-crash, the Windows
+        // shared_renderer_client semantics.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "will keep retrying" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "host gone, will reconnect" },
+        // A hung host trips the reply tripwire and is treated as crashed;
+        // the widget's main thread never blocks indefinitely.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkSharedRendererReplyTimeoutMs = 5000" },
+        // The contents flip happens only on an Ok reply, which the host
+        // sends after GPU completion — never a half-rendered frame.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (NSInteger)sharedRendererPresentPacket:" },
+        // Surface rights bookkeeping: duplicates for cached ids are
+        // deallocated every frame.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "mach_port_deallocate(mach_task_self(), frameReply.reply.surface_port.name);" },
+        // Local fallbacks refuse loudly in client mode; the existing
+        // demote/retry machinery covers host recovery.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "pixel fallback refused (device-less widget)" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-render-host", "Verify the macOS render host keeps the shared-renderer contract", &.{
         // Versioned handshake separate from frame framing, same policy as
         // the Windows renderer_protocol.h contract.

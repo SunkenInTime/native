@@ -22,6 +22,8 @@
 #include <dlfcn.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <IOSurface/IOSurface.h>
+#include <bootstrap.h>
+#include <servers/bootstrap.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -819,6 +821,215 @@ static const NSUInteger NativeSdkIOSurfacePresentRingDepth = 3;
 
 @end
 
+/* Shared-renderer client mode (NATIVE_SDK_GPU_SHARED_RENDERER=1): this
+ * widget process creates NO Metal object at all. NSGP packets go to the
+ * render host over the mach channel from renderer_protocol_mach.h and the
+ * replies' IOSurfaces become plain-CALayer contents — the compositing
+ * charge lands in WindowServer, never on this process's graphics ledger.
+ * Opt-in until the cutover slice; the in-process paths are unchanged when
+ * the flag is unset. Phase 1 receipts (weaver docs/macos-memory-handoff.md):
+ * device-less widgets measured 27-30 MB with ZERO owned-unmapped-graphics
+ * regions while the host paid the ~95 MB submission arena once. */
+static BOOL NativeSdkSharedRendererClientEnabled(void) {
+    static BOOL enabled;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *value = getenv("NATIVE_SDK_GPU_SHARED_RENDERER");
+        enabled = value && value[0] != 0 && strcmp(value, "0") != 0;
+    });
+    return enabled;
+}
+
+/* A hung host must never freeze the widget's main thread: replies
+ * normally arrive in single-digit milliseconds (one frame's render), so
+ * five seconds is a tripwire only a dead host trips — and tripping it is
+ * treated as a crash, with the reconnect path taking over. */
+static const mach_msg_timeout_t NativeSdkSharedRendererReplyTimeoutMs = 5000;
+
+/// The widget process's one connection to the render host. Connection is
+/// lazy (widgets launch safely while weaverd is still bringing the host
+/// up) and reconnects after a host crash: any mach failure tears the
+/// session down and the next present retries from bootstrap_look_up,
+/// mirroring the Windows shared_renderer_client contract.
+@interface NativeSdkSharedRendererConnection : NSObject
+@property(nonatomic, assign) mach_port_t sessionPort;
+@property(nonatomic, assign) mach_port_t replyPort;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, id> *surfacesById;
+@property(nonatomic, assign) uint32_t surfacePixelWidth;
+@property(nonatomic, assign) uint32_t surfacePixelHeight;
+@property(nonatomic, assign) BOOL loggedWaitingForHost;
++ (instancetype)sharedConnection;
+@end
+
+@implementation NativeSdkSharedRendererConnection
+
++ (instancetype)sharedConnection {
+    static NativeSdkSharedRendererConnection *connection;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        connection = [[NativeSdkSharedRendererConnection alloc] init];
+        connection.surfacesById = [NSMutableDictionary dictionary];
+    });
+    return connection;
+}
+
+- (void)disconnect {
+    if (self.sessionPort != MACH_PORT_NULL) {
+        mach_port_deallocate(mach_task_self(), self.sessionPort);
+        self.sessionPort = MACH_PORT_NULL;
+    }
+    if (self.replyPort != MACH_PORT_NULL) {
+        /* Destroying the receive right also kills any reply-in-flight's
+         * send-once right; the host's late send fails harmlessly and
+         * destroys its moved surface right. */
+        mach_port_mod_refs(mach_task_self(), self.replyPort, MACH_PORT_RIGHT_RECEIVE, -1);
+        self.replyPort = MACH_PORT_NULL;
+    }
+    [self.surfacesById removeAllObjects];
+}
+
+- (BOOL)ensureConnected {
+    if (self.sessionPort != MACH_PORT_NULL) return YES;
+    const char *envName = getenv(WEAVER_RENDER_HOST_NAME_ENV);
+    const char *name = envName && envName[0] ? envName : WEAVER_RENDER_HOST_DEFAULT_NAME;
+    mach_port_t service = MACH_PORT_NULL;
+    kern_return_t kr = bootstrap_look_up(bootstrap_port, name, &service);
+    if (kr != KERN_SUCCESS) {
+        if (!self.loggedWaitingForHost) {
+            self.loggedWaitingForHost = YES;
+            fprintf(stderr, "weaver-shared-renderer: render host '%s' not up yet (%s); will keep retrying\n", name, bootstrap_strerror(kr));
+        }
+        return NO;
+    }
+    mach_port_t replyPort = MACH_PORT_NULL;
+    mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &replyPort);
+
+    WeaverRendererMachHello hello = {0};
+    hello.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+    hello.header.msgh_remote_port = service;
+    hello.header.msgh_local_port = replyPort;
+    hello.header.msgh_size = sizeof(hello);
+    hello.header.msgh_id = kWeaverRendererMachMsgHello;
+    hello.magic = kWeaverRendererMachMagic;
+    hello.version = kWeaverRendererMachVersion;
+    hello.struct_size = sizeof(hello);
+    hello.widget_pid = (uint32_t)getpid();
+    kr = mach_msg(&hello.header, MACH_SEND_MSG, sizeof(hello), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    mach_port_deallocate(mach_task_self(), service);
+    if (kr != KERN_SUCCESS) {
+        mach_port_mod_refs(mach_task_self(), replyPort, MACH_PORT_RIGHT_RECEIVE, -1);
+        return NO;
+    }
+    struct { WeaverRendererMachHelloReply reply; mach_msg_trailer_t trailer; } helloReply = {0};
+    kr = mach_msg(&helloReply.reply.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(helloReply), replyPort, NativeSdkSharedRendererReplyTimeoutMs, MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS || helloReply.reply.status != kWeaverRendererMachStatusOk ||
+        helloReply.reply.body.msgh_descriptor_count != 1) {
+        fprintf(stderr, "weaver-shared-renderer: hello failed kr=0x%x status=%u — is the host a different protocol version?\n",
+                kr, helloReply.reply.status);
+        if (kr == KERN_SUCCESS) mach_msg_destroy(&helloReply.reply.header);
+        mach_port_mod_refs(mach_task_self(), replyPort, MACH_PORT_RIGHT_RECEIVE, -1);
+        return NO;
+    }
+    self.sessionPort = helloReply.reply.session_port.name;
+    self.replyPort = replyPort;
+    self.loggedWaitingForHost = NO;
+    fprintf(stderr, "weaver-shared-renderer: connected to render host\n");
+    return YES;
+}
+
+/* One frame, one blocking round trip — the reply is the completion
+ * signal, sent by the host only after its GPU finished the surface.
+ * Returns the ABI result contract: 1 presented (outSurface valid for
+ * the caller's immediate use), 0 refused/unavailable (the engine
+ * resyncs or falls back, and a torn-down session reconnects lazily). */
+- (NSInteger)presentPacket:(const uint8_t *)packet
+                byteLength:(NSUInteger)byteLength
+              surfaceWidth:(CGFloat)surfaceWidth
+             surfaceHeight:(CGFloat)surfaceHeight
+                     scale:(CGFloat)scale
+                    clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA
+              commandCount:(NSUInteger)commandCount
+                outSurface:(IOSurfaceRef *)outSurface {
+    if (![self ensureConnected]) return 0;
+    WeaverRendererMachFrame frame = {0};
+    frame.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE) | MACH_MSGH_BITS_COMPLEX;
+    frame.header.msgh_remote_port = self.sessionPort;
+    frame.header.msgh_local_port = self.replyPort;
+    frame.header.msgh_size = sizeof(frame);
+    frame.header.msgh_id = kWeaverRendererMachMsgFrame;
+    frame.body.msgh_descriptor_count = 1;
+    frame.packet.address = (void *)packet;
+    frame.packet.size = (mach_msg_size_t)byteLength;
+    frame.packet.copy = MACH_MSG_VIRTUAL_COPY;
+    frame.packet.deallocate = FALSE;
+    frame.packet.type = MACH_MSG_OOL_DESCRIPTOR;
+    frame.magic = kWeaverRendererMachMagic;
+    frame.version = kWeaverRendererMachVersion;
+    frame.struct_size = sizeof(frame);
+    frame.packet_len = (uint32_t)byteLength;
+    frame.surface_width = surfaceWidth;
+    frame.surface_height = surfaceHeight;
+    frame.scale = scale;
+    frame.clear_r = clearR;
+    frame.clear_g = clearG;
+    frame.clear_b = clearB;
+    frame.clear_a = clearA;
+    frame.requires_render = 1;
+    frame.command_count = (uint32_t)commandCount;
+    frame.unsupported_command_count = 0;
+    frame.representable = 1;
+    kern_return_t kr = mach_msg(&frame.header, MACH_SEND_MSG, sizeof(frame), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "weaver-shared-renderer: frame send failed kr=0x%x — host gone, will reconnect\n", kr);
+        [self disconnect];
+        return 0;
+    }
+    struct { WeaverRendererMachFrameReply reply; mach_msg_trailer_t trailer; } frameReply = {0};
+    kr = mach_msg(&frameReply.reply.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(frameReply), self.replyPort, NativeSdkSharedRendererReplyTimeoutMs, MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "weaver-shared-renderer: no reply within %u ms (kr=0x%x) — treating host as crashed\n",
+                NativeSdkSharedRendererReplyTimeoutMs, kr);
+        [self disconnect];
+        return 0;
+    }
+    if (frameReply.reply.status != kWeaverRendererMachStatusOk) {
+        mach_msg_destroy(&frameReply.reply.header);
+        return 0; /* refused: the engine resyncs with a full present */
+    }
+    const BOOL hasSurfacePort = (frameReply.reply.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0 &&
+        frameReply.reply.body.msgh_descriptor_count == 1;
+    if (!hasSurfacePort || frameReply.reply.surface_id == 0) {
+        mach_msg_destroy(&frameReply.reply.header);
+        return 0;
+    }
+    /* Every Ok reply carries the surface right; duplicates for a cached
+     * id are simply deallocated (the protocol's stated trade: trivially
+     * correct right bookkeeping for one descriptor per frame). A size
+     * change starts a fresh ring host-side, so the cache resets with it. */
+    if (frameReply.reply.pixel_width != self.surfacePixelWidth || frameReply.reply.pixel_height != self.surfacePixelHeight) {
+        [self.surfacesById removeAllObjects];
+        self.surfacePixelWidth = frameReply.reply.pixel_width;
+        self.surfacePixelHeight = frameReply.reply.pixel_height;
+    }
+    NSNumber *surfaceKey = @(frameReply.reply.surface_id);
+    id surfaceObject = self.surfacesById[surfaceKey];
+    if (!surfaceObject) {
+        IOSurfaceRef looked = IOSurfaceLookupFromMachPort(frameReply.reply.surface_port.name);
+        if (!looked) {
+            fprintf(stderr, "weaver-shared-renderer: surface lookup failed for id=%u\n", frameReply.reply.surface_id);
+            mach_port_deallocate(mach_task_self(), frameReply.reply.surface_port.name);
+            return 0;
+        }
+        surfaceObject = CFBridgingRelease(looked);
+        self.surfacesById[surfaceKey] = surfaceObject;
+    }
+    mach_port_deallocate(mach_task_self(), frameReply.reply.surface_port.name);
+    if (outSurface) *outSurface = (__bridge IOSurfaceRef)surfaceObject;
+    return 1;
+}
+
+@end
+
 @interface NativeSdkWidgetAccessibilityElement : NSAccessibilityElement
 @property(nonatomic, assign) NativeSdkMetalSurfaceView *surfaceView;
 @property(nonatomic, assign) uint64_t widgetId;
@@ -1057,6 +1268,7 @@ static const NSUInteger NativeSdkIOSurfacePresentRingDepth = 3;
 @property(nonatomic, assign) BOOL headlessExportInFlight;
 @property(nonatomic, copy) void (^headlessExportCompletion)(BOOL completed, IOSurfaceRef surface, NSUInteger pixelWidth, NSUInteger pixelHeight);
 - (instancetype)initHeadlessRendererWithFrame:(NSRect)frameRect;
+- (NSInteger)sharedRendererPresentPacket:(const uint8_t *)packet byteLength:(NSUInteger)byteLength surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA commandCount:(NSUInteger)commandCount;
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
 - (void)renderFrameThroughIOSurfacePresenter;
 - (void)applySurfaceLayerOpacity;
@@ -3696,6 +3908,33 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     self = [super initWithFrame:frameRect];
     if (!self) return nil;
 
+    if (NativeSdkSharedRendererClientEnabled()) {
+        /* Device-less widget process: no Metal object is created here,
+         * ever — frames arrive from the render host and show as plain
+         * layer contents. The placeholder timer still pumps logical
+         * frame completions until the first remote present. */
+        CALayer *contentLayer = [CALayer layer];
+        contentLayer.opaque = YES;
+        contentLayer.contentsGravity = kCAGravityTopLeft;
+        self.wantsLayer = YES;
+        self.layer = contentLayer;
+        self.layerContentsRedrawPolicy = NSViewLayerContentsRedrawDuringViewResize;
+        self.accessibilityRole = NSAccessibilityGroupRole;
+        _surfaceCursor = [NSCursor arrowCursor];
+        _canvasImageCache = [NSMutableDictionary dictionary];
+        _windowDragRegions = @[];
+        _windowDragExclusions = @[];
+        self.markedText = @"";
+        self.markedTextRange = NSMakeRange(NSNotFound, 0);
+        self.selectedTextRange = NSMakeRange(0, 0);
+        [self updateDrawableSize];
+        _displayTimer = [NSTimer timerWithTimeInterval:(1.0 / 60.0) target:self selector:@selector(renderFrame) userInfo:nil repeats:YES];
+        _displayTimer.tolerance = 1.0 / 240.0;
+        [[NSRunLoop mainRunLoop] addTimer:_displayTimer forMode:NSRunLoopCommonModes];
+        [self renderFrame];
+        return self;
+    }
+
     const BOOL bakeoffTrace = NativeSdkRendererBakeoffTraceEnabled();
     const uint64_t resourceBeginNs = bakeoffTrace ? NativeSdkTimestampNanoseconds() : 0;
     NativeSdkMetalProcessResources *resources = [NativeSdkMetalProcessResources sharedResources];
@@ -3793,6 +4032,10 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 }
 
 - (BOOL)isAvailable {
+    /* Device-less availability is the shared-renderer client's whole
+     * point: presents succeed or refuse per frame over the channel, and
+     * refusals drive the existing fallback/retry machinery. */
+    if (NativeSdkSharedRendererClientEnabled()) return self.layer != nil;
     if (self.device == nil || self.commandQueue == nil) return NO;
     if (self.headlessExport) return self.iosurfacePresenter != nil;
     if (NativeSdkIOSurfacePresentEnabled()) return self.iosurfacePresenter != nil && self.layer != nil;
@@ -3810,7 +4053,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     const BOOL opaque = self.gpuAlphaMode != 2;
     if (self.metalLayer) {
         self.metalLayer.opaque = opaque;
-    } else if (NativeSdkIOSurfacePresentEnabled()) {
+    } else if (NativeSdkIOSurfacePresentEnabled() || NativeSdkSharedRendererClientEnabled()) {
         self.layer.opaque = opaque;
     }
 }
@@ -3887,7 +4130,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 }
 
 - (void)updateDrawableSize {
-    const BOOL iosurfacePresent = NativeSdkIOSurfacePresentEnabled();
+    const BOOL iosurfacePresent = NativeSdkIOSurfacePresentEnabled() || NativeSdkSharedRendererClientEnabled();
     if (!self.metalLayer && !iosurfacePresent) return;
     CGFloat scale = self.window.backingScaleFactor;
     if (scale <= 0) scale = NSScreen.mainScreen.backingScaleFactor;
@@ -3914,6 +4157,15 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 }
 
 - (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight dirtyRects:(NSArray<NSValue *> *)dirtyRects rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
+    if (NativeSdkSharedRendererClientEnabled()) {
+        /* No Metal in this process means no local pixel upload either.
+         * Refusing keeps the runtime's demote/retry machinery honest: it
+         * backs off, re-probes the packet path (1/5/30 s), and recovers
+         * the moment the render host is reachable again. The window
+         * keeps its retained contents meanwhile. */
+        fprintf(stderr, "weaver-shared-renderer: pixel fallback refused (device-less widget); retry cadence covers host recovery\n");
+        return NO;
+    }
     if (![self isAvailable] || !rgba8 || width == 0 || height == 0) return NO;
     if (byteLength != width * height * 4) return NO;
     if (![self ensureCanvasPresenter]) return NO;
@@ -4039,6 +4291,13 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         return 1;
     }
     if (!representable || unsupportedCommandCount != 0 || !json || byteLength == 0 || surfaceWidth <= 0 || surfaceHeight <= 0) return 0;
+    if (NativeSdkSharedRendererClientEnabled()) {
+        /* The engine retries JSON only after a binary refusal, and the
+         * host would answer JSON with the same refusal — say so loudly
+         * instead of a second round trip. */
+        fprintf(stderr, "weaver-shared-renderer: json packet refused (binary already refused this frame)\n");
+        return 0;
+    }
 
     const uint64_t decodeBeginNs = NativeSdkTimestampNanoseconds();
     NSData *packetData = [NSData dataWithBytes:json length:byteLength];
@@ -4070,6 +4329,9 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         return 1;
     }
     if (!representable || unsupportedCommandCount != 0 || !packet || byteLength == 0 || surfaceWidth <= 0 || surfaceHeight <= 0) return 0;
+    if (NativeSdkSharedRendererClientEnabled()) {
+        return [self sharedRendererPresentPacket:packet byteLength:byteLength surfaceWidth:surfaceWidth surfaceHeight:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA commandCount:commandCount];
+    }
 
     const uint64_t decodeBeginNs = NativeSdkTimestampNanoseconds();
     NSDictionary *decoded = NativeSdkPacketDictionaryFromBinary(packet, byteLength);
@@ -4086,6 +4348,39 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         self.lastPacketDrawNs = NativeSdkTimestampNanoseconds() - drawBeginNs;
     }
     return result;
+}
+
+/* The shared-renderer client present: one blocking round trip to the
+ * render host, then the reply's IOSurface becomes the layer contents —
+ * the device-less mirror of presentCompositePacketWithCommands +
+ * renderFrame, with identical completion semantics (the reply arrives
+ * only after the host's GPU finished the surface, so the flip below can
+ * never show a half-rendered frame). */
+- (NSInteger)sharedRendererPresentPacket:(const uint8_t *)packet byteLength:(NSUInteger)byteLength surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA commandCount:(NSUInteger)commandCount {
+    @autoreleasepool {
+        IOSurfaceRef surface = NULL;
+        const NSInteger result = [[NativeSdkSharedRendererConnection sharedConnection]
+            presentPacket:packet
+               byteLength:byteLength
+             surfaceWidth:surfaceWidth
+            surfaceHeight:surfaceHeight
+                    scale:scale
+                   clearR:clearR clearG:clearG clearB:clearB clearA:clearA
+             commandCount:commandCount
+               outSurface:&surface];
+        if (result != 1 || !surface) return result == 1 ? 0 : result;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.layer.contents = (__bridge id)surface;
+        [CATransaction commit];
+        self.hasCanvasTexture = YES;
+        self.renderedFrame = YES;
+        self.hasEverPresented = YES;
+        self.canvasCompositePresentCount += 1;
+        [self stopDisplayTimer];
+        [self scheduleFrameEventEmissionForPresentCompletion:YES];
+        return 1;
+    }
 }
 
 /* Draw-trace mode (NATIVE_SDK_GPU_DRAW_TRACE=1): per-present phase and
@@ -6406,6 +6701,16 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
 - (void)renderFrame {
     if (![self isAvailable] || self.hidden || self.bounds.size.width <= 0 || self.bounds.size.height <= 0) return;
+    if (NativeSdkSharedRendererClientEnabled()) {
+        /* Client mode has no local render target: content reaches the
+         * glass when a remote present flips the layer contents. A frame
+         * requested by the runtime still always completes — logically,
+         * from retained state, paced by the shared scheduler (the same
+         * policy as the occluded and nil-drawable paths). */
+        [self updateDrawableSize];
+        [self scheduleFrameEventEmission];
+        return;
+    }
     if (NativeSdkIOSurfacePresentEnabled()) {
         [self renderFrameThroughIOSurfacePresenter];
         return;
@@ -12050,9 +12355,6 @@ void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_
     object.trayCallback = callback;
     object.trayContext = context;
 }
-
-#include <bootstrap.h>
-#include <servers/bootstrap.h>
 
 /* ===== The macOS render host (shared renderer, host side) =====
  * One process owns the only Metal device for every widget: it claims the
