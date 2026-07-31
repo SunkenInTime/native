@@ -160,6 +160,8 @@ static inline bool weaverRendererMachResourceUploadValid(const WeaverRendererMac
         upload->version != kWeaverRendererMachVersion ||
         upload->struct_size != sizeof(WeaverRendererMachResourceUpload) ||
         upload->resource_id == 0) return false;
+    if (upload->resource_kind != kWeaverRendererMachResourceImage &&
+        upload->resource_kind != kWeaverRendererMachResourceFont) return false;
     if (upload->payload_len == 0) {
         /* removal */
         return upload->width == 0 && upload->height == 0 && upload->payload.size == 0;
