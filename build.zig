@@ -592,6 +592,16 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSAccessibilityProgressIndicatorRole" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "view.accessibilityRole = NativeSdkAccessibilityRoleForNativeViewKind(kind)" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-render-host-frame-budget", "Verify the render host's per-client frame budget names itself when it fires", &.{
+        // The tripwire (sized from a live measurement receipt) and the
+        // loud, self-naming trip line: budget, measured cost, client.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostFrameBudgetNs = 250ull" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "FRAME BUDGET EXCEEDED pid=%d took=%llums budget=%llums" },
+        // Every frame is measured (trace-gated per-frame line for future
+        // receipts), on both the export and static/refusal paths.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "client.frameRenderBeginNs = NativeSdkTimestampNanoseconds();" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "weaver-render-host: frame-trace pid=%d" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-shared-renderer-client", "Verify the device-less widget client keeps the shared-renderer contract", &.{
         // No Metal object is ever created in client mode; availability is
         // device-less by design.
