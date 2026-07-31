@@ -12130,6 +12130,17 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
     mach_port_t replyPort = frame->header.msgh_remote_port;
     void *packetBytes = frame->packet.address;
     const mach_msg_size_t packetSize = frame->packet.size;
+    if (client.pendingReplyPort != MACH_PORT_NULL || client.renderer.headlessExportInFlight) {
+        /* The contract is one outstanding frame per client (the reply is
+         * the scheduler's completion signal), and the host ENFORCES it:
+         * an overlapping frame would clobber the reply right the earlier
+         * export is about to answer. Refuse the newcomer on its own
+         * reply port; the in-flight frame keeps its right. */
+        fprintf(stderr, "weaver-render-host: pid=%d sent an overlapping frame (one outstanding per client); refused\n", client.widgetPid);
+        if (packetBytes) vm_deallocate(mach_task_self(), (vm_address_t)packetBytes, packetSize);
+        NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusRefused, NULL, 0, 0);
+        return;
+    }
     if (!weaverRendererMachFrameValid(frame)) {
         fprintf(stderr, "weaver-render-host: invalid frame from pid=%d (len=%u)\n", client.widgetPid, frame->packet_len);
         if (packetBytes) vm_deallocate(mach_task_self(), (vm_address_t)packetBytes, packetSize);
@@ -12265,6 +12276,14 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
                     if (frameRcv != KERN_SUCCESS) return;
                     if (frameMessage.frame.header.msgh_id == MACH_NOTIFY_NO_SENDERS) {
                         fprintf(stderr, "weaver-render-host: client pid=%d disconnected\n", strongClient.widgetPid);
+                        /* An export in flight still answers through its
+                         * captured completion (the send fails harmlessly
+                         * and destroys the right); only a reply right with
+                         * NO completion coming needs disposing here. */
+                        if (!strongClient.renderer.headlessExportInFlight && strongClient.pendingReplyPort != MACH_PORT_NULL) {
+                            mach_port_deallocate(mach_task_self(), strongClient.pendingReplyPort);
+                            strongClient.pendingReplyPort = MACH_PORT_NULL;
+                        }
                         strongClient.renderer.headlessExportCompletion = nil;
                         strongClient.renderer = nil;
                         dispatch_source_cancel(strongClient.frameSource);
