@@ -624,6 +624,12 @@ pub fn build(b: *std.Build) void {
         // fresh view cache lacks the entry — art survives host crashes.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "registeredImagesById" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (cacheKey && !imageCache[cacheKey] && imageStore[cacheKey]) {" },
+        // Fonts ride the same resource channel into a PER-CLIENT table,
+        // swapped in around each present so widgets' font ids can never
+        // collide in the shared host; faces replay after reconnect.
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "kWeaverRendererMachResourceFont" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostSetActiveFontTable" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "registeredFontsById" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-shared-renderer-client", "Verify the device-less widget client keeps the shared-renderer contract", &.{
         // No Metal object is ever created in client mode; availability is

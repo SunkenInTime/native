@@ -928,6 +928,7 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
  * Bounded by the SDK's image registry (16 ids; 256 KiB each in the
  * widget profile — <= 4 MiB worst case, CPU-side). */
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSDictionary *> *registeredImagesById;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSData *> *registeredFontsById;
 @property(nonatomic, assign) uint32_t surfacePixelWidth;
 @property(nonatomic, assign) uint32_t surfacePixelHeight;
 @property(nonatomic, assign) BOOL loggedWaitingForHost;
@@ -943,6 +944,7 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
         connection = [[NativeSdkSharedRendererConnection alloc] init];
         connection.surfacesById = [NSMutableDictionary dictionary];
         connection.registeredImagesById = [NSMutableDictionary dictionary];
+        connection.registeredFontsById = [NSMutableDictionary dictionary];
     });
     return connection;
 }
@@ -1014,18 +1016,39 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
     self.replyPort = replyPort;
     self.loggedWaitingForHost = NO;
     fprintf(stderr, "weaver-shared-renderer: connected to render host\n");
-    /* A fresh host starts with an empty per-client image store, but the
-     * runtime's cache still (correctly) retains unchanged ids — replay
-     * every registered image so the first post-reconnect frame's retain
-     * actions resolve. */
+    /* A fresh host starts with empty per-client stores, but the
+     * runtime's caches still (correctly) treat unchanged resources as
+     * registered — replay every font and image so the first
+     * post-reconnect frame resolves. Fonts first: text rasters draw with
+     * them. */
+    for (NSNumber *fontIdNumber in [self.registeredFontsById.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        NSData *face = self.registeredFontsById[fontIdNumber];
+        const NSInteger fontReplayed = [self sendResourceWithKind:kWeaverRendererMachResourceFont
+                                                       resourceId:fontIdNumber.unsignedLongLongValue
+                                                            width:0
+                                                           height:0
+                                                            bytes:(const uint8_t *)face.bytes
+                                                       byteLength:face.length];
+        if (fontReplayed == 0) {
+            fprintf(stderr, "weaver-shared-renderer: font replay refused for id=%llu; dropping it\n", fontIdNumber.unsignedLongLongValue);
+            [self.registeredFontsById removeObjectForKey:fontIdNumber];
+            continue;
+        }
+        if (fontReplayed < 0) {
+            fprintf(stderr, "weaver-shared-renderer: font replay transport failure for id=%llu; reconnecting from scratch\n", fontIdNumber.unsignedLongLongValue);
+            [self disconnect];
+            return NO;
+        }
+    }
     for (NSNumber *imageIdNumber in [self.registeredImagesById.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
         NSDictionary *entry = self.registeredImagesById[imageIdNumber];
         NSData *pixels = entry[@"pixels"];
-        const NSInteger replayed = [self sendImageWithId:imageIdNumber.unsignedLongLongValue
-                                                   width:[entry[@"width"] unsignedIntegerValue]
-                                                  height:[entry[@"height"] unsignedIntegerValue]
-                                                   rgba8:(const uint8_t *)pixels.bytes
-                                              byteLength:pixels.length];
+        const NSInteger replayed = [self sendResourceWithKind:kWeaverRendererMachResourceImage
+                                                    resourceId:imageIdNumber.unsignedLongLongValue
+                                                         width:[entry[@"width"] unsignedIntegerValue]
+                                                        height:[entry[@"height"] unsignedIntegerValue]
+                                                         bytes:(const uint8_t *)pixels.bytes
+                                                    byteLength:pixels.length];
         if (replayed == 0) {
             /* Refused by a live host: the image can never be accepted and
              * would poison every future replay. Drop it and keep going —
@@ -1145,6 +1168,23 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
  * ahead of the packets that reference the image, exactly like the
  * in-process side channel. One reply per request, same tripwires as
  * frames. */
+- (BOOL)registerFontWithId:(uint64_t)fontId bytes:(const uint8_t *)bytes byteLength:(NSUInteger)byteLength {
+    if (!bytes || byteLength == 0) return NO;
+    /* Fonts register at widget startup, often before the host is
+     * reachable — record the replay copy and treat delivery as
+     * best-effort: the reconnect replay carries it the moment a session
+     * exists. Only a live host's refusal fails the registration (the
+     * face can never be accepted). */
+    self.registeredFontsById[@(fontId)] = [NSData dataWithBytes:bytes length:byteLength];
+    if (![self ensureConnected]) return YES;
+    const NSInteger sent = [self sendResourceWithKind:kWeaverRendererMachResourceFont resourceId:fontId width:0 height:0 bytes:bytes byteLength:byteLength];
+    if (sent == 0) {
+        [self.registeredFontsById removeObjectForKey:@(fontId)];
+        return NO;
+    }
+    return YES;
+}
+
 - (BOOL)uploadImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
     /* Record the replay copy FIRST: even if the host is down right now,
      * the eventual reconnect replays it (ensureConnected refuses this
@@ -1160,7 +1200,7 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
         [self.registeredImagesById removeObjectForKey:@(imageId)];
     }
     if (![self ensureConnected]) return NO;
-    const NSInteger sent = [self sendImageWithId:imageId width:width height:height rgba8:rgba8 byteLength:byteLength];
+    const NSInteger sent = [self sendResourceWithKind:kWeaverRendererMachResourceImage resourceId:imageId width:width height:height bytes:rgba8 byteLength:byteLength];
     if (sent == 0) {
         /* The host refused the image outright (it can never be accepted);
          * keeping it would poison every reconnect's replay. Drop it — the
@@ -1176,26 +1216,27 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
  * accepted, 0 refused by the host (the image can never be accepted —
  * callers drop it), -1 transport failure (the session is torn down and
  * the entry stays for the next reconnect's replay). */
-- (NSInteger)sendImageWithId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
-    WeaverRendererMachImageUpload upload = {0};
+- (NSInteger)sendResourceWithKind:(uint32_t)kind resourceId:(uint64_t)imageId width:(NSUInteger)width height:(NSUInteger)height bytes:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
+    WeaverRendererMachResourceUpload upload = {0};
     upload.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
     upload.header.msgh_remote_port = self.sessionPort;
     upload.header.msgh_local_port = self.replyPort;
     upload.header.msgh_size = sizeof(upload);
-    upload.header.msgh_id = kWeaverRendererMachMsgImageUpload;
+    upload.header.msgh_id = kWeaverRendererMachMsgResourceUpload;
     upload.magic = kWeaverRendererMachMagic;
     upload.version = kWeaverRendererMachVersion;
     upload.struct_size = sizeof(upload);
-    upload.image_id = imageId;
+    upload.resource_id = imageId;
+    upload.resource_kind = kind;
     if (rgba8 && byteLength > 0) {
         upload.header.msgh_bits |= MACH_MSGH_BITS_COMPLEX;
         upload.body.msgh_descriptor_count = 1;
-        upload.pixels.address = (void *)rgba8;
-        upload.pixels.size = (mach_msg_size_t)byteLength;
-        upload.pixels.copy = MACH_MSG_VIRTUAL_COPY;
-        upload.pixels.deallocate = FALSE;
-        upload.pixels.type = MACH_MSG_OOL_DESCRIPTOR;
-        upload.pixels_len = (uint32_t)byteLength;
+        upload.payload.address = (void *)rgba8;
+        upload.payload.size = (mach_msg_size_t)byteLength;
+        upload.payload.copy = MACH_MSG_VIRTUAL_COPY;
+        upload.payload.deallocate = FALSE;
+        upload.payload.type = MACH_MSG_OOL_DESCRIPTOR;
+        upload.payload_len = (uint32_t)byteLength;
         upload.width = (uint32_t)width;
         upload.height = (uint32_t)height;
     }
@@ -1206,7 +1247,7 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
         [self disconnect];
         return -1;
     }
-    struct { WeaverRendererMachImageUploadReply reply; mach_msg_trailer_t trailer; } uploadReply = {0};
+    struct { WeaverRendererMachResourceUploadReply reply; mach_msg_trailer_t trailer; } uploadReply = {0};
     kr = mach_msg(&uploadReply.reply.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(uploadReply), self.replyPort, NativeSdkSharedRendererReplyTimeoutMs, MACH_PORT_NULL);
     if (kr != KERN_SUCCESS) {
         fprintf(stderr, "weaver-shared-renderer: image upload reply timed out (kr=0x%x) — treating host as crashed\n", kr);
@@ -2701,23 +2742,40 @@ static NSMutableDictionary<NSNumber *, id> *NativeSdkRegisteredFontDescriptors(v
 // their cache so a registered id can never be masked by a font resolved
 // for that id earlier (ids are engine-validated and permanent, so cached
 // NSFonts here never go stale).
+/* Render-host scoping: while a client's frame is being presented, its
+ * per-client font table overrides the process table so font ids from
+ * different widgets never collide in the shared host. Set and cleared
+ * synchronously around the present on the main queue (raster fills
+ * complete within the present call); in-process rendering never sets it. */
+static NSMutableDictionary<NSNumber *, id> *gWeaverActiveClientFontTable = nil;
+static uint64_t gWeaverActiveClientFontTag = 0;
+
+static void NativeSdkRenderHostSetActiveFontTable(NSMutableDictionary<NSNumber *, id> *table, uint64_t tag) {
+    gWeaverActiveClientFontTable = table;
+    gWeaverActiveClientFontTag = table ? tag : 0;
+}
+
 static NSFont *NativeSdkRegisteredFontForId(unsigned long long value, CGFloat size) {
-    NSMutableDictionary<NSNumber *, id> *table = NativeSdkRegisteredFontDescriptors();
-    static NSMutableDictionary<NSString *, NSFont *> *sizeCache = nil;
+    NSMutableDictionary<NSNumber *, id> *table = gWeaverActiveClientFontTable ?: NativeSdkRegisteredFontDescriptors();
+    const uint64_t tag = gWeaverActiveClientFontTable ? gWeaverActiveClientFontTag : 0;
+    /* NSCache: bounded and thread-safe, so per-client tags cannot grow the
+     * cache without limit across client generations. */
+    static NSCache<NSString *, NSFont *> *sizeCache = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        sizeCache = [[NSMutableDictionary alloc] init];
+        sizeCache = [[NSCache alloc] init];
+        sizeCache.countLimit = 512;
     });
     @synchronized (table) {
         id descriptorObject = table[@(value)];
         if (!descriptorObject) return nil;
-        NSString *key = [NSString stringWithFormat:@"%llu/%.3f", value, (double)size];
-        NSFont *cached = sizeCache[key];
+        NSString *key = [NSString stringWithFormat:@"%llu/%llu/%.3f", (unsigned long long)tag, value, (double)size];
+        NSFont *cached = [sizeCache objectForKey:key];
         if (cached) return cached;
         CTFontRef created = CTFontCreateWithFontDescriptor((__bridge CTFontDescriptorRef)descriptorObject, size, NULL);
         if (!created) return nil;
         NSFont *font = (__bridge_transfer NSFont *)created;
-        sizeCache[key] = font;
+        [sizeCache setObject:font forKey:key];
         return font;
     }
 }
@@ -2730,6 +2788,15 @@ static NSFont *NativeSdkRegisteredFontForId(unsigned long long value, CGFloat si
 // error engine-side, never a silent fallback at draw time.
 int native_sdk_appkit_register_font(uint64_t font_id, const uint8_t *bytes, size_t bytes_len) {
     if (font_id == 0 || !bytes || bytes_len == 0) return 0;
+    if (NativeSdkSharedRendererClientEnabled()) {
+        /* Device-less widget: text rasterizes in the render host, so the
+         * face belongs in the host's per-client font table — ahead of
+         * the packets whose text draws with it. Registered locally too:
+         * the widget's own text MEASUREMENT (native_sdk_appkit_measure_text)
+         * resolves through the same table, and layout must measure with
+         * the same face the host draws. */
+        if (![[NativeSdkSharedRendererConnection sharedConnection] registerFontWithId:font_id bytes:bytes byteLength:bytes_len]) return 0;
+    }
     @autoreleasepool {
         NSData *data = [NSData dataWithBytes:bytes length:bytes_len];
         CTFontDescriptorRef descriptor = CTFontManagerCreateFontDescriptorFromData((__bridge CFDataRef)data);
@@ -12567,6 +12634,11 @@ void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_
 @property(nonatomic, assign) mach_port_t pendingReplyPort;
 /* The most recently exported surface, re-sent for static frames
  * (requiresRender == 0 never reaches the composite pass). */
+/* This client's registered font faces, keyed by the widget's font ids.
+ * Scoped per client (not the process table) so two widgets' font ids
+ * can never collide in the shared host; swapped in around each present
+ * via NativeSdkRenderHostSetActiveFontTable. */
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, id> *fontDescriptorsById;
 @property(nonatomic, assign) IOSurfaceRef lastSurface;
 @property(nonatomic, assign) uint32_t lastPixelWidth;
 @property(nonatomic, assign) uint32_t lastPixelHeight;
@@ -12684,28 +12756,40 @@ static void NativeSdkRenderHostSendFrameReply(mach_port_t replyPort, int32_t sta
  * packets that will reference it, mirroring the in-process side channel.
  * A renderer-less client (image before first frame) gets one constructed
  * on the spot: uploads precede presents by contract. */
-static void NativeSdkRenderHostHandleImageUpload(NativeSdkRenderHostClient *client, WeaverRendererMachImageUpload *upload) {
+static void NativeSdkRenderHostHandleResourceUpload(NativeSdkRenderHostClient *client, WeaverRendererMachResourceUpload *upload) {
     const mach_port_t replyPort = upload->header.msgh_remote_port;
-    void *pixelBytes = upload->body.msgh_descriptor_count == 1 ? upload->pixels.address : NULL;
-    const mach_msg_size_t pixelSize = upload->body.msgh_descriptor_count == 1 ? upload->pixels.size : 0;
+    void *pixelBytes = upload->body.msgh_descriptor_count == 1 ? upload->payload.address : NULL;
+    const mach_msg_size_t pixelSize = upload->body.msgh_descriptor_count == 1 ? upload->payload.size : 0;
     BOOL stored = NO;
-    if (weaverRendererMachImageUploadValid(upload)) {
+    if (weaverRendererMachResourceUploadValid(upload)) {
         if (!client.renderer) {
             client.renderer = [[NativeSdkMetalSurfaceView alloc] initHeadlessRendererWithFrame:NSMakeRect(0, 0, 1, 1)];
         }
-        if (upload->pixels_len == 0) {
-            NativeSdkCanvasRemoveImage(upload->image_id, client.renderer.headlessImageStore, client.renderer.headlessImagePixelStore, client.renderer.headlessImageTextureStore);
+        if (!client.fontDescriptorsById) client.fontDescriptorsById = [NSMutableDictionary dictionary];
+        if (upload->payload_len == 0) {
+            if (upload->resource_kind == kWeaverRendererMachResourceFont) {
+                [client.fontDescriptorsById removeObjectForKey:@(upload->resource_id)];
+            } else {
+                NativeSdkCanvasRemoveImage(upload->resource_id, client.renderer.headlessImageStore, client.renderer.headlessImagePixelStore, client.renderer.headlessImageTextureStore);
+            }
             stored = YES;
+        } else if (pixelBytes && upload->resource_kind == kWeaverRendererMachResourceFont) {
+            NSData *face = [NSData dataWithBytes:pixelBytes length:upload->payload_len];
+            CTFontDescriptorRef descriptor = CTFontManagerCreateFontDescriptorFromData((__bridge CFDataRef)face);
+            if (descriptor) {
+                client.fontDescriptorsById[@(upload->resource_id)] = (__bridge_transfer id)descriptor;
+                stored = YES;
+            }
         } else if (pixelBytes) {
-            stored = NativeSdkCanvasStoreImage(upload->image_id, upload->width, upload->height, (const uint8_t *)pixelBytes, upload->pixels_len,
+            stored = NativeSdkCanvasStoreImage(upload->resource_id, upload->width, upload->height, (const uint8_t *)pixelBytes, upload->payload_len,
                                                client.renderer.headlessImageStore, client.renderer.headlessImagePixelStore, client.renderer.headlessImageTextureStore);
         }
     } else {
         fprintf(stderr, "weaver-render-host: invalid image upload from pid=%d (id=%llu %ux%u len=%u)\n",
-                client.widgetPid, (unsigned long long)upload->image_id, upload->width, upload->height, upload->pixels_len);
+                client.widgetPid, (unsigned long long)upload->resource_id, upload->width, upload->height, upload->payload_len);
     }
     if (pixelBytes) vm_deallocate(mach_task_self(), (vm_address_t)pixelBytes, pixelSize);
-    WeaverRendererMachImageUploadReply reply = {0};
+    WeaverRendererMachResourceUploadReply reply = {0};
     reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
     reply.header.msgh_remote_port = replyPort;
     reply.header.msgh_size = sizeof(reply);
@@ -12777,6 +12861,7 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
                 client.widgetPid, frame->surface_width, frame->surface_height, frame->scale);
     }
     client.pendingReplyPort = replyPort;
+    NativeSdkRenderHostSetActiveFontTable(client.fontDescriptorsById, (uint64_t)client.widgetPid);
     const NSInteger result = [client.renderer
         presentGpuPacketBinaryWithSurfaceWidth:frame->surface_width
                                         height:frame->surface_height
@@ -12788,6 +12873,7 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
                                  representable:frame->representable != 0
                                         packet:(const uint8_t *)packetBytes
                                     byteLength:frame->packet_len];
+    NativeSdkRenderHostSetActiveFontTable(nil, 0);
     if (packetBytes) vm_deallocate(mach_task_self(), (vm_address_t)packetBytes, packetSize);
     if (client.renderer.headlessExportInFlight) return; /* the export completion sends the reply (and notes the duration) */
     NativeSdkRenderHostNoteFrameDuration(client);
@@ -12885,7 +12971,7 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
                     if (!strongClient) return;
                     union {
                         struct { WeaverRendererMachFrame frame; mach_msg_trailer_t trailer; } framed;
-                        struct { WeaverRendererMachImageUpload upload; mach_msg_trailer_t trailer; } image;
+                        struct { WeaverRendererMachResourceUpload upload; mach_msg_trailer_t trailer; } resource;
                     } message;
                     memset(&message, 0, sizeof(message));
                     kern_return_t frameRcv = mach_msg(&message.framed.frame.header, MACH_RCV_MSG, 0, sizeof(message), strongClient.sessionPort, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -12910,23 +12996,23 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
                         [clients removeObject:strongClient];
                         return;
                     }
-                    if (message.framed.frame.header.msgh_id == kWeaverRendererMachMsgImageUpload) {
+                    if (message.framed.frame.header.msgh_id == kWeaverRendererMachMsgResourceUpload) {
                         /* Same shape-before-content rule as frames: an
                          * upload is either non-complex (a removal) or
                          * complex with exactly one out-of-line descriptor.
                          * Anything else — a smuggled port right where
                          * pixels belong — is destroyed whole. */
-                        const BOOL uploadComplex = (message.image.upload.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0;
+                        const BOOL uploadComplex = (message.resource.upload.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0;
                         const BOOL uploadShapeOk = uploadComplex
-                            ? (message.image.upload.body.msgh_descriptor_count == 1 &&
-                               message.image.upload.pixels.type == MACH_MSG_OOL_DESCRIPTOR)
-                            : message.image.upload.body.msgh_descriptor_count == 0;
+                            ? (message.resource.upload.body.msgh_descriptor_count == 1 &&
+                               message.resource.upload.payload.type == MACH_MSG_OOL_DESCRIPTOR)
+                            : message.resource.upload.body.msgh_descriptor_count == 0;
                         if (!uploadShapeOk) {
                             fprintf(stderr, "weaver-render-host: malformed image upload from pid=%d destroyed\n", strongClient.widgetPid);
-                            mach_msg_destroy(&message.image.upload.header);
+                            mach_msg_destroy(&message.resource.upload.header);
                             return;
                         }
-                        NativeSdkRenderHostHandleImageUpload(strongClient, &message.image.upload);
+                        NativeSdkRenderHostHandleResourceUpload(strongClient, &message.resource.upload);
                         return;
                     }
                     /* Shape before content: a frame must be a complex

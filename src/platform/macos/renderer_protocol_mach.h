@@ -37,7 +37,12 @@ static const uint32_t kWeaverRendererMachMaxPacket = 8 * 1024 * 1024;
 enum {
     kWeaverRendererMachMsgHello = 0x57520001,
     kWeaverRendererMachMsgFrame = 0x57520002,
-    kWeaverRendererMachMsgImageUpload = 0x57520003,
+    kWeaverRendererMachMsgResourceUpload = 0x57520003,
+};
+
+enum {
+    kWeaverRendererMachResourceImage = 0,
+    kWeaverRendererMachResourceFont = 1,
 };
 
 /* Image pixels ride a side channel, exactly like the in-process binary
@@ -47,6 +52,11 @@ enum {
  * for the stock profile (1 MiB; the widget profile's 256 KiB is enforced
  * client-side by the SDK before bytes ever reach this channel). */
 static const uint32_t kWeaverRendererMachMaxImageBytes = 1024 * 1024;
+/* Font faces ride the same channel (native_sdk_appkit_register_font is
+ * the other pre-packet side channel). The ceiling matches the packet
+ * tripwire: full font files are megabyte-scale — Noro's subset face is
+ * ~100 KiB; whole CJK families would exceed this deliberately. */
+static const uint32_t kWeaverRendererMachMaxFontBytes = 8 * 1024 * 1024;
 
 enum {
     kWeaverRendererMachStatusFailed = 0,
@@ -118,21 +128,24 @@ typedef struct {
     uint32_t pixel_height;
 } WeaverRendererMachFrameReply;
 
-/* One registered image, uploaded (or removed) ahead of the packets that
- * reference it. pixels_len == 0 (with a null descriptor size) is a
- * removal; the reply is the completion signal, mirroring frames. */
+/* One registered resource, uploaded (or removed) ahead of the packets
+ * that reference it. payload_len == 0 (with a null descriptor size) is a
+ * removal; the reply is the completion signal, mirroring frames. Images
+ * carry width/height; fonts leave them zero. */
 typedef struct {
     mach_msg_header_t header;
     mach_msg_body_t body;
-    mach_msg_ool_descriptor_t pixels;
+    mach_msg_ool_descriptor_t payload;
     uint32_t magic;
     uint32_t version;
     uint32_t struct_size;
-    uint32_t pixels_len;
-    uint64_t image_id;
+    uint32_t payload_len;
+    uint64_t resource_id;
+    uint32_t resource_kind;
     uint32_t width;
     uint32_t height;
-} WeaverRendererMachImageUpload;
+    uint32_t reserved;
+} WeaverRendererMachResourceUpload;
 
 typedef struct {
     mach_msg_header_t header;
@@ -140,22 +153,30 @@ typedef struct {
     uint32_t version;
     uint32_t status;
     uint32_t reserved;
-} WeaverRendererMachImageUploadReply;
+} WeaverRendererMachResourceUploadReply;
 
-static inline bool weaverRendererMachImageUploadValid(const WeaverRendererMachImageUpload *upload) {
+static inline bool weaverRendererMachResourceUploadValid(const WeaverRendererMachResourceUpload *upload) {
     if (upload->magic != kWeaverRendererMachMagic ||
         upload->version != kWeaverRendererMachVersion ||
-        upload->struct_size != sizeof(WeaverRendererMachImageUpload) ||
-        upload->image_id == 0) return false;
-    if (upload->pixels_len == 0) {
+        upload->struct_size != sizeof(WeaverRendererMachResourceUpload) ||
+        upload->resource_id == 0) return false;
+    if (upload->payload_len == 0) {
         /* removal */
-        return upload->width == 0 && upload->height == 0 && upload->pixels.size == 0;
+        return upload->width == 0 && upload->height == 0 && upload->payload.size == 0;
     }
-    return upload->width > 0 && upload->height > 0 &&
-        upload->width <= 4096 && upload->height <= 4096 &&
-        upload->pixels_len == upload->width * upload->height * 4 &&
-        upload->pixels_len <= kWeaverRendererMachMaxImageBytes &&
-        upload->pixels.size == upload->pixels_len;
+    if (upload->payload.size != upload->payload_len) return false;
+    switch (upload->resource_kind) {
+    case kWeaverRendererMachResourceImage:
+        return upload->width > 0 && upload->height > 0 &&
+            upload->width <= 4096 && upload->height <= 4096 &&
+            upload->payload_len == upload->width * upload->height * 4 &&
+            upload->payload_len <= kWeaverRendererMachMaxImageBytes;
+    case kWeaverRendererMachResourceFont:
+        return upload->width == 0 && upload->height == 0 &&
+            upload->payload_len <= kWeaverRendererMachMaxFontBytes;
+    default:
+        return false;
+    }
 }
 
 static inline bool weaverRendererMachHelloValid(const WeaverRendererMachHello *hello) {
