@@ -11,6 +11,7 @@ test {
     _ = @import("canvas_widget_window_drag_tests.zig");
     _ = @import("canvas_widget_accessibility_tests.zig");
     _ = @import("canvas_widget_chart_tests.zig");
+    _ = @import("canvas_widget_immediate_tests.zig");
     _ = @import("canvas_widget_split_tree_tests.zig");
     _ = @import("canvas_widget_disclosure_tests.zig");
 }

@@ -98,6 +98,14 @@ pub const CanvasWidgetScrollEvent = struct {
 
 pub const CanvasWidgetDisplayListChrome = runtime_view.CanvasWidgetDisplayListChrome;
 
+/// A paint-only update for one retained widget. The command bytes remain
+/// caller-owned, matching `Widget.immediate_commands` in a retained layout;
+/// they must stay alive until the next update or layout replacement.
+pub const CanvasWidgetImmediateUpdate = struct {
+    id: canvas.ObjectId,
+    commands: []const canvas.ImmediateCanvasCommand,
+};
+
 pub const CanvasPresentationMode = enum {
     skipped,
     gpu_packet,
