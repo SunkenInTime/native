@@ -164,6 +164,54 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             return self.views[index].widgetLayoutTree();
         }
 
+        /// Replace only the immediate paint commands for already-retained
+        /// widgets, then emit and diff the display list once for the whole
+        /// batch. Layout, source reconciliation, semantics, and every other
+        /// widget stay untouched. This is the high-frequency seam for a
+        /// canvas whose backing command storage changed without changing the
+        /// declarative tree.
+        pub fn setCanvasWidgetImmediateCommands(
+            self: *Runtime,
+            window_id: platform.WindowId,
+            label: []const u8,
+            updates: []const runtime_api.CanvasWidgetImmediateUpdate,
+        ) anyerror!platform.ViewInfo {
+            try validateRuntimeViewParent(self, window_id);
+            try validateViewLabel(label);
+            const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
+            if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+
+            // Validate the entire batch before touching retained state. A bad
+            // id can never leave half the canvases on the new generation.
+            for (updates, 0..) |update, update_index| {
+                if (update.id == 0 or self.views[index].canvasWidgetNodeIndexById(update.id) == null) {
+                    return error.InvalidCommand;
+                }
+                for (updates[0..update_index]) |previous_update| {
+                    if (previous_update.id == update.id) return error.InvalidCommand;
+                }
+            }
+            if (updates.len == 0) return self.views[index].info();
+
+            var previous: [max_canvas_widget_nodes_per_view][]const canvas.ImmediateCanvasCommand = undefined;
+            if (updates.len > previous.len) return error.WidgetNodeLimitReached;
+            for (updates, 0..) |update, update_index| {
+                const node_index = self.views[index].canvasWidgetNodeIndexById(update.id).?;
+                previous[update_index] = self.views[index].widget_layout_nodes[node_index].widget.immediate_commands;
+                self.views[index].widget_layout_nodes[node_index].widget.immediate_commands = update.commands;
+            }
+            errdefer for (updates, 0..) |update, update_index| {
+                const node_index = self.views[index].canvasWidgetNodeIndexById(update.id).?;
+                self.views[index].widget_layout_nodes[node_index].widget.immediate_commands = previous[update_index];
+            };
+
+            const previous_revision = self.views[index].widget_revision;
+            errdefer self.views[index].widget_revision = previous_revision;
+            self.views[index].widget_revision +%= 1;
+            _ = try CanvasWidgetDisplayMethods(Runtime).refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility(self, index);
+            return self.views[index].info();
+        }
+
         pub fn canvasWidgetSemantics(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror![]const canvas.WidgetSemanticsNode {
             try validateRuntimeViewParent(self, window_id);
             try validateViewLabel(label);

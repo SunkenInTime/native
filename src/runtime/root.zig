@@ -27,6 +27,7 @@ pub const CanvasWidgetPointerEvent = core.CanvasWidgetPointerEvent;
 pub const CanvasWidgetKeyboardEvent = core.CanvasWidgetKeyboardEvent;
 pub const CanvasWidgetScrollEvent = core.CanvasWidgetScrollEvent;
 pub const CanvasWidgetDisplayListChrome = core.CanvasWidgetDisplayListChrome;
+pub const CanvasWidgetImmediateUpdate = core.CanvasWidgetImmediateUpdate;
 pub const CanvasPresentationMode = core.CanvasPresentationMode;
 pub const CanvasPresentationResult = core.CanvasPresentationResult;
 pub const CanvasWidgetAccessibilityActionKind = core.CanvasWidgetAccessibilityActionKind;
