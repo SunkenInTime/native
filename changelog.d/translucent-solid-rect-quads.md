@@ -1,0 +1,1 @@
+improvement: **Direct translucent rectangle quads on macOS**: pixel-aligned solid rectangles with alpha now use premultiplied Metal blending instead of per-frame CPU rasterization and texture upload, cutting animated meter and graph presentation cost.
