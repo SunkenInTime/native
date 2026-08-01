@@ -51,6 +51,7 @@ pub fn renderImageFingerprint(image_id: ImageId) u64 {
 
 pub fn renderImageFingerprintForResource(image_id: ImageId, image: ?ReferenceImage) u64 {
     const value = image orelse return renderImageFingerprint(image_id);
+    if (value.content_fingerprint != 0) return value.content_fingerprint;
     var hash = renderImageFingerprint(image_id);
     hash = resourceHashUsize(hash, value.width);
     hash = resourceHashUsize(hash, value.height);

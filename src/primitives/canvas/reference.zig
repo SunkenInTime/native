@@ -62,6 +62,10 @@ pub const ReferenceImage = struct {
     width: usize,
     height: usize,
     pixels: []const u8,
+    /// Optional fingerprint of id + dimensions + pixel content. Runtime
+    /// registries compute this once when pixels enter their owned pool; zero
+    /// asks a caller-supplied image to be hashed lazily by the planner.
+    content_fingerprint: u64 = 0,
 };
 
 /// One runtime-registered font face the reference renderer resolves text
