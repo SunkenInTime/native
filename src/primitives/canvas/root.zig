@@ -215,6 +215,7 @@ pub const RenderImageCacheActionKind = render_model.RenderImageCacheActionKind;
 pub const RenderImageCacheAction = render_model.RenderImageCacheAction;
 pub const RenderImageCachePlan = render_model.RenderImageCachePlan;
 pub const RenderImageCachePlanner = render_model.RenderImageCachePlanner;
+pub const renderImageFingerprintForResource = render_model.renderImageFingerprintForResource;
 pub const RenderResourceKind = render_model.RenderResourceKind;
 pub const RenderResource = render_model.RenderResource;
 pub const RenderResourcePlan = render_model.RenderResourcePlan;

@@ -44,12 +44,22 @@ test "canvas image registry registers, replaces, and unregisters" {
     const info = harness.runtime.registeredCanvasImage(7).?;
     try std.testing.expectEqual(@as(usize, 1), info.width);
     try std.testing.expectEqual(@as(usize, 1), info.height);
-    try std.testing.expectEqualSlices(u8, &red, harness.runtime.registeredCanvasImages()[0].pixels);
+    const red_resource = harness.runtime.registeredCanvasImages()[0];
+    try std.testing.expectEqualSlices(u8, &red, red_resource.pixels);
+    try std.testing.expect(red_resource.content_fingerprint != 0);
+    try std.testing.expectEqual(red_resource.content_fingerprint, canvas.renderImageFingerprintForResource(7, .{
+        .id = 7,
+        .width = 1,
+        .height = 1,
+        .pixels = &red,
+    }));
 
     // Re-registering the same id replaces the pixels in place.
     try harness.runtime.registerCanvasImage(7, 1, 1, &blue);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.registeredCanvasImageCount());
-    try std.testing.expectEqualSlices(u8, &blue, harness.runtime.registeredCanvasImages()[0].pixels);
+    const blue_resource = harness.runtime.registeredCanvasImages()[0];
+    try std.testing.expectEqualSlices(u8, &blue, blue_resource.pixels);
+    try std.testing.expect(blue_resource.content_fingerprint != red_resource.content_fingerprint);
 
     // Unregister frees the slot exactly once.
     try std.testing.expect(harness.runtime.unregisterCanvasImage(7));
@@ -109,8 +119,8 @@ test "registered images draw through the reference renderer screenshot" {
     // Raw RGBA fixture: 2x2 quadrant colors drawn with nearest sampling,
     // so each destination quadrant is one exact color.
     const fixture = [_]u8{
-        255, 0,   0,   255, 0,   255, 0,   255,
-        0,   0,   255, 255, 255, 255, 0,   255,
+        255, 0, 0,   255, 0,   255, 0, 255,
+        0,   0, 255, 255, 255, 255, 0, 255,
     };
     try harness.runtime.registerCanvasImage(42, 2, 2, &fixture);
 

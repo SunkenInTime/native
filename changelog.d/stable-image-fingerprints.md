@@ -1,0 +1,1 @@
+improvement: **Stable registered-image fingerprints**: runtime-owned image pixels are hashed once at registration instead of being re-hashed while planning every animated frame around static image chrome.
