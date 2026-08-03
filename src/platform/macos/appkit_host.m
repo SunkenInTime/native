@@ -4779,9 +4779,10 @@ static BOOL NativeSdkCompositeNeedsCpuReadableTarget(NSArray *commands) {
  *   - cached command rasters draw as textured quads (integer texture
  *     reads, premultiplied source-over blend — the same bytes the CPU
  *     blit composited);
- *   - pixel-aligned fully-opaque solid rect fills draw as flat quads on
- *     a blend-off pipeline (exact color copy; this covers the
- *     over-cache-budget full-surface background fill);
+ *   - pixel-aligned solid rect fills draw as flat quads; opaque fills use
+ *     the copy pipeline and translucent fills use premultiplied source-over
+ *     blending, so animated meter cells never detour through CPU raster +
+ *     texture upload;
  *   - transform-carrying and over-budget commands rasterize per frame
  *     through the same CG code, clipped to the repaint region, and draw
  *     as transient textured quads;
@@ -4796,7 +4797,7 @@ static BOOL NativeSdkCompositeNeedsCpuReadableTarget(NSArray *commands) {
  * pixel composites exactly once, like the CPU union clip). */
 
 typedef struct {
-    uint8_t type; /* 0 skip, 1 flat copy quad, 2 textured blend quad, 3 blur sandwich, 4 rounded fill, 5 rounded stroke, 6 tiled image */
+    uint8_t type; /* 0 skip, 1 flat copy quad, 2 textured blend quad, 3 blur sandwich, 4 rounded fill, 5 rounded stroke, 6 tiled image, 7 flat blend quad */
     BOOL hasCullBounds;
     BOOL hasRoundedClip;
     BOOL linearSampling;
@@ -5190,14 +5191,15 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             self.canvasTraceDirectCount += 1;
             continue;
         }
-        /* Pixel-aligned fully-opaque solid rect: exact flat quad. */
+        /* Pixel-aligned solid rect: exact flat quad. Translucent colors are
+         * premultiplied here and use the blend pipeline below; they do not
+         * need a CPU bitmap or a transient texture. */
         if ([kind isEqualToString:@"fill_rect_solid"] && !command[@"transform"]) {
             NSDictionary *paint = NativeSdkPacketDictionary(command[@"paint"]);
             NSDictionary *shape = NativeSdkPacketDictionary(command[@"shape"]);
             NSArray *colorArray = paint ? NativeSdkPacketArray(paint[@"color"], 4) : nil;
             CGFloat opacity = fmax(0.0, fmin(1.0, NativeSdkPacketNumber(command[@"opacity"], 1)));
-            if (colorArray && shape && [[paint[@"kind"] description] isEqualToString:@"color"] && opacity >= 1.0 &&
-                NativeSdkPacketNumber(colorArray[3], 1) >= 1.0) {
+            if (colorArray && shape && [[paint[@"kind"] description] isEqualToString:@"color"]) {
                 NSRect rect = CGRectStandardize(NativeSdkPacketRect(shape[@"rect"]));
                 NSArray *clipArray = NativeSdkPacketArray(command[@"clip"], 4);
                 BOOL clipUsable = (command[@"clip"] == nil || clipArray != nil) && NativeSdkPacketRadiusIsZero(command[@"clipRadius"]);
@@ -5214,15 +5216,17 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                     pxMaxX = fmax(pxMinX, fmin((CGFloat)pixelWidth, round(pxMaxX)));
                     pxMaxY = fmax(pxMinY, fmin((CGFloat)pixelHeight, round(pxMaxY)));
                     if (pxMaxX > pxMinX && pxMaxY > pxMinY) {
-                        op->type = 1;
+                        const CGFloat alpha = fmax(0.0, fmin(1.0,
+                            NativeSdkPacketNumber(colorArray[3], 1) * opacity));
+                        op->type = alpha >= 1.0 ? 1 : 7;
                         op->pxX = (float)pxMinX;
                         op->pxY = (float)pxMinY;
                         op->pxW = (float)(pxMaxX - pxMinX);
                         op->pxH = (float)(pxMaxY - pxMinY);
-                        op->colorR = (float)fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[0], 0)));
-                        op->colorG = (float)fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[1], 0)));
-                        op->colorB = (float)fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[2], 0)));
-                        op->colorA = 1;
+                        op->colorR = (float)(fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[0], 0))) * alpha);
+                        op->colorG = (float)(fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[1], 0))) * alpha);
+                        op->colorB = (float)(fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[2], 0))) * alpha);
+                        op->colorA = (float)alpha;
                         self.canvasTraceDirectCount += 1;
                         continue;
                     }
@@ -5600,7 +5604,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                 self.canvasTraceBindCount += 1;
             }
             [encoder setScissorRect:pxRects[rectIndex]];
-            if (op->type == 1) {
+            if (op->type == 1 || op->type == 7) {
                 const float color[4] = {op->colorR, op->colorG, op->colorB, op->colorA};
                 NativeSdkCompositeEncodeQuad(encoder, pixelWidth, pixelHeight, op->pxX, op->pxY, op->pxW, op->pxH, 0, 0, color, NO, self.canvasCompositeFlatTexture);
             } else if (op->type == 4 || op->type == 5) {

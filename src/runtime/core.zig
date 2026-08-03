@@ -139,6 +139,7 @@ pub const CanvasWidgetPointerEvent = runtime_api.CanvasWidgetPointerEvent;
 pub const CanvasWidgetKeyboardEvent = runtime_api.CanvasWidgetKeyboardEvent;
 pub const CanvasWidgetScrollEvent = runtime_api.CanvasWidgetScrollEvent;
 pub const CanvasWidgetDisplayListChrome = runtime_api.CanvasWidgetDisplayListChrome;
+pub const CanvasWidgetImmediateUpdate = runtime_api.CanvasWidgetImmediateUpdate;
 pub const CanvasPresentationMode = runtime_api.CanvasPresentationMode;
 pub const CanvasPresentationResult = runtime_api.CanvasPresentationResult;
 pub const CanvasWidgetAccessibilityActionKind = runtime_api.CanvasWidgetAccessibilityActionKind;
@@ -699,6 +700,7 @@ pub const Runtime = struct {
 
     const CanvasWidgetStateMethods = runtime_canvas_widget_state.RuntimeCanvasWidgetState(Runtime);
     pub const setCanvasWidgetLayout = CanvasWidgetStateMethods.setCanvasWidgetLayout;
+    pub const setCanvasWidgetImmediateCommands = CanvasWidgetStateMethods.setCanvasWidgetImmediateCommands;
     pub const canvasWidgetLayout = CanvasWidgetStateMethods.canvasWidgetLayout;
     pub const canvasWidgetSemantics = CanvasWidgetStateMethods.canvasWidgetSemantics;
     pub const dispatchCanvasWidgetAccessibilityAction = CanvasWidgetStateMethods.dispatchCanvasWidgetAccessibilityAction;

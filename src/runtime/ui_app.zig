@@ -438,6 +438,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// `fx.cancel(key)`). Effects are update-side only — views
             /// never spawn.
             update_fx: ?*const fn (model: *ModelT, msg: MsgT, fx: *Effects) void = null,
+            /// Stable identity of every model field used to derive the app's
+            /// views. When an update leaves this revision unchanged, UiApp
+            /// can keep the retained trees instead of rebuilding and laying
+            /// them out. Apps with paint-only mutable leaves may pair this
+            /// with `project_update` to refresh those leaves before the
+            /// rebuild is skipped.
+            view_revision: ?*const fn (model: *const ModelT) u64 = null,
+            /// Project a same-revision update into retained runtime state.
+            /// Return true when the update is fully represented and no view
+            /// rebuild is required; false takes the ordinary rebuild path.
+            /// This hook is never consulted until a successful view build has
+            /// recorded a revision. The window id and canvas label identify
+            /// the primary retained canvas being projected, regardless of
+            /// which window originated the message.
+            project_update: ?*const fn (runtime: *Runtime, window_id: platform.WindowId, canvas_label: []const u8, model: *const ModelT, msg: MsgT) anyerror!bool = null,
             /// TEA's init command: runs exactly once, on the installing
             /// frame, after the effects channel is bound and before the
             /// first view build — so a boot-time `fx.spawn`/`fx.fetch`
@@ -715,6 +730,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         canvas_size: geometry.SizeF = .{ .width = 1, .height = 1 },
         canvas_window_id: platform.WindowId = 1,
         installed: bool = false,
+        projected_view_revision: u64 = 0,
+        projected_view_revision_known: bool = false,
         /// Exactly-once guard for `Options.fonts`: registration must not
         /// retry on every frame after a teaching failure (ids that DID
         /// register would then fail `FontIdInUse` and bury the real
@@ -960,6 +977,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn assertOptions(options: Options) void {
             std.debug.assert(options.view != null or options.markup != null);
             std.debug.assert((options.update != null) != (options.update_fx != null));
+            std.debug.assert(options.project_update == null or options.view_revision != null);
             // Declared windows need the per-window view to build them.
             std.debug.assert(options.windows_fn == null or options.window_view != null);
             if (comptime !features.runtime_markup) std.debug.assert(options.markup == null);
@@ -1085,7 +1103,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Apply a message and rebuild the widget tree. Runtime-owned
         /// widget state is synced into the model first so `update` sees
         /// current slider values and scroll offsets.
-        pub fn dispatch(self: *Self, runtime: *Runtime, window_id: platform.WindowId, msg: MsgT) anyerror!void {
+        pub fn dispatch(self: *Self, runtime: *Runtime, _: platform.WindowId, msg: MsgT) anyerror!void {
             self.bindEffectsChannel(runtime);
             self.syncModel(runtime, self.canvas_window_id);
             self.applyMsg(msg);
@@ -1098,13 +1116,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // events land before the first frame on every launch, so it
             // used to cost a full view build on the launch path.
             if (!self.installed) return;
+            if (self.projectedViewRevisionMatches()) {
+                if (self.options.project_update) |project_update| {
+                    if (try project_update(runtime, self.canvas_window_id, self.options.canvas_label, &self.model, msg)) {
+                        // project_update only targets the primary retained
+                        // canvas. Reconcile the declared window set (including
+                        // a user-closed window the model still declares), then
+                        // rebuild installed secondary trees because they have
+                        // no projection hook of their own.
+                        self.applyWindows(runtime);
+                        try self.rebuildWindowSlots(runtime);
+                        return;
+                    }
+                } else return;
+            }
             try self.rebuild(runtime, self.canvas_window_id);
             try self.rebuildWindowSlots(runtime);
             // A Msg dispatched FROM a secondary window still rebuilt the
-            // main canvas above (one model, every window's view derives
-            // from it); `window_id` names the dispatch origin for apps
-            // that inspect it, not the rebuild target.
-            _ = window_id;
+            // main canvas above: one model owns every window's view.
         }
 
         /// Run `update` through whichever form the app declared; the
@@ -1360,6 +1389,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.applyWindows(runtime);
             self.applyChromeSelection();
             self.applyChromeNavigation();
+            if (self.options.view_revision) |view_revision| {
+                self.projected_view_revision = view_revision(&self.model);
+                self.projected_view_revision_known = true;
+            }
+        }
+
+        fn projectedViewRevisionMatches(self: *const Self) bool {
+            if (!self.projected_view_revision_known) return false;
+            const view_revision = self.options.view_revision orelse return false;
+            return view_revision(&self.model) == self.projected_view_revision;
         }
 
         /// Re-derive the model's selected chrome tab after a rebuild

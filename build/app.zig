@@ -19,7 +19,7 @@ const PlatformOption = enum {
     windows,
 };
 
-const TraceOption = enum {
+pub const TraceOption = enum {
     off,
     events,
     runtime,
@@ -36,6 +36,10 @@ pub const AppOptions = struct {
     /// caller's `-Dwidget-profile` value; the SDK default remains the
     /// stock desktop profile.
     widget_profile: ?bool = null,
+    /// Trace mode used when the caller does not pass `-Dtrace`. Ordinary
+    /// apps keep event tracing; high-frequency shells such as desktop
+    /// widgets may choose `.off` without removing the explicit build flag.
+    trace_default: TraceOption = .events,
     /// App entry point; defaults to src/main.zig (relative to `app_root`).
     main: []const u8 = "src/main.zig",
     /// Root of the app source tree, relative to the build root. "." for a
@@ -209,7 +213,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         }, widget_profile);
     }
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
-    const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
+    const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse app_options.trace_default;
     const debug_overlay = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
     const automation_enabled = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
     const js_bridge_enabled = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;

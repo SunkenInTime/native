@@ -85,6 +85,48 @@ fn retainedTextExists(runtime: *core.Runtime, text: []const u8) !bool {
     return false;
 }
 
+const ProjectedModel = struct {
+    revision: u64 = 0,
+    paint_tick: u64 = 0,
+};
+
+const ProjectedMsg = union(enum) {
+    paint,
+    structure,
+};
+
+const ProjectedApp = ui_app_model.UiApp(ProjectedModel, ProjectedMsg);
+var projected_view_builds: usize = 0;
+var projected_updates: usize = 0;
+
+fn projectedUpdate(model: *ProjectedModel, msg: ProjectedMsg) void {
+    switch (msg) {
+        .paint => model.paint_tick +%= 1,
+        .structure => model.revision +%= 1,
+    }
+}
+
+fn projectedView(ui: *ProjectedApp.Ui, model: *const ProjectedModel) ProjectedApp.Ui.Node {
+    projected_view_builds += 1;
+    return ui.text(.{}, ui.fmt("Revision {d}", .{model.revision}));
+}
+
+fn projectedViewRevision(model: *const ProjectedModel) u64 {
+    return model.revision;
+}
+
+fn projectSameRevisionUpdate(
+    _: *core.Runtime,
+    _: zero_platform.WindowId,
+    _: []const u8,
+    _: *const ProjectedModel,
+    msg: ProjectedMsg,
+) anyerror!bool {
+    if (msg != .paint) return false;
+    projected_updates += 1;
+    return true;
+}
+
 test "ui app owns install, dispatch, and rebuild end to end" {
     // The runtime and the app are both large structs; keep them off the
     // test thread's stack.
@@ -134,6 +176,48 @@ test "ui app owns install, dispatch, and rebuild end to end" {
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "counter.reset", .window_id = 1 } });
     try std.testing.expectEqual(@as(u32, 0), app_state.model.count);
     try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 0"));
+}
+
+test "ui app projects same-revision updates without rebuilding the view" {
+    projected_view_builds = 0;
+    projected_updates = 0;
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try ProjectedApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-projected",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = projectedUpdate,
+        .view = projectedView,
+        .view_revision = projectedViewRevision,
+        .project_update = projectSameRevisionUpdate,
+    });
+    defer app_state.destroy();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    const installed_arena = app_state.arena_index;
+    try std.testing.expectEqual(@as(usize, 1), projected_view_builds);
+    try app_state.dispatch(&harness.runtime, 1, .paint);
+    try std.testing.expectEqual(@as(u64, 1), app_state.model.paint_tick);
+    try std.testing.expectEqual(@as(usize, 1), projected_updates);
+    try std.testing.expectEqual(@as(usize, 1), projected_view_builds);
+    try std.testing.expectEqual(installed_arena, app_state.arena_index);
+
+    try app_state.dispatch(&harness.runtime, 1, .structure);
+    try std.testing.expectEqual(@as(usize, 2), projected_view_builds);
+    try std.testing.expect(app_state.arena_index != installed_arena);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Revision 1"));
 }
 
 test "ui app honors a declared software backend when packet services exist" {

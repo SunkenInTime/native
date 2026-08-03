@@ -39,6 +39,7 @@ pub const CanvasImageEntry = struct {
     width: usize = 0,
     height: usize = 0,
     byte_len: usize = 0,
+    content_fingerprint: u64 = 0,
 };
 
 /// Dimensions of a successfully registered image (the decode-and-register
@@ -90,6 +91,14 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
                 .width = width,
                 .height = height,
                 .byte_len = byte_len,
+                // Pixel content is immutable until this registration is
+                // replaced. Pay its hash once here, never once per frame.
+                .content_fingerprint = canvas.renderImageFingerprintForResource(id, .{
+                    .id = id,
+                    .width = width,
+                    .height = height,
+                    .pixels = rgba8,
+                }),
             };
             // No pixel push here: GPU packet hosts receive the bytes
             // through the binary upload side-channel when a packet's
@@ -155,6 +164,7 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
                     .width = entry.width,
                     .height = entry.height,
                     .pixels = self.canvas_image_pixels[index][0..entry.byte_len],
+                    .content_fingerprint = entry.content_fingerprint,
                 };
             }
             return self.canvas_image_resources_scratch[0..self.canvas_image_count];

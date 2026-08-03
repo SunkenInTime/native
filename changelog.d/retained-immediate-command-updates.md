@@ -1,0 +1,1 @@
+improvement: **Paint-only retained widget updates**: UiApp can now gate rebuilds by an app-owned view revision and batch changed immediate Canvas command lists directly into the retained display list, avoiding declarative view construction, layout, reconciliation, and accessibility work on animation frames.
