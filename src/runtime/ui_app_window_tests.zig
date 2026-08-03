@@ -49,13 +49,17 @@ fn panelViewRevision(model: *const PanelModel) u64 {
 
 fn projectPanelUpdate(
     _: *core.Runtime,
-    _: support.platform.WindowId,
-    _: []const u8,
+    window_id: support.platform.WindowId,
+    target_canvas_label: []const u8,
     _: *const PanelModel,
     msg: PanelMsg,
 ) anyerror!bool {
     // Bumps affect only the secondary window, so the primary canvas needs no
-    // rebuild. UiApp must still rebuild the installed secondary window.
+    // rebuild. The projector must receive the matching primary target even
+    // when the bump originated from a secondary window; UiApp must then
+    // rebuild that installed secondary window.
+    try std.testing.expectEqual(@as(support.platform.WindowId, 1), window_id);
+    try std.testing.expectEqualStrings(canvas_label, target_canvas_label);
     return msg == .bump;
 }
 
