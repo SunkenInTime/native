@@ -43,10 +43,26 @@ fn panelUpdate(model: *PanelModel, msg: PanelMsg) void {
     }
 }
 
+fn panelViewRevision(model: *const PanelModel) u64 {
+    return @intFromBool(model.settings_open);
+}
+
+fn projectPanelUpdate(
+    _: *core.Runtime,
+    _: support.platform.WindowId,
+    _: []const u8,
+    _: *const PanelModel,
+    msg: PanelMsg,
+) anyerror!bool {
+    // Bumps affect only the secondary window, so the primary canvas needs no
+    // rebuild. UiApp must still rebuild the installed secondary window.
+    return msg == .bump;
+}
+
 fn panelView(ui: *PanelApp.Ui, model: *const PanelModel) PanelApp.Ui.Node {
+    _ = model;
     return ui.column(.{ .gap = 8, .padding = 12 }, .{
         ui.button(.{ .on_press = .toggle_settings }, "Settings"),
-        ui.text(.{}, ui.fmt("bumps {d}", .{model.bumps})),
     });
 }
 
@@ -103,6 +119,8 @@ const Fixture = struct {
             .canvas_label = canvas_label,
             .update = panelUpdate,
             .view = panelView,
+            .view_revision = panelViewRevision,
+            .project_update = projectPanelUpdate,
             .windows_fn = panelWindows,
             .window_view = panelWindowView,
         });
@@ -203,8 +221,8 @@ test "a Msg declares the settings window, its canvas installs, and automation dr
     try fixture.harness.runtime.dispatchAutomationCommand(fixture.app, bump_click);
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.bumps);
 
-    // The Msg's rebuild refreshed the SECONDARY window's tree too: the
-    // count text in the settings canvas reflects the new model.
+    // The same-revision projection skipped the main view rebuild, but still
+    // refreshed the SECONDARY window's tree from the changed model.
     const rebuilt = try fixture.harness.runtime.canvasWidgetLayout(info.id, settings_canvas_label);
     try std.testing.expect(widgetIdByText(rebuilt, .text, "bumped 1") != null);
 

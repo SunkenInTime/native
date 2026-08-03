@@ -1116,7 +1116,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (!self.installed) return;
             if (self.projectedViewRevisionMatches()) {
                 if (self.options.project_update) |project_update| {
-                    if (try project_update(runtime, window_id, self.options.canvas_label, &self.model, msg)) return;
+                    if (try project_update(runtime, window_id, self.options.canvas_label, &self.model, msg)) {
+                        // project_update only targets the primary retained
+                        // canvas. Reconcile the declared window set (including
+                        // a user-closed window the model still declares), then
+                        // rebuild installed secondary trees because they have
+                        // no projection hook of their own.
+                        self.applyWindows(runtime);
+                        try self.rebuildWindowSlots(runtime);
+                        return;
+                    }
                 } else return;
             }
             try self.rebuild(runtime, self.canvas_window_id);
