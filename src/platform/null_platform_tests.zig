@@ -702,6 +702,14 @@ test "null platform keeps app and gpu frame request lanes independently observab
     _ = null_platform.takeFrameRequest().?;
     try std.testing.expectEqual(@as(usize, 0), null_platform.pendingFrameRequestCount());
 
+    try services.requestFrame();
+    try null_platform.scheduleGpuSurfaceFrame(1, "capture");
+    _ = null_platform.takeFrameRequest().?;
+    try std.testing.expectEqual(@as(usize, 0), null_platform.pendingFrameRequestCount());
+    try std.testing.expectEqual(@as(usize, 1), null_platform.pendingGpuSurfaceFrameRequestCount());
+    _ = null_platform.takeGpuSurfaceFrameRequest().?;
+    try std.testing.expectEqual(@as(usize, 0), null_platform.pendingGpuSurfaceFrameRequestCount());
+
     try services.closeView(1, "capture");
     try services.createView(.{
         .label = "capture-next",
