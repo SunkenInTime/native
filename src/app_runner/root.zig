@@ -523,6 +523,14 @@ const CaptureCandidate = struct {
     value: ?f32,
 };
 
+const CaptureScheduledTimer = struct {
+    id: u64 = 0,
+    due_ns: u64 = 0,
+    interval_ns: u64 = 0,
+    active: bool = false,
+    seen: bool = false,
+};
+
 const capture_events = [_][]const u8{
     "app_start",
     "appearance_changed",
@@ -546,6 +554,11 @@ const CaptureDriver = struct {
     frames_driven: usize = 0,
     next_frame_index: u64 = 1,
     next_timestamp_ns: u64 = 1_000_000,
+    // Timer deadlines live in one cumulative capture-clock domain so
+    // adjacent partial advances compose exactly like one larger advance.
+    capture_elapsed_ns: u64 = 0,
+    scheduled_timers: [native_sdk.max_null_timers]CaptureScheduledTimer = [_]CaptureScheduledTimer{.{}} ** native_sdk.max_null_timers,
+    scheduled_timer_count: usize = 0,
     events_driven: []const []const u8 = &capture_events,
     failure_candidates: []CaptureCandidate = &.{},
 
@@ -756,72 +769,73 @@ const CaptureDriver = struct {
 
     fn advanceClock(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque, milliseconds: u64) !void {
         if (milliseconds > std.math.maxInt(u64) / std.time.ns_per_ms) return error.CaptureClockAdvanceOverflow;
+        const delta_ns = milliseconds * std.time.ns_per_ms;
+        const target_ns = std.math.add(u64, self.capture_elapsed_ns, delta_ns) catch return error.CaptureClockAdvanceOverflow;
         try self.app.advanceCaptureClock(milliseconds);
-        const target_ns = milliseconds * std.time.ns_per_ms;
-        const Scheduled = struct { id: u64 = 0, due_ns: u64 = 0, interval_ns: u64 = 0, active: bool = false, eligible: bool = false };
-        var scheduled = [_]Scheduled{.{}} ** native_sdk.max_null_timers;
-        var scheduled_count: usize = 0;
-        var elapsed_ns: u64 = 0;
         while (true) {
-            for (scheduled[0..scheduled_count]) |*entry| entry.active = false;
+            for (self.scheduled_timers[0..self.scheduled_timer_count]) |*entry| entry.seen = false;
             var timer_buffer: [native_sdk.max_null_timers]native_sdk.NullTimer = undefined;
             const active_timers = self.null_platform.listActiveTimers(&timer_buffer);
             for (active_timers) |timer| {
                 if (timer.interval_ns == 0) return error.CaptureTimerIntervalZero;
-                const existing = for (scheduled[0..scheduled_count], 0..) |entry, index| {
+                const existing = for (self.scheduled_timers[0..self.scheduled_timer_count], 0..) |entry, index| {
                     if (entry.id == timer.id) break index;
                 } else null;
                 if (existing) |index| {
-                    scheduled[index].active = true;
-                    if (scheduled[index].interval_ns != timer.interval_ns) {
-                        scheduled[index].interval_ns = timer.interval_ns;
-                        scheduled[index].eligible = timer.interval_ns <= target_ns - elapsed_ns;
-                        if (scheduled[index].eligible) scheduled[index].due_ns = elapsed_ns + timer.interval_ns;
+                    const entry = &self.scheduled_timers[index];
+                    const was_active = entry.active;
+                    entry.active = true;
+                    entry.seen = true;
+                    if (!was_active or entry.interval_ns != timer.interval_ns) {
+                        entry.interval_ns = timer.interval_ns;
+                        entry.due_ns = std.math.add(u64, self.capture_elapsed_ns, timer.interval_ns) catch return error.CaptureClockAdvanceOverflow;
                     }
                 } else {
-                    const eligible = timer.interval_ns <= target_ns - elapsed_ns;
-                    scheduled[scheduled_count] = .{
+                    self.scheduled_timers[self.scheduled_timer_count] = .{
                         .id = timer.id,
-                        .due_ns = if (eligible) elapsed_ns + timer.interval_ns else 0,
+                        .due_ns = std.math.add(u64, self.capture_elapsed_ns, timer.interval_ns) catch return error.CaptureClockAdvanceOverflow,
                         .interval_ns = timer.interval_ns,
                         .active = true,
-                        .eligible = eligible,
+                        .seen = true,
                     };
-                    scheduled_count += 1;
+                    self.scheduled_timer_count += 1;
                 }
+            }
+            for (self.scheduled_timers[0..self.scheduled_timer_count]) |*entry| {
+                if (!entry.seen) entry.active = false;
             }
             const next_index = next: {
                 var index: ?usize = null;
-                for (scheduled[0..scheduled_count], 0..) |entry, candidate| {
-                    if (!entry.active or !entry.eligible or entry.due_ns > target_ns) continue;
-                    if (index == null or entry.due_ns < scheduled[index.?].due_ns) index = candidate;
+                for (self.scheduled_timers[0..self.scheduled_timer_count], 0..) |entry, candidate| {
+                    if (!entry.active or entry.due_ns > target_ns) continue;
+                    if (index == null or entry.due_ns < self.scheduled_timers[index.?].due_ns) index = candidate;
                 }
                 break :next index;
             } orelse break;
-            elapsed_ns = scheduled[next_index].due_ns;
-            const id = scheduled[next_index].id;
-            const event = self.null_platform.fireTimer(id, self.next_timestamp_ns + elapsed_ns) orelse {
-                scheduled[next_index].active = false;
+            const due_ns = self.scheduled_timers[next_index].due_ns;
+            const id = self.scheduled_timers[next_index].id;
+            const elapsed_ns = due_ns - self.capture_elapsed_ns;
+            const event_timestamp_ns = std.math.add(u64, self.next_timestamp_ns, elapsed_ns) catch return error.CaptureClockAdvanceOverflow;
+            const event = self.null_platform.fireTimer(id, event_timestamp_ns) orelse {
+                self.scheduled_timers[next_index].active = false;
                 continue;
             };
             try handler(handler_context, event);
             if (self.null_platform.startedTimer(id)) |timer| {
                 if (timer.active) {
                     if (timer.interval_ns == 0) return error.CaptureTimerIntervalZero;
-                    scheduled[next_index].interval_ns = timer.interval_ns;
-                    scheduled[next_index].active = true;
-                    scheduled[next_index].eligible = timer.interval_ns <= target_ns - elapsed_ns;
-                    if (scheduled[next_index].eligible) scheduled[next_index].due_ns = elapsed_ns + timer.interval_ns;
+                    self.scheduled_timers[next_index].interval_ns = timer.interval_ns;
+                    self.scheduled_timers[next_index].due_ns = std.math.add(u64, due_ns, timer.interval_ns) catch return error.CaptureClockAdvanceOverflow;
+                    self.scheduled_timers[next_index].active = true;
                 } else {
-                    scheduled[next_index].active = false;
-                    scheduled[next_index].eligible = false;
+                    self.scheduled_timers[next_index].active = false;
                 }
             } else {
-                scheduled[next_index].active = false;
-                scheduled[next_index].eligible = false;
+                self.scheduled_timers[next_index].active = false;
             }
         }
-        self.next_timestamp_ns += target_ns;
+        self.capture_elapsed_ns = target_ns;
+        self.next_timestamp_ns = std.math.add(u64, self.next_timestamp_ns, delta_ns) catch return error.CaptureClockAdvanceOverflow;
     }
 
     fn writeArtifacts(self: *CaptureDriver, startup_us: u64) !void {
