@@ -922,7 +922,7 @@ const CaptureDriver = struct {
                 .fetches = app_pending.fetches,
                 .images = app_pending.images,
                 .providers = app_pending.providers,
-                .frameRequests = self.null_platform.pendingGpuSurfaceFrameRequestCount(),
+                .frameRequests = self.null_platform.pendingFrameRequestCount(),
             },
             .timingUs = .{
                 .startup = startup_us,

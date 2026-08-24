@@ -673,7 +673,7 @@ test "null platform fireTimer synthesizes timer events for live timers only" {
     try std.testing.expect(null_platform.fireTimer(2, 51_000) == null);
 }
 
-test "null platform exposes active timers and coalesced gpu frame requests to deterministic hosts" {
+test "null platform keeps app and gpu frame request lanes independently observable" {
     var null_platform = NullPlatform.init(.{});
     null_platform.gpu_surfaces = true;
     const services = null_platform.platform().services;
@@ -690,12 +690,17 @@ test "null platform exposes active timers and coalesced gpu frame requests to de
         .kind = .gpu_surface,
         .frame = geometry.RectF.init(0, 0, 240, 110),
     });
+    try services.requestFrame();
     try null_platform.scheduleGpuSurfaceFrame(1, "capture");
+    try std.testing.expectEqual(@as(usize, 1), null_platform.pendingFrameRequestCount());
     try std.testing.expectEqual(@as(usize, 1), null_platform.pendingGpuSurfaceFrameRequestCount());
     const request = null_platform.takeGpuSurfaceFrameRequest().?;
     try std.testing.expectEqual(@as(WindowId, 1), request.window_id);
     try std.testing.expectEqualStrings("capture", request.label());
     try std.testing.expectEqual(@as(usize, 0), null_platform.pendingGpuSurfaceFrameRequestCount());
+    try std.testing.expectEqual(@as(usize, 1), null_platform.pendingFrameRequestCount());
+    _ = null_platform.takeFrameRequest().?;
+    try std.testing.expectEqual(@as(usize, 0), null_platform.pendingFrameRequestCount());
 
     try services.closeView(1, "capture");
     try services.createView(.{
