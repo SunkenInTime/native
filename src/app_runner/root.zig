@@ -568,6 +568,7 @@ const CaptureDriver = struct {
         try self.driveInitialFrame(handler, handler_context);
         const startup_us = captureNowUs() -| startup_start_us;
         try self.applyActionFile(handler, handler_context);
+        if (self.app.captureFailed()) return error.CaptureWidgetFailed;
         try self.writeArtifacts(startup_us);
         try self.null_platform.dispatchShutdown(handler, handler_context);
     }
@@ -1091,6 +1092,10 @@ fn captureErrorDetail(err: anyerror) struct { ask: []const u8, remedy: []const u
         .ask = "provide valid recorded frames for every subscribed non-time provider",
         .remedy = "use schema weaver.provider-fixture.v1, declare only subscribed providers, and rerun capture",
     };
+    if (std.mem.eql(u8, name, "CaptureWidgetFailed")) return .{
+        .ask = "fix the widget runtime error produced while driving the capture",
+        .remedy = "inspect the widget diagnostic, fix or fixture the rejected action side effect, and rerun capture",
+    };
     if (std.mem.startsWith(u8, name, "SessionReplay")) return .{
         .ask = "provide a complete same-platform session journal whose verified replay matches",
         .remedy = "record the session again on this platform or fix the reported replay divergence",
@@ -1115,6 +1120,7 @@ fn runCaptureJournal(
     const report = try native_sdk.runtime.replaySession(runtime, app, journal_bytes, .{ .verify = true });
     if (!report.ok()) return error.SessionReplayMismatch;
     driver.frames_driven = @intCast(runtime.frameDiagnostics().frame_index);
+    if (driver.app.captureFailed()) return error.CaptureWidgetFailed;
     try driver.writeArtifacts(captureNowUs() -| replay_start_us);
 }
 
