@@ -1112,9 +1112,17 @@ fn captureErrorDetail(err: anyerror) struct { ask: []const u8, remedy: []const u
         .ask = "fix the widget runtime error produced while driving the capture",
         .remedy = "inspect the widget diagnostic, fix or fixture the rejected action side effect, and rerun capture",
     };
-    if (std.mem.startsWith(u8, name, "CaptureMediaCommand")) return .{
-        .ask = "make the driven media commands match the capture provider fixture",
-        .remedy = "add each expected media verb, seek value, and acknowledgement outcome in action order, then rerun capture",
+    if (std.mem.eql(u8, name, "CaptureMediaCommandUnexpected")) return .{
+        .ask = "remove the unexpected media action or add its command expectation at the same position",
+        .remedy = "make the provider fixture commands array match the action file's media command order, then rerun capture",
+    };
+    if (std.mem.eql(u8, name, "CaptureMediaCommandMismatch")) return .{
+        .ask = "make the next expected media verb and seekMs match the command driven by the action",
+        .remedy = "fix that provider fixture command or the corresponding action handler, then rerun capture",
+    };
+    if (std.mem.eql(u8, name, "CaptureMediaCommandMissing")) return .{
+        .ask = "drive every media command declared by the provider fixture",
+        .remedy = "add the missing semantic action or remove the unused trailing command expectation, then rerun capture",
     };
     if (std.mem.startsWith(u8, name, "SessionReplay")) return .{
         .ask = "provide a complete same-platform session journal whose verified replay matches",
@@ -1124,6 +1132,15 @@ fn captureErrorDetail(err: anyerror) struct { ask: []const u8, remedy: []const u
         .ask = "inspect the named capture failure and widget diagnostic",
         .remedy = "fix the named runtime or widget failure, then rerun the same capture command",
     };
+}
+
+test "capture media fixture errors distinguish unexpected mismatch and missing commands" {
+    const unexpected = captureErrorDetail(error.CaptureMediaCommandUnexpected);
+    try std.testing.expect(std.mem.indexOf(u8, unexpected.ask, "unexpected") != null);
+    const mismatch = captureErrorDetail(error.CaptureMediaCommandMismatch);
+    try std.testing.expect(std.mem.indexOf(u8, mismatch.ask, "seekMs") != null);
+    const missing = captureErrorDetail(error.CaptureMediaCommandMissing);
+    try std.testing.expect(std.mem.indexOf(u8, missing.ask, "every media command") != null);
 }
 
 fn runCaptureJournal(
