@@ -634,7 +634,19 @@ const CaptureDriver = struct {
             const width = action.width orelse return error.CaptureActionWidthMissing;
             const height = action.height orelse return error.CaptureActionHeightMissing;
             const scale = action.scale orelse 1;
-            return self.dispatchCommand("resize {d} {d} {d}", .{ width, height, scale });
+            try self.dispatchCommand("resize {d} {d} {d}", .{ width, height, scale });
+            const view = for (self.null_platform.views[0..self.null_platform.view_count]) |candidate| {
+                if (candidate.kind == .gpu_surface) break candidate;
+            } else return error.CaptureViewNotFound;
+            const frame = native_sdk.geometry.RectF.init(view.frame.x, view.frame.y, width, height);
+            try self.null_platform.platform().services.setViewFrame(view.window_id, view.label, frame);
+            try handler(handler_context, .{ .gpu_surface_resized = .{
+                .window_id = view.window_id,
+                .label = view.label,
+                .frame = frame,
+                .scale_factor = scale,
+            } });
+            return;
         }
 
         const target = try self.resolveTarget(action.target orelse return error.CaptureActionTargetMissing);
