@@ -983,21 +983,11 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             try validateViewLabel(label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-            const color = self.views[index].canvas_clear_color;
-            return .{
-                colorChannelToByte(color.r),
-                colorChannelToByte(color.g),
-                colorChannelToByte(color.b),
-                colorChannelToByte(color.a),
-            };
+            return canvasColorToRgba8(self.views[index].canvas_clear_color);
         }
 
         fn canvasScreenshotSurfaceSize(view: anytype) geometry.SizeF {
             return if (view.gpu_size.isEmpty()) view.frame.size() else view.gpu_size;
-        }
-
-        fn colorChannelToByte(value: f32) u8 {
-            return @intFromFloat(@round(std.math.clamp(value, 0, 1) * 255.0));
         }
 
         pub fn planCanvasFrameForView(self: *Runtime, index: usize, options: canvas.CanvasFrameOptions, storage: canvas.CanvasFrameStorage, record: bool) anyerror!canvas.CanvasFrame {

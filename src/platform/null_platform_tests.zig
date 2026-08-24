@@ -694,6 +694,14 @@ test "null platform exposes active timers and coalesced gpu frame requests to de
     try std.testing.expectEqual(@as(usize, 1), null_platform.pendingGpuSurfaceFrameRequestCount());
     const request = null_platform.takeGpuSurfaceFrameRequest().?;
     try std.testing.expectEqual(@as(WindowId, 1), request.window_id);
-    try std.testing.expectEqualStrings("capture", request.label);
+    try std.testing.expectEqualStrings("capture", request.label());
     try std.testing.expectEqual(@as(usize, 0), null_platform.pendingGpuSurfaceFrameRequestCount());
+
+    try services.createView(.{
+        .label = "capture-next",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 110),
+    });
+    try null_platform.scheduleGpuSurfaceFrame(1, "capture-next");
+    try std.testing.expectEqualStrings("capture", request.label());
 }

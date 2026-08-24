@@ -577,7 +577,7 @@ const CaptureDriver = struct {
             try self.null_platform.scheduleGpuSurfaceFrame(view.window_id, view.label);
             break :requested self.null_platform.takeGpuSurfaceFrameRequest() orelse return error.CaptureFrameNotRequested;
         };
-        if (requested.window_id != view.window_id or !std.mem.eql(u8, requested.label, view.label)) return error.CaptureFrameTargetMismatch;
+        if (requested.window_id != view.window_id or !std.mem.eql(u8, requested.label(), view.label)) return error.CaptureFrameTargetMismatch;
         try self.completeRequestedFrame(handler, handler_context, requested);
     }
 
@@ -588,13 +588,14 @@ const CaptureDriver = struct {
     }
 
     fn completeRequestedFrame(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque, requested: native_sdk.NullGpuSurfaceFrameRequest) !void {
+        const requested_label = requested.label();
         const view = for (self.null_platform.views[0..self.null_platform.view_count]) |candidate| {
-            if (candidate.window_id == requested.window_id and std.mem.eql(u8, candidate.label, requested.label)) break candidate;
+            if (candidate.window_id == requested.window_id and std.mem.eql(u8, candidate.label, requested_label)) break candidate;
         } else return error.CaptureViewNotFound;
         if (view.kind != .gpu_surface) return error.CaptureViewNotGpuSurface;
         try handler(handler_context, .{ .gpu_surface_frame = .{
             .window_id = requested.window_id,
-            .label = requested.label,
+            .label = requested_label,
             .size = view.frame.size(),
             .scale_factor = 1,
             .frame_index = self.next_frame_index,
@@ -714,13 +715,13 @@ const CaptureDriver = struct {
             };
             candidate_index += 1;
         }
-        std.debug.print("capture target role={s} name={s} matched {d} controls:\n", .{
+        std.log.err("capture target role={s} name={s} matched {d} controls", .{
             target.role orelse "*",
             target.name orelse "*",
             match_count,
         });
         for (self.failure_candidates) |candidate| {
-            std.debug.print("- role={s} name=\"{s}\" enabled={} selected={}\n", .{
+            std.log.err("- role={s} name=\"{s}\" enabled={} selected={}", .{
                 candidate.role, candidate.name, candidate.enabled, candidate.selected,
             });
         }
@@ -898,7 +899,7 @@ fn validateCaptureCommandValue(value: []const u8) !void {
 
 fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, request: CaptureRequest) !void {
     var buffers: StateBuffers = undefined;
-    var app_info = options.appInfo(&buffers);
+    const app_info = options.appInfo(&buffers);
     const session_recorder = setupSessionRecorder(init, app_info);
     var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
     null_platform.gpu_surfaces = true;

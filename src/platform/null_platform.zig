@@ -175,7 +175,12 @@ pub const NullTimer = struct {
 /// of guessing a frame count.
 pub const NullGpuSurfaceFrameRequest = struct {
     window_id: WindowId,
-    label: []const u8,
+    label_storage: [max_view_label_bytes]u8,
+    label_len: usize,
+
+    pub fn label(self: *const NullGpuSurfaceFrameRequest) []const u8 {
+        return self.label_storage[0..self.label_len];
+    }
 };
 
 /// Duration table entries for the fake audio player (see
@@ -1687,15 +1692,21 @@ pub const NullPlatform = struct {
     }
 
     /// Consume the one coalesced GPU frame request a live host would satisfy.
-    /// The returned label aliases the null platform and remains valid until a
-    /// later request replaces it.
+    /// The returned value owns its label so a nested frame request cannot
+    /// overwrite the event that the caller is about to dispatch.
     pub fn takeGpuSurfaceFrameRequest(self: *NullPlatform) ?NullGpuSurfaceFrameRequest {
         if (!self.gpu_surface_frame_request_pending) return null;
         self.gpu_surface_frame_request_pending = false;
-        return .{
+        var request: NullGpuSurfaceFrameRequest = .{
             .window_id = self.gpu_surface_frame_request_window_id,
-            .label = self.gpu_surface_frame_request_label_storage[0..self.gpu_surface_frame_request_label_len],
+            .label_storage = undefined,
+            .label_len = self.gpu_surface_frame_request_label_len,
         };
+        @memcpy(
+            request.label_storage[0..request.label_len],
+            self.gpu_surface_frame_request_label_storage[0..request.label_len],
+        );
+        return request;
     }
 
     /// Schedule one host-owned initial surface frame through the same service
