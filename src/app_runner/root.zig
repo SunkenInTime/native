@@ -563,11 +563,13 @@ const CaptureDriver = struct {
         const view = for (self.null_platform.views[0..self.null_platform.view_count]) |candidate| {
             if (candidate.kind == .gpu_surface) break candidate;
         } else return error.CaptureViewNotFound;
+        const physical_size = try capturePhysicalSize(view.frame, 1);
         try handler(handler_context, .{ .gpu_surface_resized = .{
             .window_id = view.window_id,
             .label = view.label,
             .frame = view.frame,
             .scale_factor = 1,
+            .physical_size = physical_size,
         } });
         // A live display loop owns the first completion even when application
         // startup and resize did not invalidate content. Model that host
@@ -600,6 +602,8 @@ const CaptureDriver = struct {
             .label = requested_label,
             .size = view.frame.size(),
             .scale_factor = runtime_view.gpu_scale_factor,
+            .physical_size = runtime_view.gpu_physical_size,
+            .geometry_generation = runtime_view.gpu_geometry_generation,
             .frame_index = self.next_frame_index,
             .timestamp_ns = self.next_timestamp_ns,
             .nonblank = false,
@@ -640,17 +644,19 @@ const CaptureDriver = struct {
             const width = action.width orelse return error.CaptureActionWidthMissing;
             const height = action.height orelse return error.CaptureActionHeightMissing;
             const scale = action.scale orelse 1;
-            try self.dispatchCommand("resize {d} {d} {d}", .{ width, height, scale });
             const view = for (self.null_platform.views[0..self.null_platform.view_count]) |candidate| {
                 if (candidate.kind == .gpu_surface) break candidate;
             } else return error.CaptureViewNotFound;
             const frame = native_sdk.geometry.RectF.init(view.frame.x, view.frame.y, width, height);
+            const physical_size = try capturePhysicalSize(frame, scale);
+            try self.dispatchCommand("resize {d} {d} {d}", .{ width, height, scale });
             try self.null_platform.platform().services.setViewFrame(view.window_id, view.label, frame);
             try handler(handler_context, .{ .gpu_surface_resized = .{
                 .window_id = view.window_id,
                 .label = view.label,
                 .frame = frame,
                 .scale_factor = scale,
+                .physical_size = physical_size,
             } });
             return;
         }
@@ -826,12 +832,12 @@ const CaptureDriver = struct {
         } else return error.CaptureViewNotFound;
 
         const render_start_us = captureNowUs();
-        const pixel_size = try self.runtime.canvasScreenshotPixelSize(view.window_id, view.label, view.gpu_scale_factor);
+        const pixel_size = try self.runtime.canvasScreenshotPixelSize(view.window_id, view.label, null);
         const pixels = try std.heap.page_allocator.alloc(u8, pixel_size.byte_len);
         defer std.heap.page_allocator.free(pixels);
         const scratch = try std.heap.page_allocator.alloc(u8, pixel_size.byte_len);
         defer std.heap.page_allocator.free(scratch);
-        const screenshot = try self.runtime.renderCanvasScreenshot(view.window_id, view.label, view.gpu_scale_factor, pixels, scratch);
+        const screenshot = try self.runtime.renderCanvasScreenshot(view.window_id, view.label, null, pixels, scratch);
         const clear = try self.runtime.canvasClearColorRgba8(view.window_id, view.label);
         var pixels_different_from_clear: usize = 0;
         var pixel_index: usize = 0;
@@ -916,6 +922,45 @@ const CapturePlatformContext = struct {
         return self.null_platform.platform().supports(feature);
     }
 };
+
+fn capturePhysicalSize(frame: native_sdk.geometry.RectF, scale: f32) !native_sdk.geometry.SizeU {
+    if (!std.math.isFinite(scale) or scale <= 0 or
+        !std.math.isFinite(frame.x) or !std.math.isFinite(frame.y) or
+        !std.math.isFinite(frame.width) or !std.math.isFinite(frame.height) or
+        frame.width <= 0 or frame.height <= 0)
+    {
+        return error.CaptureActionPhysicalSizeInvalid;
+    }
+    const scale_f64: f64 = @floatCast(scale);
+    const left = @round(@as(f64, @floatCast(frame.x)) * scale_f64);
+    const top = @round(@as(f64, @floatCast(frame.y)) * scale_f64);
+    const right = @round(@as(f64, @floatCast(frame.maxX())) * scale_f64);
+    const bottom = @round(@as(f64, @floatCast(frame.maxY())) * scale_f64);
+    const width = right - left;
+    const height = bottom - top;
+    const max_extent: f64 = @floatFromInt(std.math.maxInt(u32));
+    if (!std.math.isFinite(width) or !std.math.isFinite(height) or
+        width <= 0 or height <= 0 or width > max_extent or height > max_extent)
+    {
+        return error.CaptureActionPhysicalSizeInvalid;
+    }
+    return native_sdk.geometry.SizeU.init(@intFromFloat(width), @intFromFloat(height));
+}
+
+test "capture physical size follows rounded surface edges" {
+    try std.testing.expectEqual(
+        native_sdk.geometry.SizeU.init(962, 719),
+        try capturePhysicalSize(native_sdk.geometry.RectF.init(0, 0, 641, 479), 1.5),
+    );
+    try std.testing.expectEqual(
+        native_sdk.geometry.SizeU.init(10, 8),
+        try capturePhysicalSize(native_sdk.geometry.RectF.init(0.4, 0, 7, 5), 1.5),
+    );
+    try std.testing.expectError(
+        error.CaptureActionPhysicalSizeInvalid,
+        capturePhysicalSize(native_sdk.geometry.RectF.init(0, 0, 7, 5), 0),
+    );
+}
 
 test "capture platform context keeps feature probes and service callbacks on their owners" {
     var null_platform = native_sdk.NullPlatform.init(.{});

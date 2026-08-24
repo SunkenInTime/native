@@ -12,6 +12,7 @@ pub const canvasFrameBudgetIsUnset = canvas_frame_helpers.canvasFrameBudgetIsUns
 pub const canvasFullRepaintBounds = canvas_frame_helpers.canvasFullRepaintBounds;
 pub const sizesEqual = canvas_frame_helpers.sizesEqual;
 pub const canvasSurfacePixelSize = canvas_frame_helpers.canvasSurfacePixelSize;
+pub const canvasPixelSize = canvas_frame_helpers.canvasPixelSize;
 pub const normalizedCanvasPresentationScale = canvas_frame_helpers.normalizedCanvasPresentationScale;
 pub const canvasFramePixelSize = canvas_frame_helpers.canvasFramePixelSize;
 pub const canvasColorToRgba8 = canvas_frame_helpers.canvasColorToRgba8;
@@ -935,11 +936,14 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
 
+            const view = &self.views[index];
+            const use_surface_geometry = scale == null;
             const canvas_frame = try planCanvasFrameForView(self, index, .{
                 .frame_index = self.views[index].gpu_frame_index,
                 .timestamp_ns = self.views[index].gpu_timestamp_ns,
-                .surface_size = canvasScreenshotSurfaceSize(&self.views[index]),
-                .scale = normalizedCanvasPresentationScale(scale, 1),
+                .surface_size = canvasScreenshotSurfaceSize(view),
+                .scale = normalizedCanvasPresentationScale(scale, view.gpu_scale_factor),
+                .physical_size = if (use_surface_geometry) view.gpu_physical_size else geometry.SizeU.init(0, 0),
                 .full_repaint = true,
             }, canvasFrameScratchStorage(self), false);
             const pixel_size = try canvasFramePixelSize(canvas_frame);
@@ -956,8 +960,9 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             };
         }
 
-        /// Pixel dimensions `renderCanvasScreenshot` will produce for the
-        /// view at the given scale (default 1).
+        /// Pixel dimensions `renderCanvasScreenshot` will produce. A null
+        /// scale preserves the host-reported surface scale and authoritative
+        /// physical extent; an explicit scale requests a derived output size.
         pub fn canvasScreenshotPixelSize(
             self: *const Runtime,
             window_id: platform.WindowId,
@@ -968,7 +973,12 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             try validateViewLabel(label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-            return canvasSurfacePixelSize(canvasScreenshotSurfaceSize(&self.views[index]), normalizedCanvasPresentationScale(scale, 1));
+            const view = &self.views[index];
+            return canvasPixelSize(
+                canvasScreenshotSurfaceSize(view),
+                normalizedCanvasPresentationScale(scale, view.gpu_scale_factor),
+                if (scale == null) view.gpu_physical_size else geometry.SizeU.init(0, 0),
+            );
         }
 
         /// Declared clear color used by both presentation and reference
