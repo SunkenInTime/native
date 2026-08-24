@@ -566,9 +566,10 @@ const CaptureDriver = struct {
         try self.null_platform.dispatchStartup(handler, handler_context);
         const startup_start_us = self.started_us;
         try self.driveInitialFrame(handler, handler_context);
+        try self.settleRequestedTurn(handler, handler_context);
         const startup_us = captureNowUs() -| startup_start_us;
         try self.applyActionFile(handler, handler_context);
-        if (self.app.captureFailed()) return error.CaptureWidgetFailed;
+        try self.app.validateCapture();
         try self.writeArtifacts(startup_us);
         try self.null_platform.dispatchShutdown(handler, handler_context);
     }
@@ -645,8 +646,23 @@ const CaptureDriver = struct {
         if (!std.mem.eql(u8, parsed.value.schema, "weaver.capture.actions.v1")) return error.CaptureActionSchemaUnsupported;
         for (parsed.value.actions) |action| {
             try self.applyAction(handler, handler_context, action);
-            _ = try self.drivePendingFrame(handler, handler_context);
+            try self.settleRequestedTurn(handler, handler_context);
         }
+    }
+
+    /// A provider acknowledgement wakes the app through the platform's
+    /// request-frame service, not the GPU-surface request lane. Consume the
+    /// requests that existed at this boundary, then present at most one
+    /// coalesced GPU frame. Requests created while handling that turn remain
+    /// visible in `pending` instead of letting an animated widget make capture
+    /// spin forever.
+    fn settleRequestedTurn(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque) !void {
+        const app_frame_count = self.null_platform.pendingFrameRequestCount();
+        for (0..app_frame_count) |_| {
+            const event = self.null_platform.takeFrameRequest() orelse return error.CaptureFrameRequestMissing;
+            try handler(handler_context, event);
+        }
+        _ = try self.drivePendingFrame(handler, handler_context);
     }
 
     fn applyAction(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque, action: CaptureAction) !void {
@@ -1096,6 +1112,10 @@ fn captureErrorDetail(err: anyerror) struct { ask: []const u8, remedy: []const u
         .ask = "fix the widget runtime error produced while driving the capture",
         .remedy = "inspect the widget diagnostic, fix or fixture the rejected action side effect, and rerun capture",
     };
+    if (std.mem.startsWith(u8, name, "CaptureMediaCommand")) return .{
+        .ask = "make the driven media commands match the capture provider fixture",
+        .remedy = "add each expected media verb, seek value, and acknowledgement outcome in action order, then rerun capture",
+    };
     if (std.mem.startsWith(u8, name, "SessionReplay")) return .{
         .ask = "provide a complete same-platform session journal whose verified replay matches",
         .remedy = "record the session again on this platform or fix the reported replay divergence",
@@ -1120,7 +1140,7 @@ fn runCaptureJournal(
     const report = try native_sdk.runtime.replaySession(runtime, app, journal_bytes, .{ .verify = true });
     if (!report.ok()) return error.SessionReplayMismatch;
     driver.frames_driven = @intCast(runtime.frameDiagnostics().frame_index);
-    if (driver.app.captureFailed()) return error.CaptureWidgetFailed;
+    try driver.app.validateCapture();
     try driver.writeArtifacts(captureNowUs() -| replay_start_us);
 }
 

@@ -358,7 +358,7 @@ pub fn App(comptime Runtime: type) type {
         const ReplayFn = *const fn (context: *anyopaque, control: ReplayControl) anyerror!void;
         const CaptureClockAdvanceFn = *const fn (context: *anyopaque, milliseconds: u64) anyerror!void;
         const CapturePendingFn = *const fn (context: *anyopaque) CapturePendingWork;
-        const CaptureFailedFn = *const fn (context: *anyopaque) bool;
+        const CaptureValidateFn = *const fn (context: *anyopaque) anyerror!void;
 
         context: *anyopaque,
         name: []const u8,
@@ -385,10 +385,11 @@ pub fn App(comptime Runtime: type) type {
         capture_clock_advance_fn: ?CaptureClockAdvanceFn = null,
         capture_pending_fn: ?CapturePendingFn = null,
         /// Optional app-owned health seam for deterministic capture. Apps
-        /// whose ordinary runtime degrades a callback or rejected promise to
-        /// visible error UI report that state here so capture cannot publish
-        /// the error surface as a successful artifact.
-        capture_failed_fn: ?CaptureFailedFn = null,
+        /// whose ordinary runtime degrades a callback, rejected promise, or
+        /// fixture mismatch to visible error UI report the precise failure
+        /// here so capture cannot publish that surface as a successful
+        /// artifact.
+        capture_validate_fn: ?CaptureValidateFn = null,
 
         pub fn start(self: Self, runtime: *Runtime) anyerror!void {
             if (self.start_fn) |start_fn| try start_fn(self.context, runtime);
@@ -431,10 +432,33 @@ pub fn App(comptime Runtime: type) type {
             return if (self.capture_pending_fn) |pending_fn| pending_fn(self.context) else .{};
         }
 
-        pub fn captureFailed(self: Self) bool {
-            return if (self.capture_failed_fn) |failed_fn| failed_fn(self.context) else false;
+        pub fn validateCapture(self: Self) anyerror!void {
+            if (self.capture_validate_fn) |validate_fn| try validate_fn(self.context);
         }
     };
+}
+
+test "capture validation is optional and preserves app-owned failures" {
+    const TestApp = App(u8);
+    const validate = struct {
+        fn call(context: *anyopaque) anyerror!void {
+            const failed: *bool = @ptrCast(@alignCast(context));
+            if (failed.*) return error.CaptureFixtureMismatch;
+        }
+    }.call;
+
+    var failed = false;
+    const app: TestApp = .{
+        .context = &failed,
+        .name = "capture-validation",
+        .capture_validate_fn = validate,
+    };
+    try app.validateCapture();
+    failed = true;
+    try std.testing.expectError(error.CaptureFixtureMismatch, app.validateCapture());
+
+    const app_without_validation: TestApp = .{ .context = &failed, .name = "capture-validation-default" };
+    try app_without_validation.validateCapture();
 }
 
 pub const Options = struct {
