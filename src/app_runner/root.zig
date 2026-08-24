@@ -549,8 +549,7 @@ const CaptureDriver = struct {
     events_driven: []const []const u8 = &capture_events,
     failure_candidates: []CaptureCandidate = &.{},
 
-    fn run(context: *anyopaque, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque) anyerror!void {
-        const self: *CaptureDriver = @ptrCast(@alignCast(context));
+    fn run(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque) anyerror!void {
         try self.null_platform.dispatchStartup(handler, handler_context);
         const startup_start_us = self.started_us;
         try self.driveInitialFrame(handler, handler_context);
@@ -573,10 +572,7 @@ const CaptureDriver = struct {
         // A real host schedules the completion only after resize invalidates
         // the surface. Consume that actual request instead of inventing a
         // frame count or waiting for an arbitrary duration.
-        const requested = self.null_platform.takeGpuSurfaceFrameRequest() orelse requested: {
-            try self.null_platform.scheduleGpuSurfaceFrame(view.window_id, view.label);
-            break :requested self.null_platform.takeGpuSurfaceFrameRequest() orelse return error.CaptureFrameNotRequested;
-        };
+        const requested = self.null_platform.takeGpuSurfaceFrameRequest() orelse return error.CaptureFrameNotRequested;
         if (requested.window_id != view.window_id or !std.mem.eql(u8, requested.label(), view.label)) return error.CaptureFrameTargetMismatch;
         try self.completeRequestedFrame(handler, handler_context, requested);
     }
@@ -884,6 +880,24 @@ const CaptureDriver = struct {
     }
 };
 
+/// The platform run loop and feature probes have different owners during a
+/// capture. Keep both explicit instead of making every null-platform callback
+/// reinterpret the capture driver as its own context.
+const CapturePlatformContext = struct {
+    null_platform: *native_sdk.NullPlatform,
+    driver: *CaptureDriver,
+
+    fn run(context: *anyopaque, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque) anyerror!void {
+        const self: *CapturePlatformContext = @ptrCast(@alignCast(context));
+        try self.driver.run(handler, handler_context);
+    }
+
+    fn supportsFeature(context: *anyopaque, feature: native_sdk.platform.PlatformFeature) bool {
+        const self: *CapturePlatformContext = @ptrCast(@alignCast(context));
+        return self.null_platform.platform().supports(feature);
+    }
+};
+
 fn captureTargetMatches(target: CaptureActionTarget, widget: native_sdk.automation.snapshot.Widget) bool {
     if (target.role) |role| if (!std.mem.eql(u8, role, widget.role)) return false;
     if (target.name) |name| if (!std.mem.eql(u8, name, widget.name)) return false;
@@ -923,9 +937,14 @@ fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, 
         .started_us = captureNowUs(),
     };
     defer if (driver.failure_candidates.len > 0) std.heap.page_allocator.free(driver.failure_candidates);
+    var capture_context: CapturePlatformContext = .{
+        .null_platform = &null_platform,
+        .driver = &driver,
+    };
     if (request.session_journal_path == null) {
-        capture_platform.context = &driver;
-        capture_platform.run_fn = CaptureDriver.run;
+        capture_platform.context = &capture_context;
+        capture_platform.run_fn = CapturePlatformContext.run;
+        capture_platform.supports_fn = CapturePlatformContext.supportsFeature;
     }
     native_sdk.Runtime.initAt(runtime, .{
         .platform = capture_platform,
