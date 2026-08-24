@@ -899,11 +899,12 @@ const CaptureDriver = struct {
 /// reinterpret the capture driver as its own context.
 const CapturePlatformContext = struct {
     null_platform: *native_sdk.NullPlatform,
-    driver: *CaptureDriver,
+    driver: ?*CaptureDriver,
 
     fn run(context: *anyopaque, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque) anyerror!void {
         const self: *CapturePlatformContext = @ptrCast(@alignCast(context));
-        try self.driver.run(handler, handler_context);
+        const driver = self.driver orelse return error.CaptureDriverMissing;
+        try driver.run(handler, handler_context);
     }
 
     fn supportsFeature(context: *anyopaque, feature: native_sdk.platform.PlatformFeature) bool {
@@ -911,6 +912,28 @@ const CapturePlatformContext = struct {
         return self.null_platform.platform().supports(feature);
     }
 };
+
+test "capture platform context keeps feature probes and service callbacks on their owners" {
+    var null_platform = native_sdk.NullPlatform.init(.{});
+    null_platform.gpu_surfaces = true;
+    var capture_platform = null_platform.platform();
+    var capture_context: CapturePlatformContext = .{
+        .null_platform = &null_platform,
+        .driver = null,
+    };
+    capture_platform.context = &capture_context;
+    capture_platform.run_fn = CapturePlatformContext.run;
+    capture_platform.supports_fn = CapturePlatformContext.supportsFeature;
+
+    try std.testing.expect(capture_platform.supports(.gpu_surfaces));
+    try capture_platform.services.showNotification(.{
+        .title = "Capture complete",
+        .subtitle = "context routing",
+        .body = "service callbacks retain the null-platform context",
+    });
+    try std.testing.expectEqual(@as(usize, 1), null_platform.notificationCount());
+    try std.testing.expectEqualStrings("Capture complete", null_platform.lastNotificationTitle());
+}
 
 fn captureTargetMatches(target: CaptureActionTarget, widget: native_sdk.automation.snapshot.Widget) bool {
     if (target.role) |role| if (!std.mem.eql(u8, role, widget.role)) return false;
