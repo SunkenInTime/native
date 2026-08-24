@@ -591,11 +591,15 @@ const CaptureDriver = struct {
             if (candidate.window_id == requested.window_id and std.mem.eql(u8, candidate.label, requested_label)) break candidate;
         } else return error.CaptureViewNotFound;
         if (view.kind != .gpu_surface) return error.CaptureViewNotGpuSurface;
+        var views_buffer: [native_sdk.platform.max_views]native_sdk.ViewInfo = undefined;
+        const runtime_view = for (self.runtime.listViews(requested.window_id, &views_buffer)) |candidate| {
+            if (candidate.kind == .gpu_surface and std.mem.eql(u8, candidate.label, requested_label)) break candidate;
+        } else return error.CaptureViewNotFound;
         try handler(handler_context, .{ .gpu_surface_frame = .{
             .window_id = requested.window_id,
             .label = requested_label,
             .size = view.frame.size(),
-            .scale_factor = 1,
+            .scale_factor = runtime_view.gpu_scale_factor,
             .frame_index = self.next_frame_index,
             .timestamp_ns = self.next_timestamp_ns,
             .nonblank = false,
@@ -822,12 +826,12 @@ const CaptureDriver = struct {
         } else return error.CaptureViewNotFound;
 
         const render_start_us = captureNowUs();
-        const pixel_size = try self.runtime.canvasScreenshotPixelSize(view.window_id, view.label, 1);
+        const pixel_size = try self.runtime.canvasScreenshotPixelSize(view.window_id, view.label, view.gpu_scale_factor);
         const pixels = try std.heap.page_allocator.alloc(u8, pixel_size.byte_len);
         defer std.heap.page_allocator.free(pixels);
         const scratch = try std.heap.page_allocator.alloc(u8, pixel_size.byte_len);
         defer std.heap.page_allocator.free(scratch);
-        const screenshot = try self.runtime.renderCanvasScreenshot(view.window_id, view.label, 1, pixels, scratch);
+        const screenshot = try self.runtime.renderCanvasScreenshot(view.window_id, view.label, view.gpu_scale_factor, pixels, scratch);
         const clear = try self.runtime.canvasClearColorRgba8(view.window_id, view.label);
         var pixels_different_from_clear: usize = 0;
         var pixel_index: usize = 0;
