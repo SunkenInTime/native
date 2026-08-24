@@ -706,3 +706,32 @@ test "null platform exposes active timers and coalesced gpu frame requests to de
     try null_platform.scheduleGpuSurfaceFrame(1, "capture-next");
     try std.testing.expectEqualStrings("capture", request.label());
 }
+
+test "null platform coalesces gpu frame requests independently per surface" {
+    if (comptime max_views < 2) return error.SkipZigTest;
+    var null_platform = NullPlatform.init(.{});
+    null_platform.gpu_surfaces = true;
+    const services = null_platform.platform().services;
+    try services.createView(.{
+        .label = "capture",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 110),
+    });
+    try services.createView(.{
+        .label = "capture-secondary",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 120, 80),
+    });
+
+    try null_platform.scheduleGpuSurfaceFrame(1, "capture-secondary");
+    try null_platform.scheduleGpuSurfaceFrame(1, "capture");
+    try null_platform.scheduleGpuSurfaceFrame(1, "capture");
+    try std.testing.expectEqual(@as(usize, 2), null_platform.pendingGpuSurfaceFrameRequestCount());
+    const request = null_platform.takeGpuSurfaceFrameRequest().?;
+    try std.testing.expectEqualStrings("capture", request.label());
+    try services.closeView(1, "capture");
+    try std.testing.expectEqual(@as(usize, 1), null_platform.pendingGpuSurfaceFrameRequestCount());
+    const secondary_request = null_platform.takeGpuSurfaceFrameRequest().?;
+    try std.testing.expectEqualStrings("capture-secondary", secondary_request.label());
+    try std.testing.expectEqual(@as(usize, 0), null_platform.pendingGpuSurfaceFrameRequestCount());
+}

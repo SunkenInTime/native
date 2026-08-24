@@ -569,9 +569,11 @@ const CaptureDriver = struct {
             .frame = view.frame,
             .scale_factor = 1,
         } });
-        // A real host schedules the completion only after resize invalidates
-        // the surface. Consume that actual request instead of inventing a
-        // frame count or waiting for an arbitrary duration.
+        // A live display loop owns the first completion even when application
+        // startup and resize did not invalidate content. Model that host
+        // scheduling explicitly; the null backend coalesces it with any
+        // application request already pending for this surface.
+        try self.null_platform.scheduleGpuSurfaceFrame(view.window_id, view.label);
         const requested = self.null_platform.takeGpuSurfaceFrameRequest() orelse return error.CaptureFrameNotRequested;
         if (requested.window_id != view.window_id or !std.mem.eql(u8, requested.label(), view.label)) return error.CaptureFrameTargetMismatch;
         try self.completeRequestedFrame(handler, handler_context, requested);

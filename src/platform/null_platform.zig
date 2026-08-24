@@ -169,10 +169,10 @@ pub const NullTimer = struct {
     active: bool = false,
 };
 
-/// One coalesced GPU frame request recorded by the null backend. Live hosts
-/// coalesce repeated requests until the next frame callback; the headless
-/// capture driver consumes this value and emits that exact callback instead
-/// of guessing a frame count.
+/// One GPU frame request recorded by the null backend. Live hosts coalesce
+/// repeated requests per surface until that surface's next frame callback;
+/// the headless capture driver consumes these values and emits those exact
+/// callbacks instead of guessing a frame count.
 pub const NullGpuSurfaceFrameRequest = struct {
     window_id: WindowId,
     label_storage: [max_view_label_bytes]u8,
@@ -433,11 +433,12 @@ pub const NullPlatform = struct {
     /// How many of the recorded binary presents were incremental patches.
     gpu_surface_packet_present_binary_patch_count: usize = 0,
     gpu_surface_packet_present_count: usize = 0,
+    /// Last request receipt. Pending state lives on each `NullView`; these
+    /// fields remain the simple diagnostic for which surface asked last.
     gpu_surface_frame_request_window_id: WindowId = 0,
     gpu_surface_frame_request_label_storage: [max_view_label_bytes]u8 = undefined,
     gpu_surface_frame_request_label_len: usize = 0,
     gpu_surface_frame_request_count: usize = 0,
-    gpu_surface_frame_request_pending: bool = false,
     /// Binary image-upload side-channel recorder: mirrors a packet host's
     /// host-wide texture store (create/replace on upload, drop on remove)
     /// so tests assert the register → re-register → unregister lifecycle
@@ -1688,24 +1689,24 @@ pub const NullPlatform = struct {
         self.gpu_surface_frame_request_label_storage = undefined;
         self.gpu_surface_frame_request_label_len = (try copyInto(&self.gpu_surface_frame_request_label_storage, label)).len;
         self.gpu_surface_frame_request_count += 1;
-        self.gpu_surface_frame_request_pending = true;
+        self.views[view_index].gpu_frame_requested = true;
     }
 
-    /// Consume the one coalesced GPU frame request a live host would satisfy.
-    /// The returned value owns its label so a nested frame request cannot
-    /// overwrite the event that the caller is about to dispatch.
+    /// Consume the next per-surface GPU frame request a live host would
+    /// satisfy, in deterministic view-creation order. The returned value owns
+    /// its label so closing or updating the view cannot mutate the event that
+    /// the caller is about to dispatch.
     pub fn takeGpuSurfaceFrameRequest(self: *NullPlatform) ?NullGpuSurfaceFrameRequest {
-        if (!self.gpu_surface_frame_request_pending) return null;
-        self.gpu_surface_frame_request_pending = false;
+        const view = for (self.views[0..self.view_count]) |*candidate| {
+            if (candidate.kind == .gpu_surface and candidate.gpu_frame_requested) break candidate;
+        } else return null;
+        view.gpu_frame_requested = false;
         var request: NullGpuSurfaceFrameRequest = .{
-            .window_id = self.gpu_surface_frame_request_window_id,
+            .window_id = view.window_id,
             .label_storage = undefined,
-            .label_len = self.gpu_surface_frame_request_label_len,
+            .label_len = view.label.len,
         };
-        @memcpy(
-            request.label_storage[0..request.label_len],
-            self.gpu_surface_frame_request_label_storage[0..request.label_len],
-        );
+        @memcpy(request.label_storage[0..request.label_len], view.label);
         return request;
     }
 
@@ -1718,7 +1719,11 @@ pub const NullPlatform = struct {
     }
 
     pub fn pendingGpuSurfaceFrameRequestCount(self: *const NullPlatform) usize {
-        return if (self.gpu_surface_frame_request_pending) 1 else 0;
+        var count: usize = 0;
+        for (self.views[0..self.view_count]) |view| {
+            if (view.kind == .gpu_surface and view.gpu_frame_requested) count += 1;
+        }
+        return count;
     }
 
     fn presentGpuSurfacePacket(context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void {
@@ -1921,6 +1926,15 @@ pub const NullPlatform = struct {
                 .enabled = next.enabled,
                 .accessibility_label = next.accessibility_label,
                 .command = next.command,
+                .gpu_size = next.gpu_size,
+                .gpu_backend = next.gpu_backend,
+                .gpu_pixel_format = next.gpu_pixel_format,
+                .gpu_present_mode = next.gpu_present_mode,
+                .gpu_alpha_mode = next.gpu_alpha_mode,
+                .gpu_color_space = next.gpu_color_space,
+                .gpu_vsync = next.gpu_vsync,
+                .gpu_status = next.gpu_status,
+                .gpu_frame_requested = next.gpu_frame_requested,
                 .open = next.open,
             };
             self.copyViewStrings(cursor, next.label, next.parent, next.role, next.accessibility_label, next.text, next.command) catch unreachable;
@@ -2294,6 +2308,7 @@ pub const NullView = struct {
     gpu_color_space: GpuSurfaceColorSpace = .none,
     gpu_vsync: bool = false,
     gpu_status: GpuSurfaceStatus = .unavailable,
+    gpu_frame_requested: bool = false,
     open: bool = false,
     label_storage: [max_view_label_bytes]u8 = undefined,
     parent_storage: [max_view_label_bytes]u8 = undefined,
