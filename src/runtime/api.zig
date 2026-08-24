@@ -340,6 +340,12 @@ pub const ReplayControl = union(enum) {
     feed: runtime_effects.EffectResultRecord,
 };
 
+pub const CapturePendingWork = struct {
+    fetches: usize = 0,
+    images: usize = 0,
+    providers: []const []const u8 = &.{},
+};
+
 pub fn App(comptime Runtime: type) type {
     return struct {
         const Self = @This();
@@ -350,6 +356,8 @@ pub fn App(comptime Runtime: type) type {
         const FrameRequestedFn = *const fn (context: *anyopaque, runtime: *Runtime) anyerror!void;
         const StopFn = *const fn (context: *anyopaque, runtime: *Runtime) anyerror!void;
         const ReplayFn = *const fn (context: *anyopaque, control: ReplayControl) anyerror!void;
+        const CaptureClockAdvanceFn = *const fn (context: *anyopaque, milliseconds: u64) anyerror!void;
+        const CapturePendingFn = *const fn (context: *anyopaque) CapturePendingWork;
 
         context: *anyopaque,
         name: []const u8,
@@ -370,6 +378,11 @@ pub fn App(comptime Runtime: type) type {
         /// means the app cannot be replayed with effect stubbing —
         /// replay refuses journals that carry effect results for it.
         replay_fn: ?ReplayFn = null,
+        /// Optional app-owned logical clock seam for deterministic capture.
+        /// Ordinary apps leave this null; capture still advances platform
+        /// timers, while apps with a wall-clock source advance it explicitly.
+        capture_clock_advance_fn: ?CaptureClockAdvanceFn = null,
+        capture_pending_fn: ?CapturePendingFn = null,
 
         pub fn start(self: Self, runtime: *Runtime) anyerror!void {
             if (self.start_fn) |start_fn| try start_fn(self.context, runtime);
@@ -402,6 +415,14 @@ pub fn App(comptime Runtime: type) type {
         pub fn replayControl(self: Self, control: ReplayControl) anyerror!void {
             const replay_fn = self.replay_fn orelse return error.ReplayUnsupported;
             try replay_fn(self.context, control);
+        }
+
+        pub fn advanceCaptureClock(self: Self, milliseconds: u64) anyerror!void {
+            if (self.capture_clock_advance_fn) |advance_fn| try advance_fn(self.context, milliseconds);
+        }
+
+        pub fn capturePendingWork(self: Self) CapturePendingWork {
+            return if (self.capture_pending_fn) |pending_fn| pending_fn(self.context) else .{};
         }
     };
 }

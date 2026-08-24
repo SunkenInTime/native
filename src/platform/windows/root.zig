@@ -707,6 +707,13 @@ fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!p
     };
 }
 
+/// WIC decoding is process-level and does not require a Win32 window. Keep
+/// the capture runner on the null event loop while reusing the same decoder
+/// as the desktop backend.
+pub fn installHeadlessCaptureServices(services: *platform_mod.PlatformServices) void {
+    services.decode_image_fn = decodeImage;
+}
+
 fn titlebarStyleInt(style: platform_mod.WindowTitlebarStyle) c_int {
     return switch (style) {
         .standard => 0,

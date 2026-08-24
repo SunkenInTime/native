@@ -393,6 +393,18 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     if (build_options.debug_overlay) {
         std.debug.print("debug-overlay=true backend={s} web-engine={s} trace={s}\n", .{ build_options.platform, build_options.web_engine, build_options.trace });
     }
+    // Capture and session replay never open a real platform. Capture owns
+    // its output paths and short-lived null loop; replay treats its journal
+    // as the whole world.
+    if (init.environ_map.get("NATIVE_SDK_CAPTURE_IMAGE")) |image_path| {
+        return runCapture(app, options, init, .{
+            .image_path = image_path,
+            .snapshot_path = init.environ_map.get("NATIVE_SDK_CAPTURE_SNAPSHOT") orelse return error.CaptureSnapshotPathMissing,
+            .result_path = init.environ_map.get("NATIVE_SDK_CAPTURE_RESULT") orelse return error.CaptureResultPathMissing,
+            .action_path = init.environ_map.get("NATIVE_SDK_CAPTURE_ACTION_FILE"),
+            .session_journal_path = init.environ_map.get("NATIVE_SDK_CAPTURE_SESSION_JOURNAL"),
+        });
+    }
     // Session replay never opens a real platform: the journal is the
     // world, and it drives a headless runtime over the null platform.
     if (init.environ_map.get("NATIVE_SDK_SESSION_REPLAY")) |journal_path| {
@@ -407,6 +419,601 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     } else {
         try runNull(app, options, init);
     }
+}
+
+const CaptureRequest = struct {
+    image_path: []const u8,
+    snapshot_path: []const u8,
+    result_path: []const u8,
+    action_path: ?[]const u8 = null,
+    session_journal_path: ?[]const u8 = null,
+};
+
+const CaptureActionTarget = struct {
+    role: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    enabled: ?bool = null,
+    selected: ?bool = null,
+    value: ?f32 = null,
+};
+
+const CaptureAction = struct {
+    action: []const u8,
+    target: ?CaptureActionTarget = null,
+    kind: ?[]const u8 = null,
+    value: ?[]const u8 = null,
+    key: ?[]const u8 = null,
+    text: ?[]const u8 = null,
+    from: ?f32 = null,
+    to: ?f32 = null,
+    delta: ?f32 = null,
+    milliseconds: ?u64 = null,
+    item: ?usize = null,
+    width: ?f32 = null,
+    height: ?f32 = null,
+    scale: ?f32 = null,
+};
+
+const CaptureActionDocument = struct {
+    schema: []const u8,
+    actions: []const CaptureAction,
+};
+
+const CaptureTimingUs = struct {
+    startup: u64 = 0,
+    render: u64 = 0,
+    encode: u64 = 0,
+    write: u64 = 0,
+    total: u64 = 0,
+};
+
+const CaptureOutput = struct {
+    widthPx: usize,
+    heightPx: usize,
+    pngBytes: usize,
+};
+
+const CaptureRenderer = struct {
+    pixels: []const u8 = "reference",
+    textMeasurement: []const u8,
+    eventsDriven: []const []const u8,
+    framesDriven: usize,
+    retainedRevision: u64,
+    commands: usize,
+    nodes: usize,
+    images: usize,
+    fonts: usize,
+    pixelsDifferentFromClear: usize,
+};
+
+const CapturePending = struct {
+    timers: usize,
+    fetches: usize = 0,
+    images: usize = 0,
+    providers: []const []const u8 = &.{},
+    frameRequests: usize,
+};
+
+const CaptureNativeResult = struct {
+    schema: []const u8 = "native-sdk.capture.v1",
+    status: []const u8 = "ok",
+    output: CaptureOutput,
+    renderer: CaptureRenderer,
+    pending: CapturePending,
+    timingUs: CaptureTimingUs,
+    warnings: []const []const u8 = &.{},
+};
+
+const CaptureNativeError = struct {
+    schema: []const u8 = "native-sdk.capture.v1",
+    status: []const u8 = "error",
+    @"error": struct {
+        name: []const u8,
+        ask: []const u8,
+        remedy: []const u8,
+        candidates: []const CaptureCandidate = &.{},
+    },
+};
+
+const CaptureCandidate = struct {
+    role: []const u8,
+    name: []const u8,
+    enabled: bool,
+    selected: bool,
+    value: ?f32,
+};
+
+const capture_events = [_][]const u8{
+    "app_start",
+    "appearance_changed",
+    "surface_resized",
+    "window_frame_changed",
+    "gpu_surface_resized",
+    "gpu_surface_frame",
+    "app_shutdown",
+};
+
+const capture_replay_events = [_][]const u8{"session_journal"};
+
+const CaptureDriver = struct {
+    io: std.Io,
+    null_platform: *native_sdk.NullPlatform,
+    runtime: *native_sdk.Runtime,
+    app: native_sdk.App,
+    request: CaptureRequest,
+    title: []const u8,
+    started_us: u64,
+    frames_driven: usize = 0,
+    next_frame_index: u64 = 1,
+    next_timestamp_ns: u64 = 1_000_000,
+    events_driven: []const []const u8 = &capture_events,
+    failure_candidates: []CaptureCandidate = &.{},
+
+    fn run(context: *anyopaque, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque) anyerror!void {
+        const self: *CaptureDriver = @ptrCast(@alignCast(context));
+        try self.null_platform.dispatchStartup(handler, handler_context);
+        const startup_start_us = self.started_us;
+        try self.driveInitialFrame(handler, handler_context);
+        const startup_us = captureNowUs() -| startup_start_us;
+        try self.applyActionFile(handler, handler_context);
+        try self.writeArtifacts(startup_us);
+        try self.null_platform.dispatchShutdown(handler, handler_context);
+    }
+
+    fn driveInitialFrame(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque) !void {
+        const view = for (self.null_platform.views[0..self.null_platform.view_count]) |candidate| {
+            if (candidate.kind == .gpu_surface) break candidate;
+        } else return error.CaptureViewNotFound;
+        try handler(handler_context, .{ .gpu_surface_resized = .{
+            .window_id = view.window_id,
+            .label = view.label,
+            .frame = view.frame,
+            .scale_factor = 1,
+        } });
+        // A real host schedules the completion only after resize invalidates
+        // the surface. Consume that actual request instead of inventing a
+        // frame count or waiting for an arbitrary duration.
+        const requested = self.null_platform.takeGpuSurfaceFrameRequest() orelse requested: {
+            try self.null_platform.scheduleGpuSurfaceFrame(view.window_id, view.label);
+            break :requested self.null_platform.takeGpuSurfaceFrameRequest() orelse return error.CaptureFrameNotRequested;
+        };
+        if (requested.window_id != view.window_id or !std.mem.eql(u8, requested.label, view.label)) return error.CaptureFrameTargetMismatch;
+        try self.completeRequestedFrame(handler, handler_context, requested);
+    }
+
+    fn drivePendingFrame(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque) !bool {
+        const requested = self.null_platform.takeGpuSurfaceFrameRequest() orelse return false;
+        try self.completeRequestedFrame(handler, handler_context, requested);
+        return true;
+    }
+
+    fn completeRequestedFrame(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque, requested: native_sdk.NullGpuSurfaceFrameRequest) !void {
+        const view = for (self.null_platform.views[0..self.null_platform.view_count]) |candidate| {
+            if (candidate.window_id == requested.window_id and std.mem.eql(u8, candidate.label, requested.label)) break candidate;
+        } else return error.CaptureViewNotFound;
+        if (view.kind != .gpu_surface) return error.CaptureViewNotGpuSurface;
+        try handler(handler_context, .{ .gpu_surface_frame = .{
+            .window_id = requested.window_id,
+            .label = requested.label,
+            .size = view.frame.size(),
+            .scale_factor = 1,
+            .frame_index = self.next_frame_index,
+            .timestamp_ns = self.next_timestamp_ns,
+            .nonblank = false,
+            .backend = .software,
+            .pixel_format = .bgra8_unorm,
+            .present_mode = .timer,
+            .alpha_mode = .premultiplied,
+            .color_space = .srgb,
+            .vsync = false,
+            .status = .ready,
+        } });
+        self.frames_driven += 1;
+        self.next_frame_index += 1;
+        self.next_timestamp_ns += native_sdk.platform.default_gpu_frame_interval_ns;
+    }
+
+    fn applyActionFile(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque) !void {
+        const path = self.request.action_path orelse return;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(self.io, path, std.heap.page_allocator, .unlimited);
+        defer std.heap.page_allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(CaptureActionDocument, std.heap.page_allocator, bytes, .{
+            .ignore_unknown_fields = false,
+        });
+        defer parsed.deinit();
+        if (!std.mem.eql(u8, parsed.value.schema, "weaver.capture.actions.v1")) return error.CaptureActionSchemaUnsupported;
+        for (parsed.value.actions) |action| {
+            try self.applyAction(handler, handler_context, action);
+            _ = try self.drivePendingFrame(handler, handler_context);
+        }
+    }
+
+    fn applyAction(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque, action: CaptureAction) !void {
+        if (std.mem.eql(u8, action.action, "advance-clock")) {
+            try self.advanceClock(handler, handler_context, action.milliseconds orelse return error.CaptureActionMillisecondsMissing);
+            return;
+        }
+        if (std.mem.eql(u8, action.action, "resize")) {
+            const width = action.width orelse return error.CaptureActionWidthMissing;
+            const height = action.height orelse return error.CaptureActionHeightMissing;
+            const scale = action.scale orelse 1;
+            return self.dispatchCommand("resize {d} {d} {d}", .{ width, height, scale });
+        }
+
+        const target = try self.resolveTarget(action.target orelse return error.CaptureActionTargetMissing);
+        if (std.mem.eql(u8, action.action, "click")) {
+            return self.dispatchCommand("widget-click {s} {d}", .{ target.view_label, target.id });
+        }
+        if (std.mem.eql(u8, action.action, "drag")) {
+            return self.dispatchCommand("widget-drag {s} {d} {d} {d}", .{
+                target.view_label,
+                target.id,
+                action.from orelse return error.CaptureActionFromMissing,
+                action.to orelse return error.CaptureActionToMissing,
+            });
+        }
+        if (std.mem.eql(u8, action.action, "wheel")) {
+            return self.dispatchCommand("widget-wheel {s} {d} {d}", .{
+                target.view_label,
+                target.id,
+                action.delta orelse return error.CaptureActionDeltaMissing,
+            });
+        }
+        if (std.mem.eql(u8, action.action, "text")) {
+            const value = action.value orelse return error.CaptureActionValueMissing;
+            try validateCaptureCommandValue(value);
+            return self.dispatchCommand("widget-action {s} {d} set-text {s}", .{ target.view_label, target.id, value });
+        }
+        if (std.mem.eql(u8, action.action, "key")) {
+            const key = action.key orelse return error.CaptureActionKeyMissing;
+            const text = action.text orelse "";
+            try validateCaptureCommandValue(key);
+            try validateCaptureCommandValue(text);
+            try self.dispatchCommand("widget-action {s} {d} focus", .{ target.view_label, target.id });
+            return self.dispatchCommand("widget-key {s} {s} {s}", .{ target.view_label, key, text });
+        }
+        if (std.mem.eql(u8, action.action, "action")) {
+            const kind = action.kind orelse return error.CaptureActionKindMissing;
+            const value = action.value orelse "";
+            try validateCaptureCommandValue(kind);
+            try validateCaptureCommandValue(value);
+            return self.dispatchCommand("widget-action {s} {d} {s} {s}", .{ target.view_label, target.id, kind, value });
+        }
+        if (std.mem.eql(u8, action.action, "context-menu")) {
+            return self.dispatchCommand("widget-context-menu {s} {d} {d}", .{
+                target.view_label,
+                target.id,
+                action.item orelse return error.CaptureActionItemMissing,
+            });
+        }
+        return error.CaptureActionUnknown;
+    }
+
+    fn resolveTarget(self: *CaptureDriver, target: CaptureActionTarget) !native_sdk.automation.snapshot.Widget {
+        if (target.role == null and target.name == null) return error.CaptureTargetSelectorEmpty;
+        const snapshot = self.runtime.automationSnapshot(self.title);
+        var match: ?native_sdk.automation.snapshot.Widget = null;
+        var match_count: usize = 0;
+        for (snapshot.widgets) |widget| {
+            if (!captureTargetMatches(target, widget)) continue;
+            match = widget;
+            match_count += 1;
+        }
+        if (match_count == 1) return match.?;
+        const candidate_count = if (match_count == 0) snapshot.widgets.len else match_count;
+        self.failure_candidates = try std.heap.page_allocator.alloc(CaptureCandidate, candidate_count);
+        var candidate_index: usize = 0;
+        for (snapshot.widgets) |widget| {
+            if (match_count != 0 and !captureTargetMatches(target, widget)) continue;
+            self.failure_candidates[candidate_index] = .{
+                .role = widget.role,
+                .name = widget.name,
+                .enabled = widget.enabled,
+                .selected = widget.selected,
+                .value = widget.value,
+            };
+            candidate_index += 1;
+        }
+        std.debug.print("capture target role={s} name={s} matched {d} controls:\n", .{
+            target.role orelse "*",
+            target.name orelse "*",
+            match_count,
+        });
+        for (self.failure_candidates) |candidate| {
+            std.debug.print("- role={s} name=\"{s}\" enabled={} selected={}\n", .{
+                candidate.role, candidate.name, candidate.enabled, candidate.selected,
+            });
+        }
+        return if (match_count == 0) error.CaptureTargetNotFound else error.CaptureTargetAmbiguous;
+    }
+
+    fn dispatchCommand(self: *CaptureDriver, comptime format: []const u8, args: anytype) !void {
+        const command = try std.fmt.allocPrint(std.heap.page_allocator, format, args);
+        defer std.heap.page_allocator.free(command);
+        try self.runtime.dispatchAutomationCommand(self.app, command);
+    }
+
+    fn advanceClock(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque, milliseconds: u64) !void {
+        if (milliseconds > std.math.maxInt(u64) / std.time.ns_per_ms) return error.CaptureClockAdvanceOverflow;
+        try self.app.advanceCaptureClock(milliseconds);
+        const target_ns = milliseconds * std.time.ns_per_ms;
+        const Scheduled = struct { id: u64 = 0, due_ns: u64 = 0, interval_ns: u64 = 0, active: bool = false, eligible: bool = false };
+        var scheduled = [_]Scheduled{.{}} ** native_sdk.max_null_timers;
+        var scheduled_count: usize = 0;
+        var elapsed_ns: u64 = 0;
+        while (true) {
+            for (scheduled[0..scheduled_count]) |*entry| entry.active = false;
+            var timer_buffer: [native_sdk.max_null_timers]native_sdk.NullTimer = undefined;
+            const active_timers = self.null_platform.listActiveTimers(&timer_buffer);
+            for (active_timers) |timer| {
+                if (timer.interval_ns == 0) return error.CaptureTimerIntervalZero;
+                const existing = for (scheduled[0..scheduled_count], 0..) |entry, index| {
+                    if (entry.id == timer.id) break index;
+                } else null;
+                if (existing) |index| {
+                    scheduled[index].active = true;
+                    if (scheduled[index].interval_ns != timer.interval_ns) {
+                        scheduled[index].interval_ns = timer.interval_ns;
+                        scheduled[index].eligible = timer.interval_ns <= target_ns - elapsed_ns;
+                        if (scheduled[index].eligible) scheduled[index].due_ns = elapsed_ns + timer.interval_ns;
+                    }
+                } else {
+                    const eligible = timer.interval_ns <= target_ns - elapsed_ns;
+                    scheduled[scheduled_count] = .{
+                        .id = timer.id,
+                        .due_ns = if (eligible) elapsed_ns + timer.interval_ns else 0,
+                        .interval_ns = timer.interval_ns,
+                        .active = true,
+                        .eligible = eligible,
+                    };
+                    scheduled_count += 1;
+                }
+            }
+            const next_index = next: {
+                var index: ?usize = null;
+                for (scheduled[0..scheduled_count], 0..) |entry, candidate| {
+                    if (!entry.active or !entry.eligible or entry.due_ns > target_ns) continue;
+                    if (index == null or entry.due_ns < scheduled[index.?].due_ns) index = candidate;
+                }
+                break :next index;
+            } orelse break;
+            elapsed_ns = scheduled[next_index].due_ns;
+            const id = scheduled[next_index].id;
+            const event = self.null_platform.fireTimer(id, self.next_timestamp_ns + elapsed_ns) orelse {
+                scheduled[next_index].active = false;
+                continue;
+            };
+            try handler(handler_context, event);
+            if (self.null_platform.startedTimer(id)) |timer| {
+                if (timer.active) {
+                    if (timer.interval_ns == 0) return error.CaptureTimerIntervalZero;
+                    scheduled[next_index].interval_ns = timer.interval_ns;
+                    scheduled[next_index].active = true;
+                    scheduled[next_index].eligible = timer.interval_ns <= target_ns - elapsed_ns;
+                    if (scheduled[next_index].eligible) scheduled[next_index].due_ns = elapsed_ns + timer.interval_ns;
+                } else {
+                    scheduled[next_index].active = false;
+                    scheduled[next_index].eligible = false;
+                }
+            } else {
+                scheduled[next_index].active = false;
+                scheduled[next_index].eligible = false;
+            }
+        }
+        self.next_timestamp_ns += target_ns;
+    }
+
+    fn writeArtifacts(self: *CaptureDriver, startup_us: u64) !void {
+        var views_buffer: [native_sdk.platform.max_views]native_sdk.ViewInfo = undefined;
+        const views = self.runtime.listViews(1, &views_buffer);
+        const view = for (views) |candidate| {
+            if (candidate.kind == .gpu_surface) break candidate;
+        } else return error.CaptureViewNotFound;
+
+        const render_start_us = captureNowUs();
+        const pixel_size = try self.runtime.canvasScreenshotPixelSize(view.window_id, view.label, 1);
+        const pixels = try std.heap.page_allocator.alloc(u8, pixel_size.byte_len);
+        defer std.heap.page_allocator.free(pixels);
+        const scratch = try std.heap.page_allocator.alloc(u8, pixel_size.byte_len);
+        defer std.heap.page_allocator.free(scratch);
+        const screenshot = try self.runtime.renderCanvasScreenshot(view.window_id, view.label, 1, pixels, scratch);
+        const clear = try self.runtime.canvasClearColorRgba8(view.window_id, view.label);
+        var pixels_different_from_clear: usize = 0;
+        var pixel_index: usize = 0;
+        while (pixel_index + 3 < screenshot.rgba8.len) : (pixel_index += 4) {
+            if (!std.mem.eql(u8, screenshot.rgba8[pixel_index .. pixel_index + 4], &clear)) pixels_different_from_clear += 1;
+        }
+        const render_us = captureNowUs() -| render_start_us;
+
+        const encode_start_us = captureNowUs();
+        var png_writer = try std.Io.Writer.Allocating.initCapacity(
+            std.heap.page_allocator,
+            try native_sdk.canvas.png.encodedRgba8ByteLen(screenshot.width, screenshot.height),
+        );
+        defer png_writer.deinit();
+        try native_sdk.canvas.png.writeRgba8(&png_writer.writer, screenshot.width, screenshot.height, screenshot.rgba8);
+        const encode_us = captureNowUs() -| encode_start_us;
+
+        var snapshot_writer = try std.Io.Writer.Allocating.initCapacity(std.heap.page_allocator, 16 * 1024);
+        defer snapshot_writer.deinit();
+        try native_sdk.automation.snapshot.writeText(self.runtime.automationSnapshot(self.title), &snapshot_writer.writer);
+
+        const write_start_us = captureNowUs();
+        try writeCaptureFile(self.io, self.request.image_path, png_writer.written());
+        try writeCaptureFile(self.io, self.request.snapshot_path, snapshot_writer.written());
+        const write_us = captureNowUs() -| write_start_us;
+        const total_us = captureNowUs() -| self.started_us;
+        const refreshed_views = self.runtime.listViews(1, &views_buffer);
+        const refreshed_view = for (refreshed_views) |candidate| {
+            if (candidate.kind == .gpu_surface and std.mem.eql(u8, candidate.label, view.label)) break candidate;
+        } else return error.CaptureViewNotFound;
+        const app_pending = self.app.capturePendingWork();
+        try writeCaptureJson(self.io, self.request.result_path, CaptureNativeResult{
+            .output = .{
+                .widthPx = screenshot.width,
+                .heightPx = screenshot.height,
+                .pngBytes = png_writer.written().len,
+            },
+            .renderer = .{
+                .textMeasurement = if (comptime std.mem.eql(u8, build_options.platform, "macos")) "coretext" else "estimator",
+                .eventsDriven = self.events_driven,
+                .framesDriven = self.frames_driven,
+                .retainedRevision = refreshed_view.canvas_revision,
+                .commands = refreshed_view.canvas_command_count,
+                .nodes = refreshed_view.widget_node_count,
+                .images = self.runtime.registeredCanvasImageCount(),
+                .fonts = self.runtime.registeredCanvasFontCount(),
+                .pixelsDifferentFromClear = pixels_different_from_clear,
+            },
+            .pending = .{
+                .timers = self.null_platform.activeTimerCount(),
+                .fetches = app_pending.fetches,
+                .images = app_pending.images,
+                .providers = app_pending.providers,
+                .frameRequests = self.null_platform.pendingGpuSurfaceFrameRequestCount(),
+            },
+            .timingUs = .{
+                .startup = startup_us,
+                .render = render_us,
+                .encode = encode_us,
+                .write = write_us,
+                .total = total_us,
+            },
+        });
+    }
+};
+
+fn captureTargetMatches(target: CaptureActionTarget, widget: native_sdk.automation.snapshot.Widget) bool {
+    if (target.role) |role| if (!std.mem.eql(u8, role, widget.role)) return false;
+    if (target.name) |name| if (!std.mem.eql(u8, name, widget.name)) return false;
+    if (target.enabled) |enabled| if (enabled != widget.enabled) return false;
+    if (target.selected) |selected| if (selected != widget.selected) return false;
+    if (target.value) |value| if (widget.value == null or widget.value.? != value) return false;
+    return true;
+}
+
+fn validateCaptureCommandValue(value: []const u8) !void {
+    if (std.mem.indexOfAny(u8, value, "\r\n") != null) return error.CaptureActionContainsLineBreak;
+}
+
+fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, request: CaptureRequest) !void {
+    var buffers: StateBuffers = undefined;
+    var app_info = options.appInfo(&buffers);
+    const session_recorder = setupSessionRecorder(init, app_info);
+    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    null_platform.gpu_surfaces = true;
+    null_platform.image_decode = true;
+    var capture_platform = null_platform.platform();
+    if (comptime std.mem.eql(u8, build_options.platform, "macos")) {
+        native_sdk.platform.macos.installHeadlessCaptureServices(&capture_platform.services);
+        null_platform.gpu_surface_scroll_drivers = true;
+    } else if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
+        native_sdk.platform.windows.installHeadlessCaptureServices(&capture_platform.services);
+    }
+    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
+    defer std.heap.page_allocator.destroy(runtime);
+    var driver: CaptureDriver = .{
+        .io = init.io,
+        .null_platform = &null_platform,
+        .runtime = runtime,
+        .app = app,
+        .request = request,
+        .title = app_info.resolvedWindowTitle(),
+        .started_us = captureNowUs(),
+    };
+    defer if (driver.failure_candidates.len > 0) std.heap.page_allocator.free(driver.failure_candidates);
+    if (request.session_journal_path == null) {
+        capture_platform.context = &driver;
+        capture_platform.run_fn = CaptureDriver.run;
+    }
+    native_sdk.Runtime.initAt(runtime, .{
+        .platform = capture_platform,
+        .bridge = options.bridge,
+        .builtin_bridge = options.builtin_bridge,
+        .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
+        .gpu_surface_frame_diagnostics = false,
+        .security = options.security,
+        .menus = options.menus,
+        .environ = init.minimal.environ,
+        .session_recorder = session_recorder,
+    });
+    const run_result: anyerror!void = if (request.session_journal_path) |journal_path|
+        runCaptureJournal(&driver, runtime, app, init.io, journal_path)
+    else
+        runtime.run(app);
+    run_result catch |err| {
+        const detail = captureErrorDetail(err);
+        writeCaptureJson(init.io, request.result_path, CaptureNativeError{
+            .@"error" = .{
+                .name = @errorName(err),
+                .ask = detail.ask,
+                .remedy = detail.remedy,
+                .candidates = driver.failure_candidates,
+            },
+        }) catch {};
+        return err;
+    };
+    finishSessionRecorder(session_recorder);
+}
+
+fn captureErrorDetail(err: anyerror) struct { ask: []const u8, remedy: []const u8 } {
+    const name = @errorName(err);
+    if (std.mem.startsWith(u8, name, "CaptureTarget")) return .{
+        .ask = "select exactly one control by semantic role and accessible name",
+        .remedy = "choose a unique role/name pair from error.candidates and rerun the same action file",
+    };
+    if (std.mem.startsWith(u8, name, "CaptureAction")) return .{
+        .ask = "fix the named action field or action-file schema",
+        .remedy = "use schema weaver.capture.actions.v1 and a documented semantic action, then rerun capture",
+    };
+    if (std.mem.startsWith(u8, name, "CaptureProvider")) return .{
+        .ask = "provide valid recorded frames for every subscribed non-time provider",
+        .remedy = "use schema weaver.provider-fixture.v1, declare only subscribed providers, and rerun capture",
+    };
+    if (std.mem.startsWith(u8, name, "SessionReplay")) return .{
+        .ask = "provide a complete same-platform session journal whose verified replay matches",
+        .remedy = "record the session again on this platform or fix the reported replay divergence",
+    };
+    return .{
+        .ask = "inspect the named capture failure and widget diagnostic",
+        .remedy = "fix the named runtime or widget failure, then rerun the same capture command",
+    };
+}
+
+fn runCaptureJournal(
+    driver: *CaptureDriver,
+    runtime: *native_sdk.Runtime,
+    app: native_sdk.App,
+    io: std.Io,
+    journal_path: []const u8,
+) !void {
+    driver.events_driven = &capture_replay_events;
+    const journal_bytes = try readSessionJournal(io, journal_path);
+    defer std.heap.page_allocator.free(journal_bytes);
+    const replay_start_us = captureNowUs();
+    const report = try native_sdk.runtime.replaySession(runtime, app, journal_bytes, .{ .verify = true });
+    if (!report.ok()) return error.SessionReplayMismatch;
+    driver.frames_driven = @intCast(runtime.frameDiagnostics().frame_index);
+    try driver.writeArtifacts(captureNowUs() -| replay_start_us);
+}
+
+fn writeCaptureFile(io: std.Io, path: []const u8, bytes: []const u8) !void {
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, bytes);
+}
+
+fn writeCaptureJson(io: std.Io, path: []const u8, value: anytype) !void {
+    var writer = try std.Io.Writer.Allocating.initCapacity(std.heap.page_allocator, 2048);
+    defer writer.deinit();
+    try writer.writer.print("{f}\n", .{std.json.fmt(value, .{})});
+    try writeCaptureFile(io, path, writer.written());
+}
+
+fn captureNowUs() u64 {
+    const now_ns = native_sdk.runtime.nowNanoseconds();
+    return @intCast(@max(0, @divTrunc(now_ns, 1000)));
 }
 
 fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {

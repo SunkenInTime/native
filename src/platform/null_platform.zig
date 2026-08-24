@@ -169,6 +169,15 @@ pub const NullTimer = struct {
     active: bool = false,
 };
 
+/// One coalesced GPU frame request recorded by the null backend. Live hosts
+/// coalesce repeated requests until the next frame callback; the headless
+/// capture driver consumes this value and emits that exact callback instead
+/// of guessing a frame count.
+pub const NullGpuSurfaceFrameRequest = struct {
+    window_id: WindowId,
+    label: []const u8,
+};
+
 /// Duration table entries for the fake audio player (see
 /// `setAudioDuration`): a loaded path whose tail matches `suffix` reports
 /// `duration_ms`. A table instead of real decoding keeps tests hermetic —
@@ -423,6 +432,7 @@ pub const NullPlatform = struct {
     gpu_surface_frame_request_label_storage: [max_view_label_bytes]u8 = undefined,
     gpu_surface_frame_request_label_len: usize = 0,
     gpu_surface_frame_request_count: usize = 0,
+    gpu_surface_frame_request_pending: bool = false,
     /// Binary image-upload side-channel recorder: mirrors a packet host's
     /// host-wide texture store (create/replace on upload, drop on remove)
     /// so tests assert the register → re-register → unregister lifecycle
@@ -673,8 +683,10 @@ pub const NullPlatform = struct {
         return platform_info.detectHost(.{ .target = target });
     }
 
-    fn run(context: *anyopaque, handler: EventHandler, handler_context: *anyopaque) anyerror!void {
-        const self: *NullPlatform = @ptrCast(@alignCast(context));
+    /// Dispatch the startup prefix shared by the ordinary null loop and the
+    /// one-shot capture driver. Keeping the ordering here makes a capture and
+    /// a normal null run enter the app through the same lifecycle.
+    pub fn dispatchStartup(self: *NullPlatform, handler: EventHandler, handler_context: *anyopaque) anyerror!void {
         try handler(handler_context, .app_start);
         try handler(handler_context, .{ .appearance_changed = .{} });
         try handler(handler_context, .{ .surface_resized = self.surface_value });
@@ -692,11 +704,20 @@ pub const NullPlatform = struct {
                 .focused = index == 0,
             } });
         }
+    }
+
+    pub fn dispatchShutdown(_: *NullPlatform, handler: EventHandler, handler_context: *anyopaque) anyerror!void {
+        try handler(handler_context, .app_shutdown);
+    }
+
+    fn run(context: *anyopaque, handler: EventHandler, handler_context: *anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context));
+        try self.dispatchStartup(handler, handler_context);
         var frame: u32 = 0;
         while (frame < self.requested_frames) : (frame += 1) {
             try handler(handler_context, .frame_requested);
         }
-        try handler(handler_context, .app_shutdown);
+        try self.dispatchShutdown(handler, handler_context);
     }
 
     fn loadWebView(context: ?*anyopaque, source: WebViewSource) anyerror!void {
@@ -1593,6 +1614,16 @@ pub const NullPlatform = struct {
         return count;
     }
 
+    pub fn listActiveTimers(self: *const NullPlatform, output: []NullTimer) []const NullTimer {
+        var count: usize = 0;
+        for (self.timers[0..self.timer_count]) |timer| {
+            if (!timer.active or count == output.len) continue;
+            output[count] = timer;
+            count += 1;
+        }
+        return output[0..count];
+    }
+
     pub fn timerStartCount(self: *const NullPlatform) usize {
         return self.timer_start_count;
     }
@@ -1652,6 +1683,31 @@ pub const NullPlatform = struct {
         self.gpu_surface_frame_request_label_storage = undefined;
         self.gpu_surface_frame_request_label_len = (try copyInto(&self.gpu_surface_frame_request_label_storage, label)).len;
         self.gpu_surface_frame_request_count += 1;
+        self.gpu_surface_frame_request_pending = true;
+    }
+
+    /// Consume the one coalesced GPU frame request a live host would satisfy.
+    /// The returned label aliases the null platform and remains valid until a
+    /// later request replaces it.
+    pub fn takeGpuSurfaceFrameRequest(self: *NullPlatform) ?NullGpuSurfaceFrameRequest {
+        if (!self.gpu_surface_frame_request_pending) return null;
+        self.gpu_surface_frame_request_pending = false;
+        return .{
+            .window_id = self.gpu_surface_frame_request_window_id,
+            .label = self.gpu_surface_frame_request_label_storage[0..self.gpu_surface_frame_request_label_len],
+        };
+    }
+
+    /// Schedule one host-owned initial surface frame through the same service
+    /// path used by runtime invalidation. Desktop presenters supply this first
+    /// completion from their display loop; deterministic hosts call this
+    /// explicitly, then consume it with `takeGpuSurfaceFrameRequest`.
+    pub fn scheduleGpuSurfaceFrame(self: *NullPlatform, window_id: WindowId, label: []const u8) !void {
+        try requestGpuSurfaceFrame(self, window_id, label);
+    }
+
+    pub fn pendingGpuSurfaceFrameRequestCount(self: *const NullPlatform) usize {
+        return if (self.gpu_surface_frame_request_pending) 1 else 0;
     }
 
     fn presentGpuSurfacePacket(context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void {
