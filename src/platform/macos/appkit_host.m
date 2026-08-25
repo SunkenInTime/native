@@ -3,6 +3,7 @@
 
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <CoreVideo/CoreVideo.h>
 /* Spectrum analysis of the app's own playback: MediaToolbox provides
  * the MTAudioProcessingTap that hands the player's PCM to the host, and
  * Accelerate (vDSP) provides the FFT that turns it into band
@@ -107,6 +108,7 @@ static void NativeSdkCanvasRemoveImage(uint64_t imageId, NSMutableDictionary *im
 static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutableDictionary *pixelStore, NSMutableDictionary *textureStore);
 static BOOL NativeSdkRendererBakeoffTraceEnabled(void);
 static uint64_t NativeSdkRetainedFrameIntervalNanoseconds(NSScreen *screen);
+static NSTimeInterval NativeSdkRetainedFrameIntervalSeconds(NSScreen *screen);
 static NSAccessibilityRole NativeSdkAccessibilityRoleForNativeViewKind(NSInteger kind);
 static NSAccessibilityRole NativeSdkAccessibilityRoleForWidgetRole(NSInteger role);
 static NSCursor *NativeSdkCursorForKind(NSInteger kind);
@@ -223,6 +225,11 @@ static uint64_t NativeSdkRetainedFrameIntervalNanoseconds(NSScreen *screen) {
     if (framesPerSecond <= 0) framesPerSecond = 60;
     framesPerSecond = MAX(30, MIN(120, framesPerSecond));
     return NativeSdkNanosecondsPerSecond / (uint64_t)framesPerSecond;
+}
+
+static NSTimeInterval NativeSdkRetainedFrameIntervalSeconds(NSScreen *screen) {
+    return (NSTimeInterval)NativeSdkRetainedFrameIntervalNanoseconds(screen) /
+        (NSTimeInterval)NativeSdkNanosecondsPerSecond;
 }
 
 /* Pacing interval for logical frame completions while the window is
@@ -1267,7 +1274,10 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
 - (BOOL)emitSetSelectionAccessibilityValue:(id)value;
 @end
 
-@interface NativeSdkMetalSurfaceView : NSView <NSTextInputClient>
+@interface NativeSdkMetalSurfaceView : NSView <NSTextInputClient> {
+    CVDisplayLinkRef _displayLink;
+    atomic_bool _displayClockTickPending;
+}
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property(nonatomic, strong) CAMetalLayer *metalLayer;
@@ -1277,6 +1287,9 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
 @property(nonatomic, strong) id<MTLSamplerState> canvasSampler;
 @property(nonatomic, assign) CGColorSpaceRef canvasColorSpace;
 @property(nonatomic, strong) NSTimer *displayTimer;
+@property(nonatomic, strong) NSTimer *displayClockFallbackTimer;
+@property(nonatomic, assign) BOOL displayLinkRunning;
+@property(nonatomic, assign) BOOL displayClockUsesFallback;
 @property(nonatomic, assign) NativeSdkAppKitHost *host;
 @property(nonatomic, assign) uint64_t windowId;
 @property(nonatomic, strong) NSString *surfaceLabel;
@@ -1533,6 +1546,13 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
 - (void)dumpCompositeShotWithPixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight;
 - (void)recordCanvasRetainedStateForPacket:(NSDictionary *)packet commands:(NSArray *)commands patchLoadAction:(BOOL)patchLoadAction clearLoadAction:(BOOL)clearLoadAction;
 - (void)updateWidgetAccessibilityWithNodes:(const native_sdk_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
+- (void)startDisplayClock;
+- (void)pauseDisplayClock;
+- (void)stopDisplayClock;
+- (void)retargetDisplayClock;
+- (void)displayClockFired;
+- (void)startDisplayClockFallback;
+- (void)startBootstrapDisplayTimerForActiveScreen;
 - (void)stopDisplayTimer;
 - (void)noteRendererPacketSuccess;
 - (void)noteRendererPixelFallback;
@@ -4187,6 +4207,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (!self) return nil;
+    atomic_init(&_displayClockTickPending, false);
 
     if (NativeSdkSharedRendererClientEnabled()) {
         /* Device-less widget process: no Metal object is created here,
@@ -4208,9 +4229,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
         self.markedTextRange = NSMakeRange(NSNotFound, 0);
         self.selectedTextRange = NSMakeRange(0, 0);
         [self updateDrawableSize];
-        _displayTimer = [NSTimer timerWithTimeInterval:(1.0 / 60.0) target:self selector:@selector(renderFrame) userInfo:nil repeats:YES];
-        _displayTimer.tolerance = 1.0 / 240.0;
-        [[NSRunLoop mainRunLoop] addTimer:_displayTimer forMode:NSRunLoopCommonModes];
+        [self startBootstrapDisplayTimerForActiveScreen];
         [self renderFrame];
         return self;
     }
@@ -4274,12 +4293,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     self.selectedTextRange = NSMakeRange(0, 0);
 
     [self updateDrawableSize];
-    // Common modes: default-mode timers stall inside AppKit tracking
-    // runloops (live window resize, menu tracking), freezing frames for
-    // the whole gesture.
-    _displayTimer = [NSTimer timerWithTimeInterval:(1.0 / 60.0) target:self selector:@selector(renderFrame) userInfo:nil repeats:YES];
-    _displayTimer.tolerance = 1.0 / 240.0;
-    [[NSRunLoop mainRunLoop] addTimer:_displayTimer forMode:NSRunLoopCommonModes];
+    [self startBootstrapDisplayTimerForActiveScreen];
     [self renderFrame];
     return self;
 }
@@ -4299,6 +4313,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 }
 
 - (void)dealloc {
+    [self stopDisplayClock];
     [self stopDisplayTimer];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     if (self.canvasColorSpace) {
@@ -4361,12 +4376,23 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     // (renderFrame's nil-drawable path) still owe the glass their
     // latest retained pixels.
     [[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidChangeOcclusionStateNotification object:nil];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidChangeScreenNotification object:nil];
     if (self.window) {
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(windowOcclusionStateChanged:)
                                                      name:NSWindowDidChangeOcclusionStateNotification
                                                    object:self.window];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(windowScreenChanged:)
+                                                     name:NSWindowDidChangeScreenNotification
+                                                   object:self.window];
     }
+    [self retargetDisplayClock];
+}
+
+- (void)windowScreenChanged:(NSNotification *)notification {
+    if (notification.object != self.window) return;
+    [self retargetDisplayClock];
 }
 
 - (void)windowOcclusionStateChanged:(NSNotification *)notification {
@@ -4386,6 +4412,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 
 - (void)viewDidChangeBackingProperties {
     [super viewDidChangeBackingProperties];
+    [self retargetDisplayClock];
     [self updateDrawableSize];
 }
 
@@ -6725,6 +6752,163 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
 }
 
+- (void)startDisplayClock {
+    if (self.displayClockUsesFallback) {
+        [self startDisplayClockFallback];
+        return;
+    }
+
+    CVReturn result = kCVReturnSuccess;
+    if (!_displayLink) {
+        CVDisplayLinkRef displayLink = NULL;
+        result = CVDisplayLinkCreateWithActiveCGDisplays(&displayLink);
+        if (result == kCVReturnSuccess && displayLink) {
+            __weak NativeSdkMetalSurfaceView *weakSelf = self;
+            result = CVDisplayLinkSetOutputHandler(displayLink, ^CVReturn(
+                CVDisplayLinkRef link,
+                const CVTimeStamp *now,
+                const CVTimeStamp *outputTime,
+                CVOptionFlags flagsIn,
+                CVOptionFlags *flagsOut
+            ) {
+                (void)link;
+                (void)now;
+                (void)outputTime;
+                (void)flagsIn;
+                (void)flagsOut;
+                NativeSdkMetalSurfaceView *strongSelf = weakSelf;
+                if (!strongSelf) return kCVReturnSuccess;
+                if (atomic_exchange_explicit(&strongSelf->_displayClockTickPending, true, memory_order_acq_rel)) {
+                    return kCVReturnSuccess;
+                }
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NativeSdkMetalSurfaceView *mainSelf = weakSelf;
+                    if (!mainSelf) return;
+                    atomic_store_explicit(&mainSelf->_displayClockTickPending, false, memory_order_release);
+                    [mainSelf displayClockFired];
+                });
+                return kCVReturnSuccess;
+            });
+        }
+        NSScreen *screen = self.window.screen ?: NSScreen.mainScreen;
+        NSNumber *displayNumber = screen.deviceDescription[@"NSScreenNumber"];
+        if (result == kCVReturnSuccess && displayLink && displayNumber) {
+            result = CVDisplayLinkSetCurrentCGDisplay(displayLink, (CGDirectDisplayID)displayNumber.unsignedIntValue);
+        } else if (result == kCVReturnSuccess) {
+            result = kCVReturnInvalidDisplay;
+        }
+        if (result == kCVReturnSuccess) {
+            _displayLink = displayLink;
+        } else if (displayLink) {
+            CVDisplayLinkRelease(displayLink);
+        }
+    }
+
+    if (result == kCVReturnSuccess && _displayLink && !self.displayLinkRunning) {
+        result = CVDisplayLinkStart(_displayLink);
+        self.displayLinkRunning = result == kCVReturnSuccess;
+    }
+    if (result == kCVReturnSuccess) return;
+
+    if (_displayLink) {
+        CVDisplayLinkRelease(_displayLink);
+        _displayLink = NULL;
+    }
+    self.displayClockUsesFallback = YES;
+    fprintf(stderr, "native-sdk: display clock unavailable status=%d; using screen-rate timer\n", result);
+    [self startDisplayClockFallback];
+}
+
+- (void)startDisplayClockFallback {
+    if (self.displayClockFallbackTimer) return;
+    NSScreen *screen = self.window.screen ?: NSScreen.mainScreen;
+    __weak NativeSdkMetalSurfaceView *weakSelf = self;
+    NSTimer *timer = [NSTimer timerWithTimeInterval:NativeSdkRetainedFrameIntervalSeconds(screen)
+                                           repeats:YES
+                                             block:^(NSTimer *firedTimer) {
+        (void)firedTimer;
+        [weakSelf displayClockFired];
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    self.displayClockFallbackTimer = timer;
+}
+
+- (void)startBootstrapDisplayTimerForActiveScreen {
+    [self.displayTimer invalidate];
+    NSScreen *screen = self.window.screen ?: NSScreen.mainScreen;
+    __weak NativeSdkMetalSurfaceView *weakSelf = self;
+    NSTimer *timer = [NSTimer timerWithTimeInterval:NativeSdkRetainedFrameIntervalSeconds(screen)
+                                           repeats:YES
+                                             block:^(NSTimer *firedTimer) {
+        (void)firedTimer;
+        [weakSelf renderFrame];
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    self.displayTimer = timer;
+}
+
+- (void)retargetDisplayClock {
+    NSScreen *screen = self.window.screen ?: NSScreen.mainScreen;
+    if (self.displayTimer) [self startBootstrapDisplayTimerForActiveScreen];
+    if (self.displayClockUsesFallback) {
+        if (self.displayClockFallbackTimer) {
+            [self.displayClockFallbackTimer invalidate];
+            self.displayClockFallbackTimer = nil;
+            [self startDisplayClockFallback];
+        }
+        return;
+    }
+    if (!_displayLink) {
+        return;
+    }
+    NSNumber *displayNumber = screen.deviceDescription[@"NSScreenNumber"];
+    CVReturn result = displayNumber
+        ? CVDisplayLinkSetCurrentCGDisplay(_displayLink, (CGDirectDisplayID)displayNumber.unsignedIntValue)
+        : kCVReturnInvalidDisplay;
+    if (result == kCVReturnSuccess) return;
+
+    CVDisplayLinkRef failedLink = _displayLink;
+    _displayLink = NULL;
+    if (self.displayLinkRunning) CVDisplayLinkStop(failedLink);
+    self.displayLinkRunning = NO;
+    CVDisplayLinkRelease(failedLink);
+    fprintf(stderr, "native-sdk: display clock retarget failed status=%d; using active-screen timer\n", result);
+    self.displayClockUsesFallback = YES;
+    if (self.frameEventEmissionScheduled) [self startDisplayClockFallback];
+}
+
+- (void)displayClockFired {
+    if (!self.frameEventEmissionScheduled) {
+        [self pauseDisplayClock];
+        return;
+    }
+    self.frameEventEmissionScheduled = NO;
+    [self emitScheduledFrameEvent];
+    if (!self.frameEventEmissionScheduled) {
+        if (self.frameChannelActivity) {
+            [[NSProcessInfo processInfo] endActivity:self.frameChannelActivity];
+            self.frameChannelActivity = nil;
+        }
+        [self pauseDisplayClock];
+    }
+}
+
+- (void)pauseDisplayClock {
+    [self.displayClockFallbackTimer invalidate];
+    self.displayClockFallbackTimer = nil;
+    if (!_displayLink || !self.displayLinkRunning) return;
+    CVDisplayLinkStop(_displayLink);
+    self.displayLinkRunning = NO;
+}
+
+- (void)stopDisplayClock {
+    [self pauseDisplayClock];
+    if (_displayLink) {
+        CVDisplayLinkRelease(_displayLink);
+        _displayLink = NULL;
+    }
+}
+
 - (void)stopDisplayTimer {
     [self.displayTimer invalidate];
     self.displayTimer = nil;
@@ -6939,8 +7123,6 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (!self.frameChannelActivity) {
         self.frameChannelActivity = [[NSProcessInfo processInfo] beginActivityWithOptions:(NSActivityUserInitiatedAllowingIdleSystemSleep | NSActivityLatencyCritical) reason:@"armed gpu-surface frame channel"];
     }
-    const uint64_t now = NativeSdkTimestampNanoseconds();
-    const uint64_t frameIntervalNs = NativeSdkRetainedFrameIntervalNanoseconds(self.window.screen ?: NSScreen.mainScreen);
     // Occluded surfaces pace on the heartbeat, not the display grid:
     // nothing this emission drives can reach the glass, so full cadence
     // is pure display-list churn (see NativeSdkOccludedFrameHeartbeatNs).
@@ -6950,7 +7132,23 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     // (windowOcclusionStateChanged), so the long delay never gates the
     // return to full cadence.
     const BOOL heartbeatPaced = !presentCompletion && !self.inputDrivenFramePending && [self occludedFramePacingActive];
-    const uint64_t paceNs = heartbeatPaced ? NativeSdkOccludedFrameHeartbeatNs : frameIntervalNs;
+    if (!heartbeatPaced) {
+        // Visible, armed surfaces consume the active NSScreen's actual
+        // display ticks. A main-queue interval timer measured only
+        // 57-78 callbacks/s on a 120 Hz panel even though the retained
+        // scheduler asked for 8.33 ms. CVDisplayLink owns this producer;
+        // retargetDisplayClock follows the window when it changes screens.
+        [self startDisplayClock];
+        return;
+    }
+
+    // A covered surface must keep the display clock stopped. Its one
+    // logical completion per heartbeat remains a cancellable generation-
+    // guarded dispatch so no 120 Hz callback wakes the process for hidden
+    // glass.
+    [self pauseDisplayClock];
+    const uint64_t now = NativeSdkTimestampNanoseconds();
+    const uint64_t paceNs = NativeSdkOccludedFrameHeartbeatNs;
     uint64_t delayNs = 0;
     if (self.retainedFrameLastEmitNs > 0 && now < self.retainedFrameLastEmitNs + paceNs) {
         delayNs = self.retainedFrameLastEmitNs + paceNs - now;
@@ -10545,7 +10743,8 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     if (self.timer) return;
     // Common modes so frames keep pumping during live resize and menu
     // tracking (default-mode timers do not fire in tracking runloops).
-    NSTimer *frame_timer = [NSTimer timerWithTimeInterval:(1.0 / 60.0)
+    NSWindow *frameWindow = NSApp.keyWindow ?: self.window;
+    NSTimer *frame_timer = [NSTimer timerWithTimeInterval:NativeSdkRetainedFrameIntervalSeconds(frameWindow.screen ?: NSScreen.mainScreen)
                                                    target:self
                                                  selector:@selector(emitFrame)
                                                  userInfo:nil

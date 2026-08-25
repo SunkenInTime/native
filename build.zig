@@ -736,7 +736,7 @@ pub fn build(b: *std.Build) void {
         // are flagged so the runtime never stamps input latency from them.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkOccludedFrameHeartbeatNs = 1000000000ull" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (BOOL)occludedFramePacingActive" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "heartbeatPaced ? NativeSdkOccludedFrameHeartbeatNs" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "const uint64_t paceNs = NativeSdkOccludedFrameHeartbeatNs" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "self.frameEventEmissionGeneration += 1" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "occluded:[self occludedFramePacingActive]" },
         // Exempt producers (a real present's completion, an input's
@@ -774,6 +774,23 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (changed) {" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self requestRetainedCanvasFrame];" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "canvasTextureMatchesDrawable" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-display-clock", "Verify AppKit GPU surfaces follow the active screen's display clock", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "#import <CoreVideo/CoreVideo.h>" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CVDisplayLinkCreateWithActiveCGDisplays" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CVDisplayLinkSetOutputHandler" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CVDisplayLinkSetCurrentCGDisplay" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSWindowDidChangeScreenNotification" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)startDisplayClock" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)stopDisplayClock" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)displayClockFired" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!heartbeatPaced) {" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self startDisplayClock];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self pauseDisplayClock];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRetainedFrameIntervalSeconds(screen)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRetainedFrameIntervalSeconds(frameWindow.screen ?: NSScreen.mainScreen)" },
+        .{ .path = "build/app.zig", .pattern = "app_mod.linkFramework(\"CoreVideo\", .{})" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkFramework(\"CoreVideo\", .{})" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-production-metal-lifetime", "Verify AppKit ships the measured process-lifetime Metal architecture", &.{
         .{ .path = "build/app.zig", .pattern = "embeddedMetalLibrary(b, dep)" },
