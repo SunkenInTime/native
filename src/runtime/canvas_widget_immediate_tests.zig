@@ -76,4 +76,13 @@ test "immediate command batches repaint retained canvases without replacing layo
     };
     try std.testing.expectError(error.InvalidCommand, harness.runtime.setCanvasWidgetImmediateCommands(1, "canvas", &duplicate));
     try std.testing.expectEqual(@as(usize, 2), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget.immediate_commands.len);
+
+    // Animation ownership is separate from paint diffing. The same command
+    // batch can be the honest output of two successive animation callbacks;
+    // its caller must be able to request the next surface tick explicitly.
+    harness.null_platform.gpu_surface_frame_request_count = 0;
+    _ = try harness.runtime.setCanvasWidgetImmediateCommands(1, "canvas", &updates);
+    const requests_after_identical_batch = harness.null_platform.gpu_surface_frame_request_count;
+    _ = try harness.runtime.requestCanvasFrame(1, "canvas");
+    try std.testing.expectEqual(requests_after_identical_batch + 1, harness.null_platform.gpu_surface_frame_request_count);
 }
