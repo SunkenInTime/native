@@ -657,11 +657,7 @@ const CaptureDriver = struct {
     /// visible in `pending` instead of letting an animated widget make capture
     /// spin forever.
     fn settleRequestedTurn(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque) !void {
-        const app_frame_count = self.null_platform.pendingFrameRequestCount();
-        for (0..app_frame_count) |_| {
-            const event = self.null_platform.takeFrameRequest() orelse return error.CaptureFrameRequestMissing;
-            try handler(handler_context, event);
-        }
+        try self.null_platform.dispatchPendingFrameRequestTurn(handler, handler_context);
         _ = try self.drivePendingFrame(handler, handler_context);
     }
 

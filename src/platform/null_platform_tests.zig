@@ -720,6 +720,31 @@ test "null platform keeps app and gpu frame request lanes independently observab
     try std.testing.expectEqualStrings("capture", request.label());
 }
 
+test "null platform frame-request turn defers re-entrant requests" {
+    var null_platform = NullPlatform.init(.{});
+    const Handler = struct {
+        null_platform: *NullPlatform,
+        calls: usize = 0,
+
+        fn handle(context: *anyopaque, event: types.Event) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event) {
+                .frame_requested => {},
+                else => return error.ExpectedFrameRequested,
+            }
+            self.calls += 1;
+            try self.null_platform.platform().services.requestFrame();
+        }
+    };
+    var handler_context: Handler = .{ .null_platform = &null_platform };
+    try null_platform.platform().services.requestFrame();
+
+    try null_platform.dispatchPendingFrameRequestTurn(Handler.handle, &handler_context);
+
+    try std.testing.expectEqual(@as(usize, 1), handler_context.calls);
+    try std.testing.expectEqual(@as(usize, 1), null_platform.pendingFrameRequestCount());
+}
+
 test "null platform coalesces gpu frame requests independently per surface" {
     if (comptime max_views < 2) return error.SkipZigTest;
     var null_platform = NullPlatform.init(.{});
