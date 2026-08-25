@@ -1,0 +1,10 @@
+.{
+    .shell = .{
+        .windows = .{
+            .{
+                .layer = "bottom",
+                .click_through = true,
+            },
+        },
+    },
+}

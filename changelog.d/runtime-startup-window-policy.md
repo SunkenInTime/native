@@ -1,0 +1,1 @@
+fix: **Honor runtime startup-window policy**: embedders whose widget manifest is loaded after the app runner was compiled can override the startup window's layer and click-through behavior before the native window is created.
