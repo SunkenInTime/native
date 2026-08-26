@@ -1378,6 +1378,19 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             return self.views[index].info();
         }
 
+        /// Request one future frame event for an existing GPU surface without
+        /// coupling the request to a display-list diff. Animation owners use
+        /// this after a frame callback when an identical retained command
+        /// batch still needs the next display tick.
+        pub fn requestCanvasFrame(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!platform.ViewInfo {
+            try validateRuntimeViewParent(self, window_id);
+            try validateViewLabel(label);
+            const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
+            if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+            try requestCanvasFrameForView(self, index);
+            return self.views[index].info();
+        }
+
         pub fn requestCanvasFrameForView(self: *Runtime, view_index: usize) anyerror!void {
             if (view_index >= self.view_count) return;
             if (self.views[view_index].kind != .gpu_surface) return;

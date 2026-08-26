@@ -51,6 +51,11 @@ pub const RunOptions = struct {
     /// placement store use this to keep one persistence authority.
     persist_window_state: bool = true,
     primary_display_anchor: ?native_sdk.PrimaryDisplayAnchor = null,
+    /// Runtime-owned startup policy for embedders whose manifest is loaded
+    /// after this runner module was compiled. Null preserves app.zon.
+    startup_window_layer: ?native_sdk.WindowLayer = null,
+    /// Optional so false can explicitly replace a compiled true value.
+    startup_click_through: ?bool = null,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     js_window_api: bool = false,
@@ -106,6 +111,14 @@ pub const RunOptions = struct {
             info.main_window.min_width = manifestShellStartupMinSize("min_width");
             info.main_window.min_height = manifestShellStartupMinSize("min_height");
         }
+        if (self.startup_window_layer) |layer| {
+            info.main_window.layer = layer;
+            if (windows.len > 0) buffers.restored_windows[0].layer = layer;
+        }
+        if (self.startup_click_through) |click_through| {
+            info.main_window.click_through = click_through;
+            if (windows.len > 0) buffers.restored_windows[0].click_through = click_through;
+        }
         info.main_window.primary_display_anchor = self.primary_display_anchor;
         if (windows.len > 0) buffers.restored_windows[0].primary_display_anchor = self.primary_display_anchor;
         return info;
@@ -115,6 +128,25 @@ pub const RunOptions = struct {
         return self.shortcuts orelse storage.fromManifest();
     }
 };
+
+test "runtime startup window policy overrides the compiled manifest" {
+    var buffers: StateBuffers = undefined;
+    const compiled = (RunOptions{
+        .app_name = "runner-test",
+        .bundle_id = "dev.native_sdk.runner-test",
+    }).appInfo(&buffers);
+    try std.testing.expectEqual(native_sdk.WindowLayer.bottom, compiled.main_window.layer);
+    try std.testing.expect(compiled.main_window.click_through);
+
+    const overridden = (RunOptions{
+        .app_name = "runner-test",
+        .bundle_id = "dev.native_sdk.runner-test",
+        .startup_window_layer = .topmost,
+        .startup_click_through = false,
+    }).appInfo(&buffers);
+    try std.testing.expectEqual(native_sdk.WindowLayer.topmost, overridden.main_window.layer);
+    try std.testing.expect(!overridden.main_window.click_through);
+}
 
 const ShortcutStorage = struct {
     shortcuts: [native_sdk.platform.max_shortcuts]native_sdk.Shortcut = undefined,
