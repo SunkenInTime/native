@@ -398,6 +398,13 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     if (init.environ_map.get("NATIVE_SDK_SESSION_REPLAY")) |journal_path| {
         return runSessionReplay(app, options, init, journal_path);
     }
+    // Headless capture hosts the same way replay does — null platform,
+    // this platform's headless text services — but the app's own startup
+    // drives it instead of a journal: one render of the first committed
+    // root, as a PNG, with no window and no compositor.
+    if (init.environ_map.get("NATIVE_SDK_CAPTURE_PNG")) |out_path| {
+        return runHeadlessCapture(app, options, init, out_path);
+    }
     if (comptime std.mem.eql(u8, build_options.platform, "macos")) {
         try runMacos(app, options, init);
     } else if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
@@ -690,6 +697,121 @@ fn finishSessionRecorder(recorder: ?*native_sdk.runtime.SessionRecorder) void {
 /// the world), verify fingerprint and screenshot checkpoints unless
 /// `NATIVE_SDK_SESSION_VERIFY=0`, print the report, and exit non-zero
 /// on any mismatch.
+fn runHeadlessCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, out_path: []const u8) !void {
+    const started_ns = native_sdk.monotonicNanoseconds();
+    var buffers: StateBuffers = undefined;
+    const app_info = options.appInfo(&buffers);
+    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    null_platform.gpu_surfaces = true;
+    null_platform.image_decode = true;
+    var capture_platform = null_platform.platform();
+    // Same reason replay does this: the capture must measure text through
+    // the host seam the live widget measures through, or every caption
+    // lands fractions of a pixel off where the desktop puts it.
+    if (comptime std.mem.eql(u8, build_options.platform, "macos")) {
+        native_sdk.platform.macos.installHeadlessTextServices(&capture_platform.services);
+        null_platform.gpu_surface_scroll_drivers = true;
+    }
+    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
+    defer std.heap.page_allocator.destroy(runtime);
+    native_sdk.Runtime.initAt(runtime, .{
+        .platform = capture_platform,
+        .bridge = options.bridge,
+        .builtin_bridge = options.builtin_bridge,
+        .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
+        .security = options.security,
+        .menus = options.menus,
+    });
+
+    try runtime.dispatchPlatformEvent(app, .app_start);
+    try runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{} });
+    try runtime.dispatchPlatformEvent(app, .{ .surface_resized = null_platform.surface_value });
+    const window_count = app_info.startupWindowCount();
+    var window_index: usize = 0;
+    while (window_index < window_count) : (window_index += 1) {
+        const window = app_info.resolvedStartupWindow(window_index);
+        try runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+            .id = window.id,
+            .label = window.label,
+            .title = window.resolvedTitle(app_info.app_name),
+            .frame = window.default_frame,
+            .scale_factor = null_platform.surface_value.scale_factor,
+            .open = true,
+            .focused = window_index == 0,
+        } });
+    }
+    // The canvas is driven by the GPU surface, not by `frame_requested`:
+    // a real host reports its drawable size and then ticks presents, and
+    // the widget projects and emits its display list on those ticks.
+    var label_storage: [native_sdk.platform.max_view_label_bytes]u8 = undefined;
+    var canvas_window_id: native_sdk.platform.WindowId = 0;
+    var canvas_label_len: usize = 0;
+    var canvas_frame_rect = native_sdk.geometry.RectF.init(0, 0, 0, 0);
+    for (runtime.views[0..runtime.view_count]) |*candidate| {
+        if (!candidate.open or candidate.kind != .gpu_surface) continue;
+        canvas_window_id = candidate.window_id;
+        canvas_label_len = (std.fmt.bufPrint(&label_storage, "{s}", .{candidate.label}) catch return error.ViewNotFound).len;
+        canvas_frame_rect = candidate.frame;
+        break;
+    }
+    if (canvas_window_id == 0) {
+        std.debug.print("capture refused: the widget opened no gpu_surface view to render\n", .{});
+        return error.ViewNotFound;
+    }
+    const canvas_label = label_storage[0..canvas_label_len];
+    const canvas_size = canvas_frame_rect.size();
+    const physical_size = native_sdk.geometry.SizeU.init(
+        @intFromFloat(@round(canvas_size.width)),
+        @intFromFloat(@round(canvas_size.height)),
+    );
+    try runtime.dispatchPlatformEvent(app, .{ .gpu_surface_resized = .{
+        .window_id = canvas_window_id,
+        .label = canvas_label,
+        .frame = canvas_frame_rect,
+        .scale_factor = 1,
+        .physical_size = physical_size,
+    } });
+    const frames: u64 = 2;
+    var frame: u64 = 0;
+    while (frame < frames) : (frame += 1) {
+        try runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .window_id = canvas_window_id,
+            .label = canvas_label,
+            .size = canvas_size,
+            .scale_factor = 1,
+            .physical_size = physical_size,
+            .frame_index = frame,
+            .timestamp_ns = frame * native_sdk.platform.default_gpu_frame_interval_ns,
+        } });
+    }
+
+    const allocator = std.heap.page_allocator;
+    const pixel_size = try runtime.canvasScreenshotPixelSize(canvas_window_id, canvas_label, null);
+    const pixels = try allocator.alloc(u8, pixel_size.byte_len);
+    defer allocator.free(pixels);
+    const scratch = try allocator.alloc(u8, pixel_size.byte_len);
+    defer allocator.free(scratch);
+    const shot = try runtime.renderCanvasScreenshot(canvas_window_id, canvas_label, null, pixels, scratch);
+    var writer = try std.Io.Writer.Allocating.initCapacity(
+        allocator,
+        try native_sdk.canvas.png.encodedRgba8ByteLen(shot.width, shot.height),
+    );
+    defer writer.deinit();
+    try native_sdk.canvas.png.writeRgba8(&writer.writer, shot.width, shot.height, shot.rgba8);
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = writer.written() });
+    var inked: usize = 0;
+    var alpha_offset: usize = 3;
+    while (alpha_offset < shot.rgba8.len) : (alpha_offset += 4) {
+        if (shot.rgba8[alpha_offset] != 0) inked += 1;
+    }
+    std.debug.print(
+        "capture path={s} width={d} height={d} frames={d} inked_pixels={d} png_bytes={d} elapsed_us={d}\n",
+        .{ out_path, shot.width, shot.height, frames, inked, writer.written().len, (native_sdk.monotonicNanoseconds() - started_ns) / std.time.ns_per_us },
+    );
+    try runtime.dispatchPlatformEvent(app, .app_shutdown);
+}
+
 fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.Init, journal_path: []const u8) !void {
     const journal_bytes = readSessionJournal(init.io, journal_path) catch |err| {
         std.debug.print("session replay: cannot read {s}: {s}\n", .{ journal_path, @errorName(err) });
