@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -37,6 +38,15 @@ bool skipBytes(const uint8_t *&cursor, const uint8_t *end, size_t count) {
 }
 
 struct F4 { float x, y, z, w; };
+
+struct Affine2D {
+    float a = 1;
+    float b = 0;
+    float c = 0;
+    float d = 1;
+    float tx = 0;
+    float ty = 0;
+};
 
 struct Instance {
     F4 rect;
@@ -115,6 +125,120 @@ bool readStraightColor(PacketReader &reader, F4 *color) {
         reader.f32(&color->z) && reader.f32(&color->w);
 }
 
+bool readAffine(PacketReader &reader, Affine2D *transform) {
+    return reader.f32(&transform->a) && reader.f32(&transform->b) &&
+        reader.f32(&transform->c) && reader.f32(&transform->d) &&
+        reader.f32(&transform->tx) && reader.f32(&transform->ty);
+}
+
+bool transformPoint(const Affine2D &transform, float x, float y,
+    float *out_x, float *out_y) {
+    *out_x = transform.a * x + transform.c * y + transform.tx;
+    *out_y = transform.b * x + transform.d * y + transform.ty;
+    return std::isfinite(*out_x) && std::isfinite(*out_y);
+}
+
+bool transformRect(const Affine2D &transform, const F4 &rect, F4 *out) {
+    const float right = rect.x + rect.z;
+    const float bottom = rect.y + rect.w;
+    if (!std::isfinite(right) || !std::isfinite(bottom)) return false;
+    float xs[4] = {}, ys[4] = {};
+    if (!transformPoint(transform, rect.x, rect.y, &xs[0], &ys[0]) ||
+        !transformPoint(transform, right, rect.y, &xs[1], &ys[1]) ||
+        !transformPoint(transform, rect.x, bottom, &xs[2], &ys[2]) ||
+        !transformPoint(transform, right, bottom, &xs[3], &ys[3])) return false;
+    const auto x_bounds = std::minmax_element(xs, xs + 4);
+    const auto y_bounds = std::minmax_element(ys, ys + 4);
+    *out = { *x_bounds.first, *y_bounds.first,
+        *x_bounds.second - *x_bounds.first,
+        *y_bounds.second - *y_bounds.first };
+    return std::isfinite(out->z) && std::isfinite(out->w);
+}
+
+bool applyCommandTransform(const Affine2D &transform, Instance *instance,
+    std::vector<MeshPatchInstance> *mesh_patches) {
+    const float scale_x = std::hypot(transform.a, transform.b);
+    const float scale_y = std::hypot(transform.c, transform.d);
+    const float scale = std::max(0.0001f, std::max(scale_x, scale_y));
+    if (!std::isfinite(scale)) return false;
+
+    if (instance->extra.w > 0.5f) {
+        float from_x = 0, from_y = 0, to_x = 0, to_y = 0;
+        if (!transformPoint(transform, instance->shape.x, instance->shape.y,
+                &from_x, &from_y) ||
+            !transformPoint(transform, instance->extra.x, instance->extra.y,
+                &to_x, &to_y)) return false;
+        const float width = std::max(0.0f, instance->extra.z) * scale;
+        if (!std::isfinite(width)) return false;
+        const float half = width * 0.5f;
+        instance->shape.x = from_x;
+        instance->shape.y = from_y;
+        instance->extra.x = to_x;
+        instance->extra.y = to_y;
+        instance->extra.z = width;
+        instance->rect = { std::min(from_x, to_x) - half,
+            std::min(from_y, to_y) - half,
+            std::abs(to_x - from_x) + width,
+            std::abs(to_y - from_y) + width };
+        if (!std::isfinite(instance->rect.x) || !std::isfinite(instance->rect.y) ||
+            !std::isfinite(instance->rect.z) || !std::isfinite(instance->rect.w)) return false;
+    } else {
+        F4 transformed_rect = {};
+        if (!transformRect(transform, instance->rect, &transformed_rect)) return false;
+        instance->rect = transformed_rect;
+        instance->shape.x *= scale;
+        instance->shape.y *= scale;
+        instance->shape.z *= scale;
+        instance->shape.w *= scale;
+        if (!std::isfinite(instance->shape.x) || !std::isfinite(instance->shape.y) ||
+            !std::isfinite(instance->shape.z) || !std::isfinite(instance->shape.w)) return false;
+    }
+
+    if (instance->paint.x > 0.5f && instance->paint.x < 1.5f) {
+        float start_x = 0, start_y = 0, end_x = 0, end_y = 0;
+        if (!transformPoint(transform, instance->gradient.x, instance->gradient.y,
+                &start_x, &start_y) ||
+            !transformPoint(transform, instance->gradient.z, instance->gradient.w,
+                &end_x, &end_y)) return false;
+        instance->gradient = { start_x, start_y, end_x, end_y };
+    } else if (instance->paint.x > 1.5f && instance->paint.x < 2.5f) {
+        const float center_x = instance->gradient.x;
+        const float center_y = instance->gradient.y;
+        const float radius_x = instance->gradient.z;
+        const float radius_y = instance->gradient.w;
+        float transformed_x = 0, transformed_y = 0;
+        if (!transformPoint(transform, center_x, center_y,
+                &transformed_x, &transformed_y)) return false;
+        const float basis_x_x = transform.a * radius_x;
+        const float basis_x_y = transform.b * radius_x;
+        const float basis_y_x = transform.c * radius_y;
+        const float basis_y_y = transform.d * radius_y;
+        if (!std::isfinite(basis_x_x) || !std::isfinite(basis_x_y) ||
+            !std::isfinite(basis_y_x) || !std::isfinite(basis_y_y)) return false;
+        instance->gradient = { transformed_x, transformed_y, basis_x_x, basis_x_y };
+        instance->gradient_options.z = basis_y_x;
+        instance->gradient_options.w = basis_y_y;
+    } else if (instance->paint.x > 2.5f && instance->paint.x < 3.5f) {
+        if (!transformPoint(transform, instance->gradient.x, instance->gradient.y,
+                &instance->gradient.x, &instance->gradient.y)) return false;
+    } else if (instance->paint.x > 3.5f) {
+        for (MeshPatchInstance &patch : *mesh_patches) {
+            patch.bounds = { INFINITY, INFINITY, -INFINITY, -INFINITY };
+            for (F4 &pair : patch.points) {
+                float first_x = 0, first_y = 0, second_x = 0, second_y = 0;
+                if (!transformPoint(transform, pair.x, pair.y, &first_x, &first_y) ||
+                    !transformPoint(transform, pair.z, pair.w, &second_x, &second_y)) return false;
+                pair = { first_x, first_y, second_x, second_y };
+                patch.bounds.x = std::min(patch.bounds.x, std::min(first_x, second_x));
+                patch.bounds.y = std::min(patch.bounds.y, std::min(first_y, second_y));
+                patch.bounds.z = std::max(patch.bounds.z, std::max(first_x, second_x));
+                patch.bounds.w = std::max(patch.bounds.w, std::max(first_y, second_y));
+            }
+        }
+    }
+    return true;
+}
+
 bool readPaint(PacketReader &reader, Instance *instance,
     std::vector<GradientStopInstance> *gradient_stops,
     std::vector<MeshPatchInstance> *mesh_patches) {
@@ -184,6 +308,7 @@ bool readPaint(PacketReader &reader, Instance *instance,
 bool readCommand(PacketReader &reader, RetainedCommand *out) {
     uint8_t kind = 0, flags = 0, cap = 0;
     F4 bounds = {}, clip = { 0, 0, -1, -1 };
+    Affine2D transform;
     float opacity = 1, stroke_width = 0;
     if (!reader.u8(&kind) || !reader.u8(&flags) || !reader.rect(&bounds) ||
         !reader.f32(&opacity) || !reader.f32(&stroke_width) || !reader.u8(&cap)) return false;
@@ -199,12 +324,7 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
             clip_radius.z != 0 || clip_radius.w != 0) return false;
     }
     if (flags & 0x04) {
-        float transform[6];
-        for (float &part : transform) if (!reader.f32(&part)) return false;
-        // Weaver's immediate canvas currently emits identity transforms.
-        // Refuse an unexpected transform rather than draw in the wrong place.
-        if (transform[0] != 1 || transform[1] != 0 || transform[2] != 0 ||
-            transform[3] != 1 || transform[4] != 0 || transform[5] != 0) return false;
+        if (!readAffine(reader, &transform)) return false;
     }
     if ((flags & 0x08) == 0 || (flags & 0x10) == 0) return false;
     if (flags & (0x20 | 0x40 | 0x80)) return false; // image, text, effects
@@ -221,11 +341,9 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
         if (kind != 0 && kind != 1) return false; // fill_rect solid/gradient
         if (!reader.rect(&base.rect)) return false;
         base.shape = {};
-        instances.push_back(base);
     } else if (shape_tag == 2) {
         if (kind != 2 && kind != 3) return false; // rounded fill solid/gradient
         if (!reader.rect(&base.rect) || !readRadius(reader, &base.shape)) return false;
-        instances.push_back(base);
     } else if (shape_tag == 3) {
         // Stroked rounded rectangles require a ring SDF, not a filled quad.
         return false;
@@ -239,7 +357,6 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
             std::abs(x2 - x1) + width, std::abs(y2 - y1) + width };
         base.shape = { x1, y1, 0, 0 };
         base.extra = { x2, y2, width, 1.0f };
-        instances.push_back(base);
     } else if (shape_tag == 5) {
         // Filled paths need interior tessellation. Stroked paths need the
         // shared vector core's curve flattening, round joins, and open-subpath
@@ -262,6 +379,8 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     } else {
         base.paint.w = opacity;
     }
+    if (!applyCommandTransform(transform, &base, &mesh_patches)) return false;
+    instances.push_back(base);
     for (Instance &instance : instances) {
         instance.color = base.color;
         instance.gradient = base.gradient;
@@ -348,10 +467,14 @@ float gradientParameter(Out i) {
     return lengthSquared<=0.000001 ? 0 : dot(i.pixel-start,direction)/lengthSquared;
   }
   if (i.paint.x<2.5) {
-    float2 delta=i.pixel-i.gradient.xy, radii=i.gradient.zw;
-    if (abs(radii.x*radii.y)<=0.000001)
+    float2 delta=i.pixel-i.gradient.xy;
+    float2 basisX=i.gradient.zw, basisY=i.gradientOptions.zw;
+    float determinant=basisX.x*basisY.y-basisX.y*basisY.x;
+    if (abs(determinant)<=0.000001)
       return dot(delta,delta)<=0.000001 ? 0 : 1.0e20;
-    float2 local=delta/radii;
+    float2 local=float2(
+      (delta.x*basisY.y-delta.y*basisY.x)/determinant,
+      (basisX.x*delta.y-basisX.y*delta.x)/determinant);
     return length(local);
   }
   float2 delta=i.pixel-i.gradient.xy;
@@ -1087,6 +1210,16 @@ void appendTestRect(std::vector<uint8_t> *bytes, float x, float y,
     appendTestScalar(bytes, height);
 }
 
+void appendTestAffine(std::vector<uint8_t> *bytes, float a, float b,
+    float c, float d, float tx, float ty) {
+    appendTestScalar(bytes, a);
+    appendTestScalar(bytes, b);
+    appendTestScalar(bytes, c);
+    appendTestScalar(bytes, d);
+    appendTestScalar(bytes, tx);
+    appendTestScalar(bytes, ty);
+}
+
 void appendTestGradientPaint(std::vector<uint8_t> *bytes, uint8_t tag,
     uint8_t spread, uint8_t interpolation) {
     appendTestScalar(bytes, tag);
@@ -1355,6 +1488,148 @@ extern "C" int native_sdk_d3d_presenter_tests() {
         &rounded_clip_radius, sizeof(rounded_clip_radius));
     reader = { rounded_clip_bytes.data(),
         rounded_clip_bytes.data() + rounded_clip_bytes.size() };
+    expect(!readCommand(reader, &command));
+
+    // A quarter-turn plus non-uniform scale exercises every affine term. The
+    // decoder bakes it into the same screen-space AABB and radial basis used
+    // by the deterministic reference renderer instead of demoting the frame.
+    bytes.clear();
+    appendTestScalar(&bytes, static_cast<uint8_t>(1)); // fill_rect_gradient
+    appendTestScalar(&bytes, static_cast<uint8_t>(0x1c)); // transform + shape + paint
+    appendTestRect(&bytes, -80.0f, 25.0f, 120.0f, 160.0f); // planned bounds
+    appendTestScalar(&bytes, 0.75f); // opacity
+    appendTestScalar(&bytes, 0.0f); // stroke width
+    appendTestScalar(&bytes, static_cast<uint8_t>(0)); // butt cap
+    appendTestAffine(&bytes, 0.0f, 2.0f, -3.0f, 0.0f, 100.0f, 5.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(1)); // rect
+    appendTestRect(&bytes, 10.0f, 20.0f, 80.0f, 40.0f);
+    appendTestGradientPaint(&bytes, 3, 1, 2); // radial
+    reader = { bytes.data(), bytes.data() + bytes.size() };
+    expect(readCommand(reader, &command));
+    expect(reader.cursor == reader.end);
+    expect(command.instances.size() == 1);
+    if (command.instances.size() == 1) {
+        const Instance &transformed = command.instances[0];
+        expect(closeEnough(transformed.rect.x, -80.0f));
+        expect(closeEnough(transformed.rect.y, 25.0f));
+        expect(closeEnough(transformed.rect.z, 120.0f));
+        expect(closeEnough(transformed.rect.w, 160.0f));
+        expect(closeEnough(transformed.gradient.x, 40.0f));
+        expect(closeEnough(transformed.gradient.y, 25.0f));
+        expect(closeEnough(transformed.gradient.z, 0.0f));
+        expect(closeEnough(transformed.gradient.w, 180.0f));
+        expect(closeEnough(transformed.gradient_options.z, -180.0f));
+        expect(closeEnough(transformed.gradient_options.w, 0.0f));
+        expect(closeEnough(transformed.paint.w, 0.75f));
+    }
+
+    // Lines, their stroke width, and linear paint coordinates use the same
+    // reference-transform scale and screen-space endpoints.
+    bytes.clear();
+    appendTestScalar(&bytes, static_cast<uint8_t>(7)); // draw_line_gradient
+    appendTestScalar(&bytes, static_cast<uint8_t>(0x1c));
+    appendTestRect(&bytes, 22.0f, 64.0f, 166.0f, 126.0f);
+    appendTestScalar(&bytes, 1.0f);
+    appendTestScalar(&bytes, 2.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(0));
+    appendTestAffine(&bytes, 2.0f, 0.0f, 0.0f, 3.0f, 5.0f, 7.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(4)); // line
+    appendTestScalar(&bytes, 10.0f);
+    appendTestScalar(&bytes, 20.0f);
+    appendTestScalar(&bytes, 90.0f);
+    appendTestScalar(&bytes, 60.0f);
+    appendTestScalar(&bytes, 2.0f);
+    appendTestGradientPaint(&bytes, 2, 0, 1); // linear
+    reader = { bytes.data(), bytes.data() + bytes.size() };
+    expect(readCommand(reader, &command));
+    expect(command.instances.size() == 1);
+    if (command.instances.size() == 1) {
+        const Instance &line = command.instances[0];
+        expect(closeEnough(line.shape.x, 25.0f));
+        expect(closeEnough(line.shape.y, 67.0f));
+        expect(closeEnough(line.extra.x, 185.0f));
+        expect(closeEnough(line.extra.y, 187.0f));
+        expect(closeEnough(line.extra.z, 6.0f));
+        expect(closeEnough(line.rect.x, 22.0f));
+        expect(closeEnough(line.rect.y, 64.0f));
+        expect(closeEnough(line.rect.z, 166.0f));
+        expect(closeEnough(line.rect.w, 126.0f));
+        expect(closeEnough(line.gradient.x, 25.0f));
+        expect(closeEnough(line.gradient.y, 67.0f));
+        expect(closeEnough(line.gradient.z, 185.0f));
+        expect(closeEnough(line.gradient.w, 187.0f));
+    }
+
+    // Rounded geometry and conic centers are transformed without changing
+    // the authored screen-space start-angle convention.
+    bytes.clear();
+    appendTestScalar(&bytes, static_cast<uint8_t>(3)); // rounded gradient
+    appendTestScalar(&bytes, static_cast<uint8_t>(0x1c));
+    appendTestRect(&bytes, 25.0f, 67.0f, 160.0f, 120.0f);
+    appendTestScalar(&bytes, 1.0f);
+    appendTestScalar(&bytes, 0.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(0));
+    appendTestAffine(&bytes, 2.0f, 0.0f, 0.0f, 3.0f, 5.0f, 7.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(2)); // rounded rect
+    appendTestRect(&bytes, 10.0f, 20.0f, 80.0f, 40.0f);
+    for (uint8_t corner = 0; corner < 4; ++corner) appendTestScalar(&bytes, 4.0f);
+    appendTestGradientPaint(&bytes, 4, 2, 0); // conic
+    reader = { bytes.data(), bytes.data() + bytes.size() };
+    expect(readCommand(reader, &command));
+    expect(command.instances.size() == 1);
+    if (command.instances.size() == 1) {
+        const Instance &conic = command.instances[0];
+        expect(closeEnough(conic.shape.x, 12.0f));
+        expect(closeEnough(conic.shape.y, 12.0f));
+        expect(closeEnough(conic.shape.z, 12.0f));
+        expect(closeEnough(conic.shape.w, 12.0f));
+        expect(closeEnough(conic.gradient.x, 25.0f));
+        expect(closeEnough(conic.gradient.y, 67.0f));
+        expect(closeEnough(conic.gradient.z, 0.75f));
+    }
+
+    // Mesh control points follow the same affine before the shader computes
+    // Newton iterations and conservative patch bounds.
+    bytes.clear();
+    appendTestScalar(&bytes, static_cast<uint8_t>(1)); // fill_rect_gradient
+    appendTestScalar(&bytes, static_cast<uint8_t>(0x1c)); // transform + shape + paint
+    appendTestRect(&bytes, 25.0f, 67.0f, 160.0f, 120.0f);
+    appendTestScalar(&bytes, 1.0f);
+    appendTestScalar(&bytes, 0.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(0));
+    appendTestAffine(&bytes, 2.0f, 0.0f, 0.0f, 3.0f, 5.0f, 7.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(1));
+    appendTestRect(&bytes, 10.0f, 20.0f, 80.0f, 40.0f);
+    appendTestMeshPaint(&bytes);
+    reader = { bytes.data(), bytes.data() + bytes.size() };
+    expect(readCommand(reader, &command));
+    expect(reader.cursor == reader.end);
+    expect(command.mesh_patches.size() == 1);
+    if (command.mesh_patches.size() == 1) {
+        const MeshPatchInstance &patch = command.mesh_patches[0];
+        expect(closeEnough(patch.points[0].x, 25.0f));
+        expect(closeEnough(patch.points[0].y, 67.0f));
+        expect(closeEnough(patch.bounds.x, 25.0f));
+        expect(closeEnough(patch.bounds.y, 67.0f));
+        expect(closeEnough(patch.bounds.z, 145.0f));
+        expect(closeEnough(patch.bounds.w, 157.0f));
+    }
+
+    // Finite wire values whose affine products overflow must fail closed
+    // before invalid geometry reaches the GPU buffers.
+    bytes.clear();
+    appendTestScalar(&bytes, static_cast<uint8_t>(1));
+    appendTestScalar(&bytes, static_cast<uint8_t>(0x1c));
+    appendTestRect(&bytes, 0.0f, 0.0f, 1.0f, 1.0f);
+    appendTestScalar(&bytes, 1.0f);
+    appendTestScalar(&bytes, 0.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(0));
+    appendTestAffine(&bytes, std::numeric_limits<float>::max(), 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(1));
+    appendTestRect(&bytes, 2.0f, 0.0f, 1.0f, 1.0f);
+    appendTestGradientPaint(&bytes, 2, 0, 0);
+    reader = { bytes.data(), bytes.data() + bytes.size() };
     expect(!readCommand(reader, &command));
 
     const auto append_path_command = [&bytes](uint8_t kind) {
