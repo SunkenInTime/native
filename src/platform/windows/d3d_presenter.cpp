@@ -218,16 +218,19 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     base.clip = clip;
 
     if (shape_tag == 1) {
+        if (kind != 0 && kind != 1) return false; // fill_rect solid/gradient
         if (!reader.rect(&base.rect)) return false;
         base.shape = {};
         instances.push_back(base);
     } else if (shape_tag == 2) {
+        if (kind != 2 && kind != 3) return false; // rounded fill solid/gradient
         if (!reader.rect(&base.rect) || !readRadius(reader, &base.shape)) return false;
         instances.push_back(base);
     } else if (shape_tag == 3) {
         // Stroked rounded rectangles require a ring SDF, not a filled quad.
         return false;
     } else if (shape_tag == 4) {
+        if (kind != 6 && kind != 7) return false; // draw_line solid/gradient
         float x1, y1, x2, y2, width;
         if (!reader.f32(&x1) || !reader.f32(&y1) || !reader.f32(&x2) ||
             !reader.f32(&y2) || !reader.f32(&width)) return false;
@@ -238,52 +241,12 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
         base.extra = { x2, y2, width, 1.0f };
         instances.push_back(base);
     } else if (shape_tag == 5) {
-        // The instance path is a sequence of stroked line quads. A fill_path
-        // (wire kind 8) needs interior tessellation, which this presenter does
-        // not implement. Refuse it so the caller uses the pixel fallback
-        // instead of silently rendering only the outline.
-        if (kind != 9) return false; // stroke_path
-        uint32_t count = 0;
-        if (!reader.u32(&count) || count > 4096) return false;
-        float start_x = 0, start_y = 0, previous_x = 0, previous_y = 0;
-        bool has_previous = false;
-        for (uint32_t i = 0; i < count; ++i) {
-            uint8_t verb = 0;
-            if (!reader.u8(&verb)) return false;
-            const int points = verb <= 1 ? 1 : verb == 2 ? 2 : verb == 3 ? 3 : 0;
-            float last_x = previous_x, last_y = previous_y;
-            for (int point = 0; point < points; ++point) {
-                if (!reader.f32(&last_x) || !reader.f32(&last_y)) return false;
-            }
-            if (verb == 0) {
-                start_x = previous_x = last_x;
-                start_y = previous_y = last_y;
-                has_previous = true;
-            } else if (verb == 1 && has_previous) {
-                const float half = stroke_width * 0.5f;
-                Instance line = base;
-                line.rect = { std::min(previous_x, last_x) - half, std::min(previous_y, last_y) - half,
-                    std::abs(last_x - previous_x) + stroke_width, std::abs(last_y - previous_y) + stroke_width };
-                line.shape = { previous_x, previous_y, 0, 0 };
-                line.extra = { last_x, last_y, stroke_width, 1.0f };
-                instances.push_back(line);
-                previous_x = last_x;
-                previous_y = last_y;
-            } else if (verb == 4 && has_previous) {
-                const float half = stroke_width * 0.5f;
-                Instance line = base;
-                line.rect = { std::min(previous_x, start_x) - half, std::min(previous_y, start_y) - half,
-                    std::abs(start_x - previous_x) + stroke_width, std::abs(start_y - previous_y) + stroke_width };
-                line.shape = { previous_x, previous_y, 0, 0 };
-                line.extra = { start_x, start_y, stroke_width, 1.0f };
-                instances.push_back(line);
-                previous_x = start_x;
-                previous_y = start_y;
-            } else if (verb > 1) {
-                return false; // curves need tessellation
-            }
-        }
-        if (instances.empty()) return false;
+        // Filled paths need interior tessellation. Stroked paths need the
+        // shared vector core's curve flattening, round joins, and open-subpath
+        // cap rules; independent line quads are not equivalent at joins.
+        // Until the D3D path pipeline represents those semantics, both path
+        // kinds fail closed to the exact reference pixel renderer.
+        return false;
     } else {
         return false;
     }
@@ -1374,12 +1337,9 @@ extern "C" int native_sdk_d3d_presenter_tests() {
     reader = { bytes.data(), bytes.data() + bytes.size() };
     expect(!readCommand(reader, &command));
 
-    append_path_command(9); // stroke_path: line instances are exact
+    append_path_command(9); // stroke_path: joins/caps need vector tessellation
     reader = { bytes.data(), bytes.data() + bytes.size() };
-    expect(readCommand(reader, &command));
-    expect(reader.cursor == reader.end);
-    expect(command.instances.size() == 2);
-    expect(command.gradient_stops.size() == 3);
+    expect(!readCommand(reader, &command));
 
     std::vector<GradientStopInstance> stops;
     std::vector<MeshPatchInstance> mesh_patches;
