@@ -1149,6 +1149,20 @@ bool runMeshGpuTimestampBenchmark() {
 
     NsgpEngine engine;
     if (!createEngine(&engine)) return false; // hardware only; never WARP
+    ComPtr<IDXGIDevice> dxgi_device;
+    ComPtr<IDXGIAdapter> adapter;
+    ComPtr<IDXGIAdapter1> adapter1;
+    DXGI_ADAPTER_DESC1 adapter_desc = {};
+    if (FAILED(engine.device.As(&dxgi_device)) ||
+        FAILED(dxgi_device->GetAdapter(&adapter)) ||
+        FAILED(adapter.As(&adapter1)) ||
+        FAILED(adapter1->GetDesc1(&adapter_desc)) ||
+        (adapter_desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) return false;
+    fprintf(stderr,
+        "native-sdk-d3d: adapter vendor=0x%04x device=0x%04x dedicated=%lluMiB shared=%lluMiB\n",
+        adapter_desc.VendorId, adapter_desc.DeviceId,
+        static_cast<unsigned long long>(adapter_desc.DedicatedVideoMemory / (1024 * 1024)),
+        static_cast<unsigned long long>(adapter_desc.SharedSystemMemory / (1024 * 1024)));
     constexpr UINT width = 512;
     constexpr UINT height = 512;
     constexpr UINT patch_columns = 4;
