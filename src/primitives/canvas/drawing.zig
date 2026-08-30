@@ -149,8 +149,10 @@ pub const LinearGradient = struct {
 };
 
 /// Elliptical radial gradient: `center` is t=0 and `radii` is the t=1
-/// ellipse. This exactly represents CSS radial-gradient geometry after the
-/// author-side size/position keywords have resolved against the final box.
+/// ellipse. This represents CSS radial-gradient geometry after the author-side
+/// size/position keywords have resolved against the final box. Retained views
+/// require both radii to be greater than zero; CSS zero-radius degenerates are
+/// outside the contract until every backend renders them identically.
 pub const RadialGradient = struct {
     center: geometry.PointF,
     radii: geometry.SizeF,

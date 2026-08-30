@@ -49,11 +49,14 @@ pub fn validateCanvasFill(fill: canvas.Fill) error{InvalidCanvasGradient}!void {
             try validateCanvasGradientStops(gradient.stops);
         },
         .radial_gradient => |gradient| {
+            // The retained contract is deliberately stricter than CSS's
+            // zero-radius degenerate cases: every backend must agree on the
+            // pixels before those cases can be admitted.
             if (!canvasPointIsFinite(gradient.center) or
                 !std.math.isFinite(gradient.radii.width) or
                 !std.math.isFinite(gradient.radii.height) or
-                gradient.radii.width < 0 or
-                gradient.radii.height < 0)
+                gradient.radii.width <= 0 or
+                gradient.radii.height <= 0)
             {
                 return error.InvalidCanvasGradient;
             }

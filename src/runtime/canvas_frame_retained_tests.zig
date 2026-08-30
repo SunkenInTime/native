@@ -259,6 +259,11 @@ test "runtime rejects non-finite gradients without replacing retained state" {
     } });
     try expectCanvasGradientRejected(&harness.runtime, .{ .radial_gradient = .{
         .center = geometry.PointF.init(20, 20),
+        .radii = geometry.SizeF.init(0, 20),
+        .stops = &valid_stops,
+    } });
+    try expectCanvasGradientRejected(&harness.runtime, .{ .radial_gradient = .{
+        .center = geometry.PointF.init(20, 20),
         .radii = geometry.SizeF.init(20, std.math.nan(f32)),
         .stops = &valid_stops,
     } });
