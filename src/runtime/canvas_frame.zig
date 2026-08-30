@@ -97,6 +97,10 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             try validateViewLabel(label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+            // Validate the complete external list before diffing or mutating
+            // any retained state. copyCanvasDisplayList repeats this resource
+            // pass so direct callers keep the same transactional boundary.
+            _ = try runtime_view.CanvasResourceCounts.fromDisplayList(display_list);
             var canvas_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined;
             const changes = try canvas.DisplayList.diff(self.views[index].canvasDisplayList(), display_list, &canvas_changes);
             try self.views[index].copyCanvasDisplayList(display_list);

@@ -41,6 +41,8 @@ const CanvasWidgetDragEvent = support.CanvasWidgetDragEvent;
 const InvalidationReason = support.InvalidationReason;
 const TestHarness = support.TestHarness;
 const max_canvas_commands_per_view = support.max_canvas_commands_per_view;
+const max_canvas_gradient_stops_per_view = support.max_canvas_gradient_stops_per_view;
+const max_canvas_mesh_patches_per_view = support.max_canvas_mesh_patches_per_view;
 const max_canvas_widget_nodes_per_view = support.max_canvas_widget_nodes_per_view;
 const jsonStringField = support.jsonStringField;
 const jsonNumberField = support.jsonNumberField;
@@ -64,6 +66,30 @@ const builtinBridgeErrorCode = support.builtinBridgeErrorCode;
 const builtinBridgeErrorMessage = support.builtinBridgeErrorMessage;
 const testViewByLabel = support.testViewByLabel;
 const testCanvasWidgetPartId = support.testCanvasWidgetPartId;
+
+fn expectCanvasGradientRejected(runtime: *Runtime, fill: canvas.Fill) !void {
+    const invalid_commands = [_]canvas.CanvasCommand{.{ .fill_rect = .{
+        .id = 99,
+        .rect = geometry.RectF.init(0, 0, 40, 40),
+        .fill = fill,
+    } }};
+    try std.testing.expectError(
+        error.InvalidCanvasGradient,
+        runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &invalid_commands }),
+    );
+
+    const retained = try runtime.canvasDisplayList(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 1), retained.commandCount());
+    try std.testing.expectEqual(@as(?canvas.ObjectId, 1), retained.commands[0].objectId());
+    try std.testing.expectEqual(@as(u64, 1), runtime.views[0].canvas_revision);
+}
+
+fn validTestMeshPatch() canvas.MeshPatch {
+    return .{
+        .points = [_]geometry.PointF{geometry.PointF.zero()} ** 16,
+        .colors = [_]canvas.Color{canvas.Color.rgb8(255, 255, 255)} ** 4,
+    };
+}
 
 test "runtime retains canvas display lists on GPU surface views" {
     const TestApp = struct {
@@ -166,6 +192,164 @@ test "runtime retains canvas display lists on GPU surface views" {
     try automation.snapshot.writeText(snapshot, &writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_revision=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_commands=3") != null);
+}
+
+test "runtime rejects non-finite gradients without replacing retained state" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-gradient-validation", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+    });
+
+    const retained_commands = [_]canvas.CanvasCommand{.{ .fill_rect = .{
+        .id = 1,
+        .rect = geometry.RectF.init(0, 0, 40, 40),
+        .fill = .{ .color = canvas.Color.rgb8(255, 255, 255) },
+    } }};
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &retained_commands });
+
+    const valid_stops = [_]canvas.GradientStop{
+        .{ .offset = 0, .color = canvas.Color.rgb8(255, 255, 255) },
+        .{ .offset = 1, .color = canvas.Color.rgb8(0, 0, 0) },
+    };
+    const invalid_offset_stops = [_]canvas.GradientStop{
+        .{ .offset = std.math.nan(f32), .color = canvas.Color.rgb8(255, 255, 255) },
+    };
+    const invalid_color_stops = [_]canvas.GradientStop{
+        .{ .offset = 0, .color = canvas.Color.rgba(1, 1, 1, std.math.inf(f32)) },
+    };
+
+    try expectCanvasGradientRejected(&harness.runtime, .{ .linear_gradient = .{
+        .start = geometry.PointF.init(std.math.nan(f32), 0),
+        .end = geometry.PointF.init(40, 40),
+        .stops = &valid_stops,
+    } });
+    try expectCanvasGradientRejected(&harness.runtime, .{ .linear_gradient = .{
+        .start = geometry.PointF.zero(),
+        .end = geometry.PointF.init(40, 40),
+        .stops = &invalid_offset_stops,
+    } });
+    try expectCanvasGradientRejected(&harness.runtime, .{ .linear_gradient = .{
+        .start = geometry.PointF.zero(),
+        .end = geometry.PointF.init(40, 40),
+        .stops = &invalid_color_stops,
+    } });
+    try expectCanvasGradientRejected(&harness.runtime, .{ .radial_gradient = .{
+        .center = geometry.PointF.init(std.math.inf(f32), 20),
+        .radii = geometry.SizeF.init(20, 20),
+        .stops = &valid_stops,
+    } });
+    try expectCanvasGradientRejected(&harness.runtime, .{ .radial_gradient = .{
+        .center = geometry.PointF.init(20, 20),
+        .radii = geometry.SizeF.init(-1, 20),
+        .stops = &valid_stops,
+    } });
+    try expectCanvasGradientRejected(&harness.runtime, .{ .radial_gradient = .{
+        .center = geometry.PointF.init(20, 20),
+        .radii = geometry.SizeF.init(20, std.math.nan(f32)),
+        .stops = &valid_stops,
+    } });
+    try expectCanvasGradientRejected(&harness.runtime, .{ .conic_gradient = .{
+        .center = geometry.PointF.init(std.math.nan(f32), 20),
+        .start_angle_radians = 0,
+        .stops = &valid_stops,
+    } });
+    try expectCanvasGradientRejected(&harness.runtime, .{ .conic_gradient = .{
+        .center = geometry.PointF.init(20, 20),
+        .start_angle_radians = std.math.inf(f32),
+        .stops = &valid_stops,
+    } });
+
+    var invalid_point_patch = validTestMeshPatch();
+    invalid_point_patch.points[5].x = std.math.nan(f32);
+    const invalid_point_patches = [_]canvas.MeshPatch{invalid_point_patch};
+    try expectCanvasGradientRejected(&harness.runtime, .{ .mesh_gradient = .{ .patches = &invalid_point_patches } });
+
+    var invalid_color_patch = validTestMeshPatch();
+    invalid_color_patch.colors[2].g = std.math.inf(f32);
+    const invalid_color_patches = [_]canvas.MeshPatch{invalid_color_patch};
+    try expectCanvasGradientRejected(&harness.runtime, .{ .mesh_gradient = .{ .patches = &invalid_color_patches } });
+}
+
+test "runtime enforces aggregate gradient resource limits before retaining" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-gradient-limits", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+    });
+
+    const retained_commands = [_]canvas.CanvasCommand{.{ .fill_rect = .{
+        .id = 1,
+        .rect = geometry.RectF.init(0, 0, 40, 40),
+        .fill = .{ .color = canvas.Color.rgb8(255, 255, 255) },
+    } }};
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &retained_commands });
+
+    const first_stop_count = max_canvas_gradient_stops_per_view / 2;
+    const second_stop_count = max_canvas_gradient_stops_per_view - first_stop_count + 1;
+    const stop = canvas.GradientStop{ .offset = 0, .color = canvas.Color.rgb8(255, 255, 255) };
+    const first_stops = [_]canvas.GradientStop{stop} ** first_stop_count;
+    const second_stops = [_]canvas.GradientStop{stop} ** second_stop_count;
+    const stop_commands = [_]canvas.CanvasCommand{
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(0, 0, 20, 20), .fill = .{ .linear_gradient = .{
+            .start = geometry.PointF.zero(),
+            .end = geometry.PointF.init(20, 20),
+            .stops = &first_stops,
+        } } } },
+        .{ .fill_rect = .{ .id = 3, .rect = geometry.RectF.init(20, 0, 20, 20), .fill = .{ .conic_gradient = .{
+            .center = geometry.PointF.init(30, 10),
+            .stops = &second_stops,
+        } } } },
+    };
+    try std.testing.expectError(
+        error.CanvasGradientStopLimitReached,
+        harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &stop_commands }),
+    );
+
+    const first_patch_count = max_canvas_mesh_patches_per_view / 2;
+    const second_patch_count = max_canvas_mesh_patches_per_view - first_patch_count + 1;
+    const patch = validTestMeshPatch();
+    const first_patches = [_]canvas.MeshPatch{patch} ** first_patch_count;
+    const second_patches = [_]canvas.MeshPatch{patch} ** second_patch_count;
+    const patch_commands = [_]canvas.CanvasCommand{
+        .{ .fill_rect = .{ .id = 4, .rect = geometry.RectF.init(0, 0, 20, 20), .fill = .{ .mesh_gradient = .{ .patches = &first_patches } } } },
+        .{ .fill_rect = .{ .id = 5, .rect = geometry.RectF.init(20, 0, 20, 20), .fill = .{ .mesh_gradient = .{ .patches = &second_patches } } } },
+    };
+    try std.testing.expectError(
+        error.CanvasMeshPatchLimitReached,
+        harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &patch_commands }),
+    );
+
+    const retained = try harness.runtime.canvasDisplayList(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 1), retained.commandCount());
+    try std.testing.expectEqual(@as(?canvas.ObjectId, 1), retained.commands[0].objectId());
+    try std.testing.expectEqual(@as(u64, 1), harness.runtime.views[0].canvas_revision);
 }
 
 test "runtime builds canvas frame plans from retained GPU canvas state" {

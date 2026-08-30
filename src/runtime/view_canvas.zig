@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const canvas_frame_helpers = @import("canvas_frame.zig");
@@ -18,6 +19,64 @@ const canvasRenderOverrideNoop = canvas_frame_helpers.canvasRenderOverrideNoop;
 const canvasRenderAnimationFinalOverrideNoop = canvas_frame_helpers.canvasRenderAnimationFinalOverrideNoop;
 const canvasRenderAnimationActive = canvas_frame_helpers.canvasRenderAnimationActive;
 const platformCanvasFrameProfileRisk = canvas_frame_helpers.platformCanvasFrameProfileRisk;
+
+fn canvasColorIsFinite(color: canvas.Color) bool {
+    return std.math.isFinite(color.r) and
+        std.math.isFinite(color.g) and
+        std.math.isFinite(color.b) and
+        std.math.isFinite(color.a);
+}
+
+fn canvasPointIsFinite(point: geometry.PointF) bool {
+    return std.math.isFinite(point.x) and std.math.isFinite(point.y);
+}
+
+fn validateCanvasGradientStops(stops: []const canvas.GradientStop) error{InvalidCanvasGradient}!void {
+    for (stops) |stop| {
+        if (!std.math.isFinite(stop.offset) or !canvasColorIsFinite(stop.color)) {
+            return error.InvalidCanvasGradient;
+        }
+    }
+}
+
+pub fn validateCanvasFill(fill: canvas.Fill) error{InvalidCanvasGradient}!void {
+    switch (fill) {
+        .color => {},
+        .linear_gradient => |gradient| {
+            if (!canvasPointIsFinite(gradient.start) or !canvasPointIsFinite(gradient.end)) {
+                return error.InvalidCanvasGradient;
+            }
+            try validateCanvasGradientStops(gradient.stops);
+        },
+        .radial_gradient => |gradient| {
+            if (!canvasPointIsFinite(gradient.center) or
+                !std.math.isFinite(gradient.radii.width) or
+                !std.math.isFinite(gradient.radii.height) or
+                gradient.radii.width < 0 or
+                gradient.radii.height < 0)
+            {
+                return error.InvalidCanvasGradient;
+            }
+            try validateCanvasGradientStops(gradient.stops);
+        },
+        .conic_gradient => |gradient| {
+            if (!canvasPointIsFinite(gradient.center) or !std.math.isFinite(gradient.start_angle_radians)) {
+                return error.InvalidCanvasGradient;
+            }
+            try validateCanvasGradientStops(gradient.stops);
+        },
+        .mesh_gradient => |gradient| {
+            for (gradient.patches) |patch| {
+                for (patch.points) |point| {
+                    if (!canvasPointIsFinite(point)) return error.InvalidCanvasGradient;
+                }
+                for (patch.colors) |color| {
+                    if (!canvasColorIsFinite(color)) return error.InvalidCanvasGradient;
+                }
+            }
+        },
+    }
+}
 
 pub const CanvasWidgetDisplayListChrome = struct {
     prefix_command_count: usize = 0,
@@ -75,6 +134,7 @@ pub const CanvasResourceCounts = struct {
     }
 
     pub fn addFill(self: *CanvasResourceCounts, fill: canvas.Fill) anyerror!void {
+        try validateCanvasFill(fill);
         switch (fill) {
             .color => {},
             .linear_gradient => |gradient| try addCanvasCount(&self.gradient_stop_count, gradient.stops.len, max_canvas_gradient_stops_per_view, error.CanvasGradientStopLimitReached),
@@ -159,6 +219,7 @@ pub const CanvasDisplayListScratch = struct {
     }
 
     pub fn copyCanvasFill(self: *CanvasDisplayListScratch, fill: canvas.Fill) anyerror!canvas.Fill {
+        try validateCanvasFill(fill);
         return switch (fill) {
             .color => |color| .{ .color = color },
             .linear_gradient => |gradient| .{ .linear_gradient = .{
@@ -871,6 +932,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn copyCanvasFill(self: *RuntimeView, fill: canvas.Fill) anyerror!canvas.Fill {
+            try validateCanvasFill(fill);
             return switch (fill) {
                 .color => |color| .{ .color = color },
                 .linear_gradient => |gradient| .{ .linear_gradient = .{
