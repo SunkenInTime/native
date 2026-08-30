@@ -21,10 +21,11 @@ struct NativeSdkSharedRendererGeometry {
 };
 
 /// Creates only the device-less DirectComposition side of a shared surface.
-/// Pipe connection is lazy so widgets launch safely while weaverd is still
-/// bringing the renderer up, and reconnect after a renderer crash.
+/// Pipe connection remains explicit so the Windows host can complete the
+/// handshake before it advertises D3D11 to the runtime.
 NativeSdkSharedRendererClient *nativeSdkSharedRendererClientCreate(HWND window);
 void nativeSdkSharedRendererClientDestroy(NativeSdkSharedRendererClient *client);
+bool nativeSdkSharedRendererClientEnsureConnected(NativeSdkSharedRendererClient *client);
 bool nativeSdkSharedRendererClientPresent(
     NativeSdkSharedRendererClient *client,
     double logical_width,

@@ -836,6 +836,12 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkSystemLibrary(\"dcomp\", .{})" },
         .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkSystemLibrary(\"dwmapi\", .{})" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-shared-renderer-recovery", "Verify Windows handshakes before advertising D3D11 and keeps bounded recovery", &.{
+        .{ .path = "src/platform/windows/shared_renderer_client.h", .pattern = "nativeSdkSharedRendererClientEnsureConnected" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "nativeSdkSharedRendererClientEnsureConnected(view.gpu_presenter) ? 2 : 3" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "kWeaverSharedRendererRecoveryIntervalMs" },
+        .{ .path = "src/platform/windows/dpi_geometry_tests.cpp", .pattern = "weaverSharedRendererRecoveryPumpNeeded(true, false, true)" },
+    });
     const owned_windows_example_builds = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "browser", .path = "examples/browser/build.zig" },
         .{ .name = "capabilities", .path = "examples/capabilities/build.zig" },

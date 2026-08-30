@@ -1,0 +1,1 @@
+fix: **Reliable Windows GPU startup and recovery**: GPU surfaces now complete the shared-renderer handshake before advertising D3D11, preserve a working software fallback when the renderer is unavailable, and retry recovery at a bounded idle cadence instead of remaining permanently demoted.

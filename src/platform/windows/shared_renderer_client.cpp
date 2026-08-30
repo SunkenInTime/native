@@ -1,4 +1,5 @@
 #include "shared_renderer_client.h"
+#include "shared_renderer_policy.h"
 #include "renderer_protocol.h"
 
 #include <dcomp.h>
@@ -30,6 +31,7 @@ struct NativeSdkSharedRendererClient {
     uint64_t visual_geometry_generation = 0;
     uint32_t visual_width_px = 0;
     uint32_t visual_height_px = 0;
+    bool connect_attempted = false;
     std::string last_failure;
 };
 
@@ -159,8 +161,12 @@ static bool connectRenderer(NativeSdkSharedRendererClient *client) {
     // widget. Creating the process and publishing its first pipe instance is
     // asynchronous, so the first surface establishment gets one bounded
     // lifecycle wait. Connected frames never take this path, and later
-    // recovery attempts use the same bound without introducing frame churn.
-    const uint64_t deadline = GetTickCount64() + 2000;
+    // recovery attempts use a short bound and arrive only from the host's
+    // low-frequency recovery pump.
+    const uint32_t timeout_ms = weaverSharedRendererConnectTimeoutMs(
+        client->connect_attempted);
+    client->connect_attempted = true;
+    const uint64_t deadline = GetTickCount64() + timeout_ms;
     bool pipe_ready = false;
     do {
         pipe_ready = WaitNamedPipeW(client->pipe_name.c_str(), 100) != FALSE;
@@ -216,6 +222,11 @@ NativeSdkSharedRendererClient *nativeSdkSharedRendererClientCreate(HWND window) 
     client->window = window;
     client->pipe_name.assign(pipe_name, length);
     return client;
+}
+
+bool nativeSdkSharedRendererClientEnsureConnected(
+    NativeSdkSharedRendererClient *client) {
+    return client && connectRenderer(client);
 }
 
 void nativeSdkSharedRendererClientDestroy(NativeSdkSharedRendererClient *client) {
