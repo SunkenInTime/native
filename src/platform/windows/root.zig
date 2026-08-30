@@ -1556,6 +1556,11 @@ test "windows top-level frame delivery stays demand-driven" {
     const host_source = @embedFile("webview2_host.cpp");
     try std.testing.expect(std.mem.indexOf(u8, host_source, "SetTimer(hwnd, kFrameTimerId") == null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "PostMessageW(hwnd, kRequestFrameMessage") != null);
+    // Only a real shared-renderer surface pays for the high-resolution
+    // multimedia deadline. The software path must fall through to the
+    // coalescing UI timer so compatibility layers cannot run a caret or
+    // other continuous animation fast enough to starve input dispatch.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "view.gpu_presenter && scheduleGpuSurfaceDeadline") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "SetTimer(view.hwnd, kGpuEmitTimerId") != null);
 }
 

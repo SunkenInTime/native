@@ -2630,8 +2630,10 @@ static void CALLBACK gpuSurfaceDeadlineCallback(UINT, UINT, DWORD_PTR user,
 
 /* Animated shared surfaces need a deadline timer, not SetTimer's UI timer
  * class: its 10 ms clamp and delivery tail turn a 16.67 ms grid into ~17.4
- * ms under multiple renderer roundtrips. Resolve winmm dynamically so static
- * and software-only apps neither load it nor pay a new import. */
+ * ms under multiple renderer roundtrips. Resolve winmm dynamically, and call
+ * this helper only for surfaces that own a shared-renderer client: software
+ * surfaces stay on the coalescing UI timer and neither load winmm nor inherit
+ * multimedia-timer behavior from compatibility layers such as Wine. */
 static bool scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns) {
     using LoadFn = HMODULE (WINAPI *)(LPCWSTR);
     static HMODULE winmm = LoadLibraryW(L"winmm.dll");
@@ -2722,7 +2724,7 @@ static void gpuSurfaceScheduleFrameEmission(NativeView &view) {
         }
         return;
     }
-    if (scheduleGpuSurfaceDeadline(view.hwnd, delay_ns) ||
+    if ((view.gpu_presenter && scheduleGpuSurfaceDeadline(view.hwnd, delay_ns)) ||
         SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr)) {
         view.gpu_emission_scheduled = true;
     }
