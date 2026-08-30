@@ -1902,7 +1902,11 @@ static void destroyNativeViewsForWindow(Host *host, uint64_t window_id) {
  * scheduler per surface (the macOS host's design): runtime frame
  * requests and pixel presents each arm a single grid-anchored one-shot
  * WM_TIMER emission, so an armed animation loop sees one
- * gpu_surface_frame per frame interval and an idle surface sees none.
+ * gpu_surface_frame per frame interval and an idle surface sees none. Each
+ * real GPU completion is followed by one general frame boundary so runtime
+ * lifecycle work and automation snapshots observe the presented state; the
+ * general boundary is demand-driven too and therefore does not revive the
+ * old idle timer loop.
  * Until the first present lands, a placeholder 16 ms WM_TIMER pump arms
  * the same scheduler (the runtime's install choreography rides the
  * first frame events), then removes itself. WM_TIMER granularity
@@ -2643,9 +2647,12 @@ static bool scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns) {
         reinterpret_cast<DWORD_PTR>(hwnd), kTimeOneShot | kTimeKillSynchronous) != 0;
 }
 
-/* The single frame-event emission: view state (nonblank verdict, sample
- * color, buffer geometry) is the payload, so one event serves frame
- * requests and present completions alike. */
+/* The single surface-frame emission: view state (nonblank verdict, sample
+ * color, buffer geometry) is the payload, so one event serves surface-frame
+ * requests and present completions alike. A paired general frame follows the
+ * surface callback: Runtime.frame owns the lifecycle-frame and automation
+ * publish boundary, and removing the old unconditional WM_TIMER loop must
+ * not make that boundary unreachable for a live gpu_surface. */
 static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
     /* The input's responding frame is THIS one; the follow-up schedule
      * (an armed animation re-requesting) returns to the minimized
@@ -2681,6 +2688,12 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
     event.alpha_mode = view.gpu_alpha_mode;
     event.gpu_backend = nativeSdkSharedRendererClientConnected(view.gpu_presenter) ? 2 : 3;
     emitGpuSurfaceEvent(host, view, event);
+    if (host && host->running && host->callback) {
+        WindowsEvent frame = {};
+        frame.kind = kFrame;
+        frame.window_id = view.window_id;
+        host->callback(host->callback_context, &frame);
+    }
 }
 
 /* Schedule the surface's next frame event on the frame-interval grid.
