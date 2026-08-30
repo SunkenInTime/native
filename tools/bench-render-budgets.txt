@@ -35,6 +35,14 @@ scroll-transcript 5000
 # the floor regressing toward O(view-size) cost (any planner/emit
 # regression lands it at several hundred us).
 chart-tick 200
+# gradient-grid-update: 16 retained linear gradients with four stops each
+# (the view-wide 64-stop ceiling), toggled through rebuild, emit, plan,
+# patch, binary encode, and present. Healthy p50 was 123-218us across full and
+# isolated ReleaseFast calibration (one isolated pass reached 296us); 500us
+# absorbs cold-process variance while still catching stop-count-linear work
+# leaking into a quadratic packet path. Host shader time is measured by the
+# live GPU lane.
+gradient-grid-update 500
 # markdown-doc-edit: guards markdown re-render + plan cost on a
 # README-sized doc; the pre-fix number was ~2400.
 markdown-doc-edit 1500

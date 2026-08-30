@@ -27,6 +27,7 @@
 //! Ratchet mode:
 //!
 //!   zig build bench-render -Doptimize=ReleaseFast -- --check tools/bench-render-budgets.txt
+//!   zig build bench-render -Doptimize=ReleaseFast -- --scenario gradient-grid-update --check tools/bench-render-budgets.txt
 //!
 //! Runs the whole suite `check_passes` times, takes the MEDIAN e2e p50
 //! per scenario across passes (one descheduled pass cannot fail the
@@ -591,6 +592,85 @@ fn chartOptions() ChartApp.Options {
     };
 }
 
+// -------------------------------- fixture: retained gradient grid (64 stops)
+
+const gradient_grid_stops_a = [_]canvas.GradientStop{
+    .{ .offset = 0, .color = canvas.Color.rgb8(8, 145, 178) },
+    .{ .offset = 0.32, .color = canvas.Color.rgb8(37, 99, 235) },
+    .{ .offset = 0.68, .color = canvas.Color.rgb8(168, 85, 247) },
+    .{ .offset = 1, .color = canvas.Color.rgb8(236, 72, 153) },
+};
+const gradient_grid_stops_b = [_]canvas.GradientStop{
+    .{ .offset = 0, .color = canvas.Color.rgb8(245, 158, 11) },
+    .{ .offset = 0.27, .color = canvas.Color.rgb8(239, 68, 68) },
+    .{ .offset = 0.73, .color = canvas.Color.rgb8(14, 165, 233) },
+    .{ .offset = 1, .color = canvas.Color.rgb8(16, 185, 129) },
+};
+const gradient_grid_commands_a = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{
+    .start = geometry.PointF.init(0, 0),
+    .end = geometry.PointF.init(1, 1),
+    .stops = &gradient_grid_stops_a,
+} }};
+const gradient_grid_commands_b = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{
+    .start = geometry.PointF.init(1, 0),
+    .end = geometry.PointF.init(0, 1),
+    .stops = &gradient_grid_stops_b,
+} }};
+
+const GradientGridMsg = union(enum) {
+    toggle,
+};
+
+const GradientGridModel = struct {
+    alternate: bool = false,
+};
+
+fn gradientGridUpdate(model: *GradientGridModel, msg: GradientGridMsg) void {
+    switch (msg) {
+        .toggle => model.alternate = !model.alternate,
+    }
+}
+
+const GradientGridApp = native_sdk.UiApp(GradientGridModel, GradientGridMsg);
+const GradientGridUi = GradientGridApp.Ui;
+
+fn gradientGridPanel(ui: *GradientGridUi, alternate: bool) GradientGridUi.Node {
+    // `immediateCanvas` is a drawing island whose metadata entries are
+    // intentionally skipped. A panel is the retained surface that consumes
+    // `background_gradient`, so attach the rare metadata to that node.
+    var node = ui.panel(.{ .grow = 1 }, .{});
+    node.widget.immediate_commands = if (alternate) &gradient_grid_commands_b else &gradient_grid_commands_a;
+    return node;
+}
+
+fn gradientGridRow(ui: *GradientGridUi, alternate: bool) GradientGridUi.Node {
+    return ui.row(.{ .grow = 1, .gap = 8 }, .{
+        gradientGridPanel(ui, alternate),
+        gradientGridPanel(ui, alternate),
+        gradientGridPanel(ui, alternate),
+        gradientGridPanel(ui, alternate),
+    });
+}
+
+fn gradientGridView(ui: *GradientGridUi, model: *const GradientGridModel) GradientGridUi.Node {
+    return ui.column(.{ .padding = 8, .gap = 8 }, .{
+        gradientGridRow(ui, model.alternate),
+        gradientGridRow(ui, model.alternate),
+        gradientGridRow(ui, model.alternate),
+        gradientGridRow(ui, model.alternate),
+    });
+}
+
+fn gradientGridOptions() GradientGridApp.Options {
+    return .{
+        .name = "bench-gradient-grid",
+        .scene = bench_scene,
+        .canvas_label = canvas_label,
+        .update = gradientGridUpdate,
+        .view = gradientGridView,
+    };
+}
+
 // -------------------------------------- fixture: large markdown doc
 
 const doc_blocks = 56;
@@ -861,6 +941,24 @@ fn scenarioChartTick() !ScenarioReport {
     );
 }
 
+fn scenarioGradientGridUpdate() !ScenarioReport {
+    var bench = try Bench(GradientGridApp).create(gradientGridOptions());
+    defer bench.destroy();
+    const step = struct {
+        fn run(b: *Bench(GradientGridApp)) !void {
+            try b.app.dispatch(&b.harness.runtime, 1, .toggle);
+            try b.frame();
+        }
+    };
+    return measure(
+        "gradient-grid-update",
+        "toggle 16 retained linear gradients / 64 stops, binary patch",
+        &bench,
+        measured_iterations,
+        step,
+    );
+}
+
 fn scenarioDocEdit() !ScenarioReport {
     var bench = try Bench(DocApp).create(docOptions());
     defer bench.destroy();
@@ -1008,7 +1106,7 @@ fn fmtUs(value: u64) []const u8 {
 
 // ---------------------------------------------------------- check mode
 
-const scenario_count = 7;
+const scenario_count = 8;
 const check_passes = 3;
 
 fn runAllScenarios() ![scenario_count]ScenarioReport {
@@ -1018,9 +1116,23 @@ fn runAllScenarios() ![scenario_count]ScenarioReport {
     reports[2] = try scenarioToggle();
     reports[3] = try scenarioTranscriptScroll();
     reports[4] = try scenarioChartTick();
-    reports[5] = try scenarioDocEdit();
-    reports[6] = try scenarioMeasuredKeystroke();
+    reports[5] = try scenarioGradientGridUpdate();
+    reports[6] = try scenarioDocEdit();
+    reports[7] = try scenarioMeasuredKeystroke();
     return reports;
+}
+
+fn runScenarioByName(name: []const u8) !ScenarioReport {
+    if (std.mem.eql(u8, name, "first-frame")) return scenarioFirstFrame();
+    if (std.mem.eql(u8, name, "keystroke-big-view")) return scenarioKeystroke();
+    if (std.mem.eql(u8, name, "toggle-big-view")) return scenarioToggle();
+    if (std.mem.eql(u8, name, "scroll-transcript")) return scenarioTranscriptScroll();
+    if (std.mem.eql(u8, name, "chart-tick")) return scenarioChartTick();
+    if (std.mem.eql(u8, name, "gradient-grid-update")) return scenarioGradientGridUpdate();
+    if (std.mem.eql(u8, name, "markdown-doc-edit")) return scenarioDocEdit();
+    if (std.mem.eql(u8, name, "keystroke-measured-text")) return scenarioMeasuredKeystroke();
+    std.debug.print("bench-render: unknown scenario '{s}'\n", .{name});
+    return error.UnknownScenario;
 }
 
 const Budget = struct {
@@ -1069,7 +1181,7 @@ fn medianOf(values: []u64) u64 {
     return values[(values.len - 1) / 2];
 }
 
-fn runCheck(init: std.process.Init, budgets_path: []const u8) !void {
+fn runCheck(init: std.process.Init, budgets_path: []const u8, scenario_filter: ?[]const u8) !void {
     if (builtin.mode != .ReleaseFast) {
         std.debug.print("bench-render --check: budgets are calibrated for ReleaseFast; rebuild with -Doptimize=ReleaseFast (got {s})\n", .{@tagName(builtin.mode)});
         return error.WrongOptimizeMode;
@@ -1082,6 +1194,29 @@ fn runCheck(init: std.process.Init, budgets_path: []const u8) !void {
     };
     var budget_storage: [max_budgets]Budget = undefined;
     const budgets = try parseBudgets(content, &budget_storage);
+
+    if (scenario_filter) |name| {
+        const budget = for (budgets) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) break entry;
+        } else {
+            std.debug.print("bench-render --check: scenario '{s}' has no declared budget\n", .{name});
+            return error.InvalidBudgetsFile;
+        };
+        var samples: [check_passes]u64 = undefined;
+        for (&samples, 0..) |*sample, pass_index| {
+            const report = try runScenarioByName(name);
+            sample.* = report.e2e_p50_us;
+            std.debug.print("bench-render --check: pass {d}/{d}: {s}={d}us\n", .{ pass_index + 1, check_passes, name, sample.* });
+        }
+        const median = medianOf(&samples);
+        const over = median > budget.p50_budget_us;
+        std.debug.print("\nbench-render --check: median e2e p50 of {d} passes vs budget ({s})\n\n", .{ check_passes, budgets_path });
+        std.debug.print("{s:<22} {s:>10} {s:>10}  {s}\n", .{ "scenario", "p50_us", "budget_us", "verdict" });
+        std.debug.print("{s:<22} {d:>10} {d:>10}  {s}\n", .{ name, median, budget.p50_budget_us, if (over) "FAIL" else "ok" });
+        if (over) return error.BudgetExceeded;
+        std.debug.print("\nbench-render --check: scenario within budget\n", .{});
+        return;
+    }
 
     // Median across passes: one descheduled pass (or one lucky one)
     // cannot decide the verdict on a loaded box.
@@ -1133,6 +1268,7 @@ pub fn main(init: std.process.Init) !void {
     defer args_arena.deinit();
     const args = try init.minimal.args.toSlice(args_arena.allocator());
     var budgets_path: ?[]const u8 = null;
+    var scenario_filter: ?[]const u8 = null;
     var arg_index: usize = 1;
     while (arg_index < args.len) : (arg_index += 1) {
         if (std.mem.eql(u8, args[arg_index], "--check")) {
@@ -1142,8 +1278,15 @@ pub fn main(init: std.process.Init) !void {
                 return error.InvalidArguments;
             }
             budgets_path = args[arg_index];
+        } else if (std.mem.eql(u8, args[arg_index], "--scenario")) {
+            arg_index += 1;
+            if (arg_index >= args.len) {
+                std.debug.print("bench-render: --scenario requires a scenario name\n", .{});
+                return error.InvalidArguments;
+            }
+            scenario_filter = args[arg_index];
         } else {
-            std.debug.print("bench-render: unknown argument '{s}' (usage: bench-render [--check <budgets-file>])\n", .{args[arg_index]});
+            std.debug.print("bench-render: unknown argument '{s}' (usage: bench-render [--scenario <name>] [--check <budgets-file>])\n", .{args[arg_index]});
             return error.InvalidArguments;
         }
     }
@@ -1153,7 +1296,13 @@ pub fn main(init: std.process.Init) !void {
     initDocFixture();
     initMeasuredChatFixture();
 
-    if (budgets_path) |path| return runCheck(init, path);
+    if (budgets_path) |path| return runCheck(init, path, scenario_filter);
+
+    if (scenario_filter) |name| {
+        const report = try runScenarioByName(name);
+        printReports(&.{report});
+        return;
+    }
 
     const reports = try runAllScenarios();
     printReports(&reports);

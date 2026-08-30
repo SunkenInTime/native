@@ -340,6 +340,22 @@ pub fn build(b: *std.Build) void {
     const docs_previews_step = b.step("docs-component-previews", "Render built-in component previews and vocab JSON into docs/");
     docs_previews_step.dependOn(&run_docs_previews.step);
 
+    // Gradient correctness lever, stage one: deterministic CPU reference
+    // receipts. These are intentionally labeled non-normative; independent
+    // spec fixtures and live GPU captures compare against the same catalog.
+    const gradient_reference_mod = module(b, target, optimize, "tools/gradient_reference_catalog.zig");
+    gradient_reference_mod.addImport("native_sdk", desktop_mod);
+    const gradient_reference_exe = b.addExecutable(.{
+        .name = "gradient-reference",
+        .root_module = gradient_reference_mod,
+    });
+    const run_gradient_reference = b.addRunArtifact(gradient_reference_exe);
+    run_gradient_reference.setCwd(b.path("."));
+    run_gradient_reference.has_side_effects = true;
+    if (b.args) |gradient_args| run_gradient_reference.addArgs(gradient_args);
+    const gradient_reference_step = b.step("gradient-reference", "Render the deterministic gradient reference catalog (optional output directory after --)");
+    gradient_reference_step.dependOn(&run_gradient_reference.step);
+
     // Render macro-benchmark: deterministic scenarios through the REAL
     // engine pipeline (UiApp + Runtime + null-platform binary packet
     // presents), reporting end-to-end and per-stage p50/p90 per
