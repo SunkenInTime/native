@@ -541,6 +541,11 @@ HRESULT compileShader(const char *entry, const char *target, ID3DBlob **blob) {
     ComPtr<ID3DBlob> errors;
     const HRESULT result = compile(shaderSource, strlen(shaderSource), "native-sdk-d3d", nullptr,
         nullptr, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob, &errors);
+    if (FAILED(result) && errors && errors->GetBufferPointer() && errors->GetBufferSize() > 0) {
+        fprintf(stderr, "native-sdk-d3d: %s/%s compilation failed:\n%.*s\n",
+            entry, target, static_cast<int>(errors->GetBufferSize()),
+            static_cast<const char *>(errors->GetBufferPointer()));
+    }
     return result;
 }
 
