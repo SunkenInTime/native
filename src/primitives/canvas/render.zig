@@ -542,6 +542,8 @@ pub const RenderPlanner = struct {
 pub const RenderPipelineKind = enum {
     solid,
     linear_gradient,
+    radial_gradient,
+    conic_gradient,
     image,
     glyph_run,
     path,
@@ -794,6 +796,8 @@ fn renderPipelineForFill(fill: Fill) RenderPipelineKind {
     return switch (fill) {
         .color => .solid,
         .linear_gradient => .linear_gradient,
+        .radial_gradient => .radial_gradient,
+        .conic_gradient => .conic_gradient,
     };
 }
 

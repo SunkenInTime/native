@@ -17,6 +17,8 @@ const textBounds = text_model.textBounds;
 const drawImageFingerprint = fingerprints.drawImageFingerprint;
 const drawTextFingerprint = fingerprints.drawTextFingerprint;
 const linearGradientFingerprint = fingerprints.linearGradientFingerprint;
+const radialGradientFingerprint = fingerprints.radialGradientFingerprint;
+const conicGradientFingerprint = fingerprints.conicGradientFingerprint;
 const shadowFingerprint = fingerprints.shadowFingerprint;
 const blurFingerprint = fingerprints.blurFingerprint;
 const nonZeroObjectId = fingerprints.nonZeroObjectId;
@@ -24,6 +26,8 @@ const nonNegative = fingerprints.nonNegative;
 
 pub const RenderResourceKind = enum {
     linear_gradient,
+    radial_gradient,
+    conic_gradient,
     image,
     glyph_run,
     shadow,
@@ -134,6 +138,22 @@ pub const RenderResourcePlanner = struct {
                 .bounds = bounds,
                 .gradient_stop_count = gradient.stops.len,
                 .fingerprint = linearGradientFingerprint(gradient),
+            }),
+            .radial_gradient => |gradient| try self.append(.{
+                .kind = .radial_gradient,
+                .command_index = index,
+                .id = nonZeroObjectId(id),
+                .bounds = bounds,
+                .gradient_stop_count = gradient.stops.len,
+                .fingerprint = radialGradientFingerprint(gradient),
+            }),
+            .conic_gradient => |gradient| try self.append(.{
+                .kind = .conic_gradient,
+                .command_index = index,
+                .id = nonZeroObjectId(id),
+                .bounds = bounds,
+                .gradient_stop_count = gradient.stops.len,
+                .fingerprint = conicGradientFingerprint(gradient),
             }),
         }
     }

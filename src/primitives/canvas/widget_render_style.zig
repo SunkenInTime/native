@@ -220,28 +220,55 @@ fn interactionBackground(widget: Widget) ?Color {
 pub fn widgetBackgroundFill(widget: Widget, fallback: Color) Fill {
     if (interactionBackground(widget)) |background| return colorFill(background);
     for (widget.immediate_commands) |command| switch (command) {
-        .background_gradient => |gradient| return .{ .linear_gradient = .{
-            .start = .{
-                .x = widget.frame.x + widget.frame.width * gradient.start.x,
-                .y = widget.frame.y + widget.frame.height * gradient.start.y,
-            },
-            .end = .{
-                .x = widget.frame.x + widget.frame.width * gradient.end.x,
-                .y = widget.frame.y + widget.frame.height * gradient.end.y,
-            },
-            .stops = gradient.stops,
-        } },
+        .background_gradient => |gradient| return switch (gradient) {
+            .linear => |linear| .{ .linear_gradient = .{
+                .start = widgetNormalizedPoint(widget, linear.start),
+                .end = widgetNormalizedPoint(widget, linear.end),
+                .stops = linear.stops,
+                .spread = linear.spread,
+                .interpolation = linear.interpolation,
+            } },
+            .radial => |radial| .{ .radial_gradient = .{
+                .center = widgetNormalizedPoint(widget, radial.center),
+                .radii = .{
+                    .width = widget.frame.width * radial.radii.width,
+                    .height = widget.frame.height * radial.radii.height,
+                },
+                .stops = radial.stops,
+                .spread = radial.spread,
+                .interpolation = radial.interpolation,
+            } },
+            .conic => |conic| .{ .conic_gradient = .{
+                .center = widgetNormalizedPoint(widget, conic.center),
+                .start_angle_radians = conic.start_angle_radians,
+                .stops = conic.stops,
+                .spread = conic.spread,
+                .interpolation = conic.interpolation,
+            } },
+        },
         else => {},
     };
     return colorFill(widget.style.background orelse fallback);
+}
+
+fn widgetNormalizedPoint(widget: Widget, point: geometry.PointF) geometry.PointF {
+    return .{
+        .x = widget.frame.x + widget.frame.width * point.x,
+        .y = widget.frame.y + widget.frame.height * point.y,
+    };
 }
 
 pub fn widgetBackgroundIsOpaque(widget: Widget, fallback: Color) bool {
     if (interactionBackground(widget)) |background| return background.a >= 1;
     for (widget.immediate_commands) |command| switch (command) {
         .background_gradient => |gradient| {
-            if (gradient.stops.len == 0) return false;
-            for (gradient.stops) |stop| if (stop.color.a < 1) return false;
+            const stops = switch (gradient) {
+                .linear => |value| value.stops,
+                .radial => |value| value.stops,
+                .conic => |value| value.stops,
+            };
+            if (stops.len == 0) return false;
+            for (stops) |stop| if (stop.color.a < 1) return false;
             return true;
         },
         else => {},

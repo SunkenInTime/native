@@ -986,11 +986,11 @@ test "panel chrome resolves a box-relative linear gradient after layout" {
         .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },
         .{ .offset = 1, .color = Color.rgb8(217, 70, 239) },
     };
-    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .linear = .{
         .start = .{ .x = 0, .y = 0.5 },
         .end = .{ .x = 1, .y = 0.5 },
         .stops = &stops,
-    } }};
+    } } }};
     const panel = Widget{
         .id = 10,
         .kind = .panel,
@@ -1018,6 +1018,66 @@ test "panel chrome resolves a box-relative linear gradient after layout" {
     return error.TestUnexpectedResult;
 }
 
+test "panel chrome resolves box-relative radial and conic gradients after layout" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },
+        .{ .offset = 1, .color = Color.rgb8(217, 70, 239) },
+    };
+    const radial_effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .radial = .{
+        .center = .{ .x = 0.25, .y = 0.5 },
+        .radii = .{ .width = 0.5, .height = 0.25 },
+        .stops = &stops,
+        .spread = .repeat,
+        .interpolation = .oklab,
+    } } }};
+    const conic_effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .conic = .{
+        .center = .{ .x = 0.75, .y = 0.5 },
+        .start_angle_radians = 0.75,
+        .stops = &stops,
+        .spread = .reflect,
+        .interpolation = .srgb,
+    } } }};
+    const effects = [_][]const canvas.ImmediateCanvasCommand{ &radial_effects, &conic_effects };
+
+    for (effects, 0..) |panel_effects, index| {
+        const panel = Widget{
+            .id = 20 + index,
+            .kind = .panel,
+            .frame = geometry.RectF.init(12, 20, 80, 40),
+            .immediate_commands = panel_effects,
+        };
+        var commands: [4]CanvasCommand = undefined;
+        var builder = Builder.init(&commands);
+        try emitWidgetTree(&builder, panel, .{});
+        var found = false;
+        for (builder.displayList().commands) |command| switch (command) {
+            .fill_rounded_rect => |rounded| {
+                if (index == 0) switch (rounded.fill) {
+                    .radial_gradient => |gradient| {
+                        try std.testing.expectEqualDeep(geometry.PointF.init(32, 40), gradient.center);
+                        try std.testing.expectEqualDeep(geometry.SizeF.init(40, 10), gradient.radii);
+                        try std.testing.expectEqual(drawing_model.GradientSpread.repeat, gradient.spread);
+                        try std.testing.expectEqual(drawing_model.GradientInterpolation.oklab, gradient.interpolation);
+                        found = true;
+                    },
+                    else => {},
+                } else switch (rounded.fill) {
+                    .conic_gradient => |gradient| {
+                        try std.testing.expectEqualDeep(geometry.PointF.init(72, 40), gradient.center);
+                        try std.testing.expectEqual(@as(f32, 0.75), gradient.start_angle_radians);
+                        try std.testing.expectEqual(drawing_model.GradientSpread.reflect, gradient.spread);
+                        try std.testing.expectEqual(drawing_model.GradientInterpolation.srgb, gradient.interpolation);
+                        found = true;
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        };
+        try std.testing.expect(found);
+    }
+}
+
 test "pressed solid background overrides a retained widget gradient" {
     const stops = [_]GradientStop{
         .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },
@@ -1025,11 +1085,11 @@ test "pressed solid background overrides a retained widget gradient" {
     };
     const pressed = Color.rgb8(30, 41, 59);
     const effects = [_]canvas.ImmediateCanvasCommand{
-        .{ .background_gradient = .{
+        .{ .background_gradient = .{ .linear = .{
             .start = .{ .x = 0, .y = 0.5 },
             .end = .{ .x = 1, .y = 0.5 },
             .stops = &stops,
-        } },
+        } } },
         .{ .pressed_style = .{ .background = pressed } },
     };
     const panel = Widget{

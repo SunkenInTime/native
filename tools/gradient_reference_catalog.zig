@@ -49,22 +49,42 @@ const offset_stops = [_]canvas.GradientStop{
 const single_stop = [_]canvas.GradientStop{
     .{ .offset = 0.4, .color = canvas.Color.rgba8(244, 63, 94, 192) },
 };
+const spectrum_stops = [_]canvas.GradientStop{
+    .{ .offset = 0, .color = canvas.Color.rgb8(239, 68, 68) },
+    .{ .offset = 0.33, .color = canvas.Color.rgb8(250, 204, 21) },
+    .{ .offset = 0.66, .color = canvas.Color.rgb8(34, 197, 94) },
+    .{ .offset = 1, .color = canvas.Color.rgb8(59, 130, 246) },
+};
+const repeating_stops = [_]canvas.GradientStop{
+    .{ .offset = 0, .color = canvas.Color.rgb8(15, 23, 42) },
+    .{ .offset = 0.12, .color = canvas.Color.rgb8(15, 23, 42) },
+    .{ .offset = 0.12, .color = canvas.Color.rgb8(56, 189, 248) },
+    .{ .offset = 0.24, .color = canvas.Color.rgb8(56, 189, 248) },
+};
 
 const Scene = struct {
     name: []const u8,
-    start: geometry.PointF,
-    end: geometry.PointF,
-    stops: []const canvas.GradientStop,
+    gradient: canvas.WidgetGradient,
+
+    fn kind(self: Scene) []const u8 {
+        return @tagName(self.gradient);
+    }
 };
 
 const scenes = [_]Scene{
-    .{ .name = "opaque-horizontal", .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &opaque_stops },
-    .{ .name = "transparent-horizontal", .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &transparent_stops },
-    .{ .name = "sharp-stop", .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &sharp_stops },
-    .{ .name = "arbitrary-angle", .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &offset_stops },
-    .{ .name = "degenerate-line", .start = geometry.PointF.init(0.5, 0.5), .end = geometry.PointF.init(0.5, 0.5), .stops = &opaque_stops },
-    .{ .name = "single-stop", .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &single_stop },
-    .{ .name = "empty-stops", .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &.{} },
+    .{ .name = "opaque-horizontal", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &opaque_stops } } },
+    .{ .name = "transparent-horizontal", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &transparent_stops } } },
+    .{ .name = "oklab-horizontal", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &opaque_stops, .interpolation = .oklab } } },
+    .{ .name = "sharp-stop", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &sharp_stops } } },
+    .{ .name = "arbitrary-angle", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &offset_stops } } },
+    .{ .name = "repeating-linear", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &repeating_stops, .spread = .repeat, .interpolation = .srgb } } },
+    .{ .name = "radial-ellipse", .gradient = .{ .radial = .{ .center = geometry.PointF.init(0.5, 0.5), .radii = geometry.SizeF.init(0.5, 0.5), .stops = &spectrum_stops, .interpolation = .oklab } } },
+    .{ .name = "repeating-radial", .gradient = .{ .radial = .{ .center = geometry.PointF.init(0.5, 0.5), .radii = geometry.SizeF.init(0.5, 0.5), .stops = &repeating_stops, .spread = .repeat, .interpolation = .srgb } } },
+    .{ .name = "conic", .gradient = .{ .conic = .{ .center = geometry.PointF.init(0.5, 0.5), .start_angle_radians = -@as(f32, std.math.pi) / 2, .stops = &spectrum_stops, .interpolation = .oklab } } },
+    .{ .name = "repeating-conic", .gradient = .{ .conic = .{ .center = geometry.PointF.init(0.5, 0.5), .start_angle_radians = -@as(f32, std.math.pi) / 2, .stops = &repeating_stops, .spread = .repeat, .interpolation = .srgb } } },
+    .{ .name = "degenerate-line", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0.5, 0.5), .end = geometry.PointF.init(0.5, 0.5), .stops = &opaque_stops } } },
+    .{ .name = "single-stop", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &single_stop } } },
+    .{ .name = "empty-stops", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &.{} } } },
 };
 
 const CatalogApp = struct {
@@ -107,11 +127,7 @@ fn renderScene(
         .frame = geometry.RectF.init(0, 0, width, height),
     });
 
-    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{
-        .start = scene.start,
-        .end = scene.end,
-        .stops = scene.stops,
-    } }};
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = scene.gradient }};
     const root = canvas.Widget{
         .id = 1,
         .kind = .panel,
@@ -191,6 +207,8 @@ pub fn main(init: std.process.Init) !void {
         try js.beginObject();
         try js.objectField("name");
         try js.write(scene.name);
+        try js.objectField("kind");
+        try js.write(scene.kind());
         try js.objectField("png");
         try js.write(try std.fmt.allocPrint(arena, "{s}.png", .{scene.name}));
         try js.objectField("width");

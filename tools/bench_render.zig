@@ -606,16 +606,16 @@ const gradient_grid_stops_b = [_]canvas.GradientStop{
     .{ .offset = 0.73, .color = canvas.Color.rgb8(14, 165, 233) },
     .{ .offset = 1, .color = canvas.Color.rgb8(16, 185, 129) },
 };
-const gradient_grid_commands_a = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{
+const gradient_grid_commands_a = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .linear = .{
     .start = geometry.PointF.init(0, 0),
     .end = geometry.PointF.init(1, 1),
     .stops = &gradient_grid_stops_a,
-} }};
-const gradient_grid_commands_b = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{
+} } }};
+const gradient_grid_commands_b = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .linear = .{
     .start = geometry.PointF.init(1, 0),
     .end = geometry.PointF.init(0, 1),
     .stops = &gradient_grid_stops_b,
-} }};
+} } }};
 
 const GradientGridMsg = union(enum) {
     toggle,

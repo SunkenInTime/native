@@ -23,6 +23,8 @@ const Affine = support.Affine;
 const Radius = support.Radius;
 const GradientStop = support.GradientStop;
 const LinearGradient = support.LinearGradient;
+const RadialGradient = support.RadialGradient;
+const ConicGradient = support.ConicGradient;
 const Fill = support.Fill;
 const Stroke = support.Stroke;
 const Clip = support.Clip;
@@ -616,6 +618,59 @@ test "render batch plan groups adjacent commands by pipeline and state" {
     // Text command bounds carry the ink allowance (right 0.35em,
     // bottom/left 0.1em) past the metric box.
     try expectRectApprox(geometry.RectF.init(0, 0, 87.684, 22.2), batch_plan.bounds);
+}
+
+test "radial and conic gradients keep distinct pipelines resources and gpu paints" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgba8(255, 255, 255, 128) },
+        .{ .offset = 1, .color = Color.rgb8(37, 99, 235) },
+    };
+    const radial = RadialGradient{
+        .center = geometry.PointF.init(20, 20),
+        .radii = geometry.SizeF.init(20, 12),
+        .stops = &stops,
+        .spread = .repeat,
+        .interpolation = .oklab,
+    };
+    const conic = ConicGradient{
+        .center = geometry.PointF.init(64, 20),
+        .start_angle_radians = 0.75,
+        .stops = &stops,
+        .spread = .reflect,
+        .interpolation = .srgb,
+    };
+    const commands = [_]CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 40, 40), .fill = .{ .radial_gradient = radial } } },
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(44, 0, 40, 40), .fill = .{ .conic_gradient = conic } } },
+    };
+
+    var render_commands: [2]RenderCommand = undefined;
+    const render_plan = try (DisplayList{ .commands = &commands }).renderPlan(&render_commands);
+    var batches: [2]RenderBatch = undefined;
+    const batch_plan = try render_plan.batchPlan(&batches);
+    try std.testing.expectEqual(@as(usize, 2), batch_plan.batchCount());
+    try std.testing.expectEqual(RenderPipelineKind.radial_gradient, batch_plan.batches[0].pipeline);
+    try std.testing.expectEqual(RenderPipelineKind.conic_gradient, batch_plan.batches[1].pipeline);
+
+    var resources: [2]RenderResource = undefined;
+    const resource_plan = try (DisplayList{ .commands = &commands }).resourcePlan(&resources);
+    try std.testing.expectEqual(RenderResourceKind.radial_gradient, resource_plan.resources[0].kind);
+    try std.testing.expectEqual(RenderResourceKind.conic_gradient, resource_plan.resources[1].kind);
+    try std.testing.expectEqual(@as(usize, 2), resource_plan.resources[0].gradient_stop_count);
+    try std.testing.expectEqual(@as(usize, 2), resource_plan.resources[1].gradient_stop_count);
+
+    const radial_gpu = canvas.canvasGpuCommandFromRenderCommand(render_plan.commands[0], 0);
+    const conic_gpu = canvas.canvasGpuCommandFromRenderCommand(render_plan.commands[1], 1);
+    try std.testing.expectEqual(@as(?RenderPipelineKind, .radial_gradient), radial_gpu.pipeline);
+    try std.testing.expectEqual(@as(?RenderPipelineKind, .conic_gradient), conic_gpu.pipeline);
+    switch (radial_gpu.paint) {
+        .radial_gradient => |gradient| try std.testing.expectEqualDeep(radial, gradient),
+        else => return error.TestExpectedEqual,
+    }
+    switch (conic_gpu.paint) {
+        .conic_gradient => |gradient| try std.testing.expectEqualDeep(conic, gradient),
+        else => return error.TestExpectedEqual,
+    }
 }
 
 test "render batch plan respects clip opacity and output limits" {

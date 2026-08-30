@@ -22,7 +22,11 @@ const Color = support.Color;
 const Affine = support.Affine;
 const Radius = support.Radius;
 const GradientStop = support.GradientStop;
+const GradientSpread = support.GradientSpread;
+const GradientInterpolation = support.GradientInterpolation;
 const LinearGradient = support.LinearGradient;
+const RadialGradient = support.RadialGradient;
+const ConicGradient = support.ConicGradient;
 const Fill = support.Fill;
 const Stroke = support.Stroke;
 const Clip = support.Clip;
@@ -365,6 +369,156 @@ const expectLayoutFrame = support.expectLayoutFrame;
 const expectRouteEntry = support.expectRouteEntry;
 const expectFillColor = support.expectFillColor;
 const expectGpuPaintColor = support.expectGpuPaintColor;
+
+fn renderFillSample(fill: Fill, width: usize, height: usize, x: usize, y: usize) ![4]u8 {
+    const byte_len = width * height * 4;
+    const pixels = try std.testing.allocator.alloc(u8, byte_len);
+    defer std.testing.allocator.free(pixels);
+    const rect = geometry.RectF.init(0, 0, @floatFromInt(width), @floatFromInt(height));
+    const commands = [_]RenderCommand{.{
+        .command = .{ .fill_rect = .{ .id = 1, .rect = rect, .fill = fill } },
+        .local_bounds = rect,
+        .bounds = rect,
+    }};
+    const surface = try ReferenceRenderSurface.init(width, height, pixels);
+    surface.clear(Color.rgba(0, 0, 0, 0));
+    try surface.renderPass(.{ .dirty_bounds = rect, .commands = &commands }, Color.rgba(0, 0, 0, 0));
+    return surface.pixelRgba8(x, y);
+}
+
+test "gradient interpolation uses explicit spaces and premultiplied alpha" {
+    const opaque_stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(255, 0, 0) },
+        .{ .offset = 1, .color = Color.rgb8(0, 0, 255) },
+    };
+    const transparent = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgba8(255, 0, 0, 0) },
+        .{ .offset = 1, .color = Color.rgba8(0, 0, 255, 255) },
+    };
+
+    const srgb = try renderFillSample(.{ .linear_gradient = .{
+        .start = geometry.PointF.init(0, 0),
+        .end = geometry.PointF.init(1, 0),
+        .stops = &opaque_stops,
+        .interpolation = .srgb,
+    } }, 1, 1, 0, 0);
+    try std.testing.expectEqual([4]u8{ 128, 0, 128, 255 }, srgb);
+
+    const linear = try renderFillSample(.{ .linear_gradient = .{
+        .start = geometry.PointF.init(0, 0),
+        .end = geometry.PointF.init(1, 0),
+        .stops = &opaque_stops,
+        .interpolation = .srgb_linear,
+    } }, 1, 1, 0, 0);
+    try std.testing.expectEqual([4]u8{ 188, 0, 188, 255 }, linear);
+
+    const oklab = try renderFillSample(.{ .linear_gradient = .{
+        .start = geometry.PointF.init(0, 0),
+        .end = geometry.PointF.init(1, 0),
+        .stops = &opaque_stops,
+        .interpolation = .oklab,
+    } }, 1, 1, 0, 0);
+    try std.testing.expectEqual([4]u8{ 140, 83, 162, 255 }, oklab);
+
+    const alpha = try renderFillSample(.{ .linear_gradient = .{
+        .start = geometry.PointF.init(0, 0),
+        .end = geometry.PointF.init(1, 0),
+        .stops = &transparent,
+        .interpolation = .srgb,
+    } }, 1, 1, 0, 0);
+    // Straight-alpha interpolation would leave red in this midpoint. CSS's
+    // premultiplied rule makes the transparent endpoint contribute no hue.
+    try std.testing.expectEqual([4]u8{ 0, 0, 255, 128 }, alpha);
+}
+
+test "reference renderer samples radial and conic geometry analytically" {
+    const radial_stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(255, 0, 0) },
+        .{ .offset = 1, .color = Color.rgb8(0, 0, 255) },
+    };
+    const radial: Fill = .{ .radial_gradient = .{
+        .center = geometry.PointF.init(0.5, 0.5),
+        .radii = geometry.SizeF.init(2, 1),
+        .stops = &radial_stops,
+        .interpolation = .srgb,
+    } };
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, try renderFillSample(radial, 3, 1, 0, 0));
+    try std.testing.expectEqual([4]u8{ 128, 0, 128, 255 }, try renderFillSample(radial, 3, 1, 1, 0));
+    try std.testing.expectEqual([4]u8{ 0, 0, 255, 255 }, try renderFillSample(radial, 3, 1, 2, 0));
+
+    const conic_stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(255, 0, 0) },
+        .{ .offset = 0.25, .color = Color.rgb8(0, 255, 0) },
+        .{ .offset = 0.5, .color = Color.rgb8(0, 0, 255) },
+        .{ .offset = 0.75, .color = Color.rgb8(255, 255, 255) },
+        .{ .offset = 1, .color = Color.rgb8(255, 0, 0) },
+    };
+    const conic: Fill = .{ .conic_gradient = .{
+        .center = geometry.PointF.init(1.5, 1.5),
+        .stops = &conic_stops,
+        .interpolation = .srgb,
+    } };
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, try renderFillSample(conic, 3, 3, 2, 1));
+    try std.testing.expectEqual([4]u8{ 0, 255, 0, 255 }, try renderFillSample(conic, 3, 3, 1, 2));
+    try std.testing.expectEqual([4]u8{ 0, 0, 255, 255 }, try renderFillSample(conic, 3, 3, 0, 1));
+    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, try renderFillSample(conic, 3, 3, 1, 0));
+}
+
+test "gradient spread repeats reflects and fixes descending stops" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(255, 0, 0) },
+        .{ .offset = 1, .color = Color.rgb8(0, 0, 255) },
+    };
+    const repeat: Fill = .{ .linear_gradient = .{
+        .start = geometry.PointF.init(0, 0),
+        .end = geometry.PointF.init(2, 0),
+        .stops = &stops,
+        .spread = .repeat,
+        .interpolation = .srgb,
+    } };
+    try std.testing.expectEqual([4]u8{ 191, 0, 64, 255 }, try renderFillSample(repeat, 4, 1, 0, 0));
+    try std.testing.expectEqual([4]u8{ 64, 0, 191, 255 }, try renderFillSample(repeat, 4, 1, 1, 0));
+    try std.testing.expectEqual([4]u8{ 191, 0, 64, 255 }, try renderFillSample(repeat, 4, 1, 2, 0));
+
+    const reflect: Fill = .{ .linear_gradient = .{
+        .start = geometry.PointF.init(0, 0),
+        .end = geometry.PointF.init(2, 0),
+        .stops = &stops,
+        .spread = .reflect,
+        .interpolation = .srgb,
+    } };
+    try std.testing.expectEqual([4]u8{ 64, 0, 191, 255 }, try renderFillSample(reflect, 4, 1, 2, 0));
+    try std.testing.expectEqual([4]u8{ 191, 0, 64, 255 }, try renderFillSample(reflect, 4, 1, 3, 0));
+
+    const descending = [_]GradientStop{
+        .{ .offset = 0.7, .color = Color.rgb8(255, 0, 0) },
+        .{ .offset = 0.2, .color = Color.rgb8(0, 255, 0) },
+        .{ .offset = 1, .color = Color.rgb8(0, 0, 255) },
+    };
+    const fixed: Fill = .{ .linear_gradient = .{
+        .start = geometry.PointF.init(0, 0),
+        .end = geometry.PointF.init(5, 0),
+        .stops = &descending,
+        .interpolation = .srgb,
+    } };
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, try renderFillSample(fixed, 5, 1, 2, 0));
+    // x=3 samples t=.7 exactly: the descending green stop is fixed up to
+    // the previous red stop's position and the later stop wins the edge.
+    try std.testing.expectEqual([4]u8{ 0, 255, 0, 255 }, try renderFillSample(fixed, 5, 1, 3, 0));
+
+    const zero_period = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(255, 0, 0) },
+        .{ .offset = 0, .color = Color.rgb8(0, 0, 255) },
+    };
+    const degenerate: Fill = .{ .linear_gradient = .{
+        .start = geometry.PointF.init(0, 0),
+        .end = geometry.PointF.init(1, 0),
+        .stops = &zero_period,
+        .spread = .repeat,
+        .interpolation = .srgb,
+    } };
+    try std.testing.expectEqual([4]u8{ 128, 0, 128, 255 }, try renderFillSample(degenerate, 1, 1, 0, 0));
+}
 
 test "reference renderer clears and fills solid rect render pass" {
     const commands = [_]CanvasCommand{.{ .fill_rect = .{

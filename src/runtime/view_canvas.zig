@@ -76,6 +76,8 @@ pub const CanvasResourceCounts = struct {
         switch (fill) {
             .color => {},
             .linear_gradient => |gradient| try addCanvasCount(&self.gradient_stop_count, gradient.stops.len, max_canvas_gradient_stops_per_view, error.CanvasGradientStopLimitReached),
+            .radial_gradient => |gradient| try addCanvasCount(&self.gradient_stop_count, gradient.stops.len, max_canvas_gradient_stops_per_view, error.CanvasGradientStopLimitReached),
+            .conic_gradient => |gradient| try addCanvasCount(&self.gradient_stop_count, gradient.stops.len, max_canvas_gradient_stops_per_view, error.CanvasGradientStopLimitReached),
         }
     }
 };
@@ -158,6 +160,22 @@ pub const CanvasDisplayListScratch = struct {
                 .start = gradient.start,
                 .end = gradient.end,
                 .stops = try self.copyCanvasGradientStops(gradient.stops),
+                .spread = gradient.spread,
+                .interpolation = gradient.interpolation,
+            } },
+            .radial_gradient => |gradient| .{ .radial_gradient = .{
+                .center = gradient.center,
+                .radii = gradient.radii,
+                .stops = try self.copyCanvasGradientStops(gradient.stops),
+                .spread = gradient.spread,
+                .interpolation = gradient.interpolation,
+            } },
+            .conic_gradient => |gradient| .{ .conic_gradient = .{
+                .center = gradient.center,
+                .start_angle_radians = gradient.start_angle_radians,
+                .stops = try self.copyCanvasGradientStops(gradient.stops),
+                .spread = gradient.spread,
+                .interpolation = gradient.interpolation,
             } },
         };
     }
@@ -840,6 +858,22 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
                     .start = gradient.start,
                     .end = gradient.end,
                     .stops = try self.copyCanvasGradientStops(gradient.stops),
+                    .spread = gradient.spread,
+                    .interpolation = gradient.interpolation,
+                } },
+                .radial_gradient => |gradient| .{ .radial_gradient = .{
+                    .center = gradient.center,
+                    .radii = gradient.radii,
+                    .stops = try self.copyCanvasGradientStops(gradient.stops),
+                    .spread = gradient.spread,
+                    .interpolation = gradient.interpolation,
+                } },
+                .conic_gradient => |gradient| .{ .conic_gradient = .{
+                    .center = gradient.center,
+                    .start_angle_radians = gradient.start_angle_radians,
+                    .stops = try self.copyCanvasGradientStops(gradient.stops),
+                    .spread = gradient.spread,
+                    .interpolation = gradient.interpolation,
                 } },
             };
         }

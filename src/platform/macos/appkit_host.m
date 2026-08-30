@@ -2458,6 +2458,10 @@ static BOOL NativeSdkPacketDrawPaintedPath(NSBezierPath *path, NSDictionary *pai
         return YES;
     }
     if ([kind isEqualToString:@"linear_gradient"]) {
+        // NSGradient does not expose Weaver's repeat/reflect or interpolation
+        // contracts. Refuse those paints so the runtime uses its verified
+        // reference fallback instead of presenting subtly different pixels.
+        if (paint[@"spread"] || paint[@"interpolation"]) return NO;
         NSArray *stops = NativeSdkPacketArray(paint[@"stops"], 1);
         if (!stops) return NO;
         NSUInteger count = MIN(stops.count, 16);
@@ -3601,7 +3605,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
 }
 
 /* ---------------------------------------------------------------------------
- * Compact binary gpu-surface packet decoding (wire format v7).
+ * Compact binary gpu-surface packet decoding (wire format v8).
  *
  * Little-endian, length-prefixed, mirror of the engine's binary packet
  * encoder (serialization.zig, `writeCanvasGpuPacketBinary` and the patch
@@ -3618,7 +3622,8 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
  * scissor; v4 added the per-command stroke end-cap code after
  * stroke_width; v5 added optional text shadows and the shadow-effect inset
  * flag; v6 adds four per-corner radii after every present command clip;
- * v7 adds an image tile byte after the sampling code.
+ * v7 adds an image tile byte after the sampling code; v8 adds radial and
+ * conic paint tags plus explicit gradient spread and interpolation codes.
  * The version this comment names and the encoder's spec
  * comment must agree with `binary_packet_version` (serialization.zig);
  * the `test-wire-format-version-prose` build check pins all three.
@@ -3793,9 +3798,21 @@ static NSDictionary *NativeSdkBinaryReadPaint(NativeSdkBinaryPacketReader *reade
         if (!color) return nil;
         return @{ @"kind" : @"color", @"color" : color };
     }
-    case 2: {
-        NSArray *start = NativeSdkBinaryReadF32Array(reader, 2);
-        NSArray *end = NativeSdkBinaryReadF32Array(reader, 2);
+    case 2:
+    case 3:
+    case 4: {
+        NSArray *first = NativeSdkBinaryReadF32Array(reader, 2);
+        id second = tag == 2
+            ? NativeSdkBinaryReadF32Array(reader, 2)
+            : (tag == 3
+                ? NativeSdkBinaryReadF32Array(reader, 2)
+                : NativeSdkBinaryReadF32Number(reader));
+        uint8_t spreadCode = NativeSdkBinaryReadU8(reader);
+        uint8_t interpolationCode = NativeSdkBinaryReadU8(reader);
+        if (spreadCode > 2 || interpolationCode > 2) {
+            reader->failed = YES;
+            return nil;
+        }
         uint32_t stopCount = NativeSdkBinaryReadU32(reader);
         if (reader->failed || stopCount > reader->length - reader->offset) {
             reader->failed = YES;
@@ -3808,8 +3825,25 @@ static NSDictionary *NativeSdkBinaryReadPaint(NativeSdkBinaryPacketReader *reade
             if (!color) return nil;
             [stops addObject:@{ @"offset" : offset, @"color" : color }];
         }
-        if (!start || !end) return nil;
-        return @{ @"kind" : @"linear_gradient", @"start" : start, @"end" : end, @"stops" : stops };
+        if (!first || !second) return nil;
+        NSMutableDictionary *paint = [NSMutableDictionary dictionary];
+        if (tag == 2) {
+            paint[@"kind"] = @"linear_gradient";
+            paint[@"start"] = first;
+            paint[@"end"] = second;
+        } else if (tag == 3) {
+            paint[@"kind"] = @"radial_gradient";
+            paint[@"center"] = first;
+            paint[@"radii"] = second;
+        } else {
+            paint[@"kind"] = @"conic_gradient";
+            paint[@"center"] = first;
+            paint[@"startAngle"] = second;
+        }
+        paint[@"stops"] = stops;
+        if (spreadCode != 0) paint[@"spread"] = spreadCode == 1 ? @"repeat" : @"reflect";
+        if (interpolationCode != 1) paint[@"interpolation"] = interpolationCode == 0 ? @"srgb" : @"oklab";
+        return paint;
     }
     default:
         reader->failed = YES;
@@ -4021,7 +4055,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (memcmp(bytes, "NSGP", 4) != 0) return nil;
     reader.offset = 4;
     uint8_t version = NativeSdkBinaryReadU8(&reader);
-    if (version != 7) return nil;
+    if (version != 8) return nil;
     uint8_t loadActionCode = NativeSdkBinaryReadU8(&reader);
     uint8_t packetFlags = NativeSdkBinaryReadU8(&reader);
     (void)NativeSdkBinaryReadU8(&reader); /* reserved */

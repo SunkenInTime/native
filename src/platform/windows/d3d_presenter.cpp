@@ -41,8 +41,9 @@ struct Instance {
     F4 color;
     F4 shape; // radius, kind (0 rounded rect / 1 line), x1, y1
     F4 extra; // x2, y2, thickness, unused
-    F4 gradient; // start x/y, end x/y
-    F4 paint; // kind (0 color / 1 linear gradient), stop offset/count, opacity
+    F4 gradient; // linear start/end; radial center/radii; conic center/start angle
+    F4 gradient_options; // spread (pad/repeat/reflect), interpolation, unused
+    F4 paint; // kind (0 color / 1 linear / 2 radial / 3 conic), stop offset/count, opacity
 };
 
 struct GradientStopInstance {
@@ -50,7 +51,7 @@ struct GradientStopInstance {
     F4 data; // offset, unused
 };
 
-static_assert(sizeof(Instance) == 96);
+static_assert(sizeof(Instance) == 112);
 static_assert(sizeof(GradientStopInstance) == 32);
 
 struct RetainedCommand {
@@ -60,7 +61,7 @@ struct RetainedCommand {
 
 // Must match serialization.zig `binary_packet_version`; the build-time
 // wire-format ratchet checks this independently of the macOS decoder.
-static constexpr uint8_t kBinaryPacketVersion = 7;
+static constexpr uint8_t kBinaryPacketVersion = 8;
 // Matches canvas_limits.max_canvas_gradient_stops_per_view. Keep the decoder
 // bound even though the runtime already applies the same aggregate budget.
 static constexpr uint32_t kMaxGradientStopsPerSurface = 64;
@@ -109,11 +110,18 @@ bool readPaint(PacketReader &reader, Instance *instance,
         instance->paint = {};
         return readColor(reader, &instance->color);
     }
-    if (tag == 2) {
+    if (tag >= 2 && tag <= 4) {
         if (!reader.f32(&instance->gradient.x) ||
-            !reader.f32(&instance->gradient.y) ||
-            !reader.f32(&instance->gradient.z) ||
-            !reader.f32(&instance->gradient.w)) return false;
+            !reader.f32(&instance->gradient.y)) return false;
+        if (tag == 2 || tag == 3) {
+            if (!reader.f32(&instance->gradient.z) ||
+                !reader.f32(&instance->gradient.w)) return false;
+        } else if (!reader.f32(&instance->gradient.z)) {
+            return false;
+        }
+        uint8_t spread = 0, interpolation = 0;
+        if (!reader.u8(&spread) || spread > 2 ||
+            !reader.u8(&interpolation) || interpolation > 2) return false;
         uint32_t count = 0;
         if (!reader.u32(&count) || count > kMaxGradientStopsPerSurface) return false;
         gradient_stops->reserve(count);
@@ -123,7 +131,12 @@ bool readPaint(PacketReader &reader, Instance *instance,
                 !readStraightColor(reader, &stop.color)) return false;
             gradient_stops->push_back(stop);
         }
-        instance->paint = { 1.0f, 0.0f, static_cast<float>(count), 1.0f };
+        instance->gradient_options = {
+            static_cast<float>(spread), static_cast<float>(interpolation), 0, 0
+        };
+        instance->paint = {
+            static_cast<float>(tag - 1), 0.0f, static_cast<float>(count), 1.0f
+        };
         return true;
     }
     return false;
@@ -241,6 +254,7 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     for (Instance &instance : instances) {
         instance.color = base.color;
         instance.gradient = base.gradient;
+        instance.gradient_options = base.gradient_options;
         instance.paint = base.paint;
     }
     out->instances = std::move(instances);
@@ -251,16 +265,16 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
 }
 
 const char *shaderSource = R"(
-struct Instance { float4 rect; float4 color; float4 shape; float4 extra; float4 gradient; float4 paint; };
+struct Instance { float4 rect; float4 color; float4 shape; float4 extra; float4 gradient; float4 gradientOptions; float4 paint; };
 struct GradientStopInstance { float4 color; float4 data; };
 StructuredBuffer<Instance> instances : register(t0);
 StructuredBuffer<GradientStopInstance> gradientStops : register(t1);
-struct Out { float4 position:SV_POSITION; float2 pixel:TEXCOORD0; nointerpolation float4 rect:TEXCOORD1; nointerpolation float4 color:COLOR0; nointerpolation float4 shape:TEXCOORD2; nointerpolation float4 extra:TEXCOORD3; nointerpolation float4 gradient:TEXCOORD4; nointerpolation float4 paint:TEXCOORD5; };
+struct Out { float4 position:SV_POSITION; float2 pixel:TEXCOORD0; nointerpolation float4 rect:TEXCOORD1; nointerpolation float4 color:COLOR0; nointerpolation float4 shape:TEXCOORD2; nointerpolation float4 extra:TEXCOORD3; nointerpolation float4 gradient:TEXCOORD4; nointerpolation float4 gradientOptions:TEXCOORD5; nointerpolation float4 paint:TEXCOORD6; };
 cbuffer Surface : register(b0) { float2 surface; float2 padding; };
 Out vsMain(uint vertex:SV_VertexID, uint instance:SV_InstanceID) {
   const float2 corners[6] = { float2(0,0),float2(1,0),float2(0,1),float2(0,1),float2(1,0),float2(1,1) };
   Instance i=instances[instance]; float2 p=i.rect.xy+corners[vertex]*i.rect.zw;
-  Out o; o.position=float4(p.x/surface.x*2-1,1-p.y/surface.y*2,0,1); o.pixel=p; o.rect=i.rect; o.color=i.color; o.shape=i.shape; o.extra=i.extra; o.gradient=i.gradient; o.paint=i.paint; return o;
+  Out o; o.position=float4(p.x/surface.x*2-1,1-p.y/surface.y*2,0,1); o.pixel=p; o.rect=i.rect; o.color=i.color; o.shape=i.shape; o.extra=i.extra; o.gradient=i.gradient; o.gradientOptions=i.gradientOptions; o.paint=i.paint; return o;
 }
 float srgbToLinear(float value) {
   value=saturate(value);
@@ -273,30 +287,102 @@ float linearToSrgb(float value) {
 float4 premultiply(float4 color) {
   return float4(color.rgb*color.a,color.a);
 }
-float4 mixGradientColors(float4 a,float4 b,float amount) {
-  float3 aLinear=float3(srgbToLinear(a.r),srgbToLinear(a.g),srgbToLinear(a.b));
-  float3 bLinear=float3(srgbToLinear(b.r),srgbToLinear(b.g),srgbToLinear(b.b));
-  float3 mixedLinear=lerp(aLinear,bLinear,amount);
-  float3 mixed=float3(linearToSrgb(mixedLinear.r),linearToSrgb(mixedLinear.g),linearToSrgb(mixedLinear.b));
+float signedCubeRoot(float value) {
+  return sign(value)*pow(abs(value),1.0/3.0);
+}
+float3 linearSrgbToOklab(float3 rgb) {
+  float l=0.4122214708*rgb.r+0.5363325363*rgb.g+0.0514459929*rgb.b;
+  float m=0.2119034982*rgb.r+0.6806995451*rgb.g+0.1073969566*rgb.b;
+  float s=0.0883024619*rgb.r+0.2817188376*rgb.g+0.6299787005*rgb.b;
+  float3 roots=float3(signedCubeRoot(l),signedCubeRoot(m),signedCubeRoot(s));
+  return float3(
+    0.2104542553*roots.x+0.7936177850*roots.y-0.0040720468*roots.z,
+    1.9779984951*roots.x-2.4285922050*roots.y+0.4505937099*roots.z,
+    0.0259040371*roots.x+0.7827717662*roots.y-0.8086757660*roots.z);
+}
+float3 oklabToLinearSrgb(float3 lab) {
+  float3 roots=float3(
+    lab.x+0.3963377774*lab.y+0.2158037573*lab.z,
+    lab.x-0.1055613458*lab.y-0.0638541728*lab.z,
+    lab.x-0.0894841775*lab.y-1.2914855480*lab.z);
+  float3 lms=roots*roots*roots;
+  return float3(
+    4.0767416621*lms.x-3.3077115913*lms.y+0.2309699292*lms.z,
+    -1.2684380046*lms.x+2.6097574011*lms.y-0.3413193965*lms.z,
+    -0.0041960863*lms.x-0.7034186147*lms.y+1.7076147010*lms.z);
+}
+float3 gradientColorToSpace(float3 color,float interpolation) {
+  if (interpolation<0.5) return color;
+  float3 linear=float3(srgbToLinear(color.r),srgbToLinear(color.g),srgbToLinear(color.b));
+  return interpolation<1.5 ? linear : linearSrgbToOklab(linear);
+}
+float3 gradientColorFromSpace(float3 color,float interpolation) {
+  if (interpolation<0.5) return saturate(color);
+  float3 linear=interpolation<1.5 ? color : oklabToLinearSrgb(color);
+  return saturate(float3(linearToSrgb(linear.r),linearToSrgb(linear.g),linearToSrgb(linear.b)));
+}
+float4 mixGradientColors(float4 a,float4 b,float amount,float interpolation) {
   float alpha=lerp(a.a,b.a,amount);
+  if (alpha<=0.000001) return float4(0,0,0,0);
+  float3 aSpace=gradientColorToSpace(a.rgb,interpolation)*a.a;
+  float3 bSpace=gradientColorToSpace(b.rgb,interpolation)*b.a;
+  float3 mixed=gradientColorFromSpace(lerp(aSpace,bSpace,amount)/alpha,interpolation);
   return float4(mixed*alpha,alpha);
 }
-float4 sampleLinearGradient(Out i) {
+float gradientParameter(Out i) {
+  if (i.paint.x<1.5) {
+    float2 start=i.gradient.xy, direction=i.gradient.zw-start;
+    float lengthSquared=dot(direction,direction);
+    return lengthSquared<=0.000001 ? 0 : dot(i.pixel-start,direction)/lengthSquared;
+  }
+  if (i.paint.x<2.5) {
+    float2 delta=i.pixel-i.gradient.xy, radii=i.gradient.zw;
+    if (abs(radii.x*radii.y)<=0.000001)
+      return dot(delta,delta)<=0.000001 ? 0 : 1.0e20;
+    float2 local=delta/radii;
+    return length(local);
+  }
+  float2 delta=i.pixel-i.gradient.xy;
+  float angle=dot(delta,delta)<=0.000001 ? i.gradient.z : atan2(delta.y,delta.x);
+  float turn=(angle-i.gradient.z)/(2.0*3.14159265358979323846);
+  return turn-floor(turn);
+}
+float applyGradientSpread(float t,float firstOffset,float lastOffset,float spread) {
+  if (spread<0.5) return t;
+  float interval=lastOffset-firstOffset;
+  if (interval<=0.000001 || abs(t)>1.0e15) return firstOffset;
+  float unit=(t-firstOffset)/interval;
+  if (spread<1.5) return firstOffset+(unit-floor(unit))*interval;
+  float doubled=unit-floor(unit/2.0)*2.0;
+  float reflected=doubled<=1.0 ? doubled : 2.0-doubled;
+  return firstOffset+reflected*interval;
+}
+float4 sampleGradient(Out i) {
   uint first=(uint)i.paint.y, count=(uint)i.paint.z;
   if (count==0) return float4(0,0,0,0);
-  float2 start=i.gradient.xy, direction=i.gradient.zw-start;
-  float lengthSquared=dot(direction,direction);
-  float t=lengthSquared<=0.000001 ? 0 : dot(i.pixel-start,direction)/lengthSquared;
+  float interpolation=i.gradientOptions.y;
   GradientStopInstance previous=gradientStops[first];
-  if (count==1 || t<=previous.data.x) return premultiply(previous.color)*i.paint.w;
+  if (count==1) return premultiply(previous.color)*i.paint.w;
+  float lastOffset=previous.data.x;
+  [loop] for (uint lastIndex=1;lastIndex<count;++lastIndex)
+    lastOffset=max(lastOffset,gradientStops[first+lastIndex].data.x);
+  if (i.gradientOptions.x>0.5 && lastOffset-previous.data.x<=0.000001) {
+    GradientStopInstance last=gradientStops[first+count-1];
+    return mixGradientColors(previous.color,last.color,0.5,interpolation)*i.paint.w;
+  }
+  float t=applyGradientSpread(gradientParameter(i),previous.data.x,lastOffset,i.gradientOptions.x);
+  float previousOffset=previous.data.x;
+  if (t<previousOffset) return premultiply(previous.color)*i.paint.w;
   [loop] for (uint index=1;index<count;++index) {
     GradientStopInstance next=gradientStops[first+index];
-    if (t<=next.data.x) {
-      float span=next.data.x-previous.data.x;
-      float localAmount=abs(span)<=0.000001 ? 1 : saturate((t-previous.data.x)/span);
-      return mixGradientColors(previous.color,next.color,localAmount)*i.paint.w;
+    float nextOffset=max(previousOffset,next.data.x);
+    if (t<nextOffset) {
+      float span=nextOffset-previousOffset;
+      float localAmount=abs(span)<=0.000001 ? 1 : saturate((t-previousOffset)/span);
+      return mixGradientColors(previous.color,next.color,localAmount,interpolation)*i.paint.w;
     }
     previous=next;
+    previousOffset=nextOffset;
   }
   return premultiply(previous.color)*i.paint.w;
 }
@@ -316,7 +402,7 @@ float4 psMain(Out i):SV_TARGET {
     distance=length(max(q,0))+min(max(q.x,q.y),0)-radius;
   }
   float coverage=saturate(0.5-distance);
-  float4 color=i.paint.x>0.5 ? sampleLinearGradient(i) : i.color;
+  float4 color=i.paint.x>0.5 ? sampleGradient(i) : i.color;
   return color*coverage;
 })";
 
@@ -829,12 +915,19 @@ void appendTestRect(std::vector<uint8_t> *bytes, float x, float y,
     appendTestScalar(bytes, height);
 }
 
-void appendTestGradientPaint(std::vector<uint8_t> *bytes) {
-    appendTestScalar(bytes, static_cast<uint8_t>(2));
+void appendTestGradientPaint(std::vector<uint8_t> *bytes, uint8_t tag,
+    uint8_t spread, uint8_t interpolation) {
+    appendTestScalar(bytes, tag);
     appendTestScalar(bytes, 10.0f);
     appendTestScalar(bytes, 20.0f);
-    appendTestScalar(bytes, 90.0f);
-    appendTestScalar(bytes, 60.0f);
+    if (tag == 2 || tag == 3) {
+        appendTestScalar(bytes, 90.0f);
+        appendTestScalar(bytes, 60.0f);
+    } else {
+        appendTestScalar(bytes, 0.75f);
+    }
+    appendTestScalar(bytes, spread);
+    appendTestScalar(bytes, interpolation);
     appendTestScalar(bytes, static_cast<uint32_t>(3));
     appendTestScalar(bytes, 0.0f);
     appendTestColor(bytes, 1.0f, 0.0f, 0.0f, 0.5f);
@@ -865,7 +958,7 @@ extern "C" int native_sdk_d3d_presenter_tests() {
     appendTestScalar(&bytes, static_cast<uint8_t>(0)); // butt cap
     appendTestScalar(&bytes, static_cast<uint8_t>(1)); // rect
     appendTestRect(&bytes, 10.0f, 20.0f, 80.0f, 40.0f);
-    appendTestGradientPaint(&bytes);
+    appendTestGradientPaint(&bytes, 2, 2, 2);
 
     PacketReader reader{ bytes.data(), bytes.data() + bytes.size() };
     RetainedCommand command;
@@ -881,6 +974,8 @@ extern "C" int native_sdk_d3d_presenter_tests() {
         expect(closeEnough(instance.gradient.y, 20.0f));
         expect(closeEnough(instance.gradient.z, 90.0f));
         expect(closeEnough(instance.gradient.w, 60.0f));
+        expect(closeEnough(instance.gradient_options.x, 2.0f));
+        expect(closeEnough(instance.gradient_options.y, 2.0f));
     }
     if (command.gradient_stops.size() == 3) {
         expect(closeEnough(command.gradient_stops[0].data.x, 0.0f));
@@ -893,16 +988,48 @@ extern "C" int native_sdk_d3d_presenter_tests() {
         expect(closeEnough(command.gradient_stops[0].color.w, 0.5f));
     }
 
+    std::vector<GradientStopInstance> stops;
+    for (uint8_t tag = 3; tag <= 4; ++tag) {
+        bytes.clear();
+        appendTestGradientPaint(&bytes, tag, 1, 0);
+        reader = { bytes.data(), bytes.data() + bytes.size() };
+        Instance gradient_instance = {};
+        stops.clear();
+        expect(readPaint(reader, &gradient_instance, &stops));
+        expect(reader.cursor == reader.end);
+        expect(closeEnough(gradient_instance.paint.x, static_cast<float>(tag - 1)));
+        expect(closeEnough(gradient_instance.gradient_options.x, 1.0f));
+        expect(closeEnough(gradient_instance.gradient_options.y, 0.0f));
+        expect(closeEnough(gradient_instance.gradient.x, 10.0f));
+        expect(closeEnough(gradient_instance.gradient.y, 20.0f));
+        expect(closeEnough(gradient_instance.gradient.z, tag == 3 ? 90.0f : 0.75f));
+        if (tag == 3) expect(closeEnough(gradient_instance.gradient.w, 60.0f));
+        expect(stops.size() == 3);
+    }
+
     bytes.clear();
     appendTestScalar(&bytes, static_cast<uint8_t>(2));
     appendTestScalar(&bytes, 0.0f);
     appendTestScalar(&bytes, 0.0f);
     appendTestScalar(&bytes, 1.0f);
     appendTestScalar(&bytes, 1.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(0));
+    appendTestScalar(&bytes, static_cast<uint8_t>(1));
     appendTestScalar(&bytes, kMaxGradientStopsPerSurface + 1);
     reader = { bytes.data(), bytes.data() + bytes.size() };
     Instance instance = {};
-    std::vector<GradientStopInstance> stops;
+    stops.clear();
+    expect(!readPaint(reader, &instance, &stops));
+
+    bytes.clear();
+    appendTestScalar(&bytes, static_cast<uint8_t>(4));
+    appendTestScalar(&bytes, 0.0f);
+    appendTestScalar(&bytes, 0.0f);
+    appendTestScalar(&bytes, 0.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(3)); // invalid spread
+    appendTestScalar(&bytes, static_cast<uint8_t>(1));
+    appendTestScalar(&bytes, static_cast<uint32_t>(0));
+    reader = { bytes.data(), bytes.data() + bytes.size() };
     stops.clear();
     expect(!readPaint(reader, &instance, &stops));
 

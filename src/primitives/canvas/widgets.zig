@@ -809,6 +809,30 @@ pub const WidgetLinearGradient = struct {
     start: geometry.PointF,
     end: geometry.PointF,
     stops: []const canvas.GradientStop,
+    spread: canvas.GradientSpread = .pad,
+    interpolation: canvas.GradientInterpolation = .srgb_linear,
+};
+
+pub const WidgetRadialGradient = struct {
+    center: geometry.PointF,
+    radii: geometry.SizeF,
+    stops: []const canvas.GradientStop,
+    spread: canvas.GradientSpread = .pad,
+    interpolation: canvas.GradientInterpolation = .srgb_linear,
+};
+
+pub const WidgetConicGradient = struct {
+    center: geometry.PointF,
+    start_angle_radians: f32 = 0,
+    stops: []const canvas.GradientStop,
+    spread: canvas.GradientSpread = .pad,
+    interpolation: canvas.GradientInterpolation = .srgb_linear,
+};
+
+pub const WidgetGradient = union(enum) {
+    linear: WidgetLinearGradient,
+    radial: WidgetRadialGradient,
+    conic: WidgetConicGradient,
 };
 
 /// One local-space immediate drawing command attached to a retained widget,
@@ -831,7 +855,7 @@ pub const ImmediateCanvasCommand = union(enum) {
     icon_path: WidgetIconPath,
     /// Rare retained background paint. The renderer resolves normalized
     /// geometry after layout and lowers it into the canvas gradient primitive.
-    background_gradient: WidgetLinearGradient,
+    background_gradient: WidgetGradient,
     /// Rare retained visual metadata rides the existing command slice rather
     /// than enlarging every Widget. Emitters consume these entries as style;
     /// immediate canvases never draw them.

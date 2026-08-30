@@ -106,6 +106,10 @@ jobs:
       # include path, or a conformance error in the embedded layer — is a
       # compile failure here, not a silent WebViewNotFound at runtime.
       - run: zig build test-webview-system-link -Dplatform=windows
+      # Executes the actual D3DCompile path on Windows so HLSL syntax,
+      # structured-buffer layout, and every gradient wire tag are checked by
+      # the same compiler and decoder the presenter ships.
+      - run: zig build test-windows-d3d-presenter -Dplatform=windows
 
   cef-platform-tooling:
     name: CEF Platform Tooling

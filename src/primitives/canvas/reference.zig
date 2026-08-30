@@ -12,6 +12,11 @@ const Color = drawing_model.Color;
 const Affine = drawing_model.Affine;
 const Radius = drawing_model.Radius;
 const LinearGradient = drawing_model.LinearGradient;
+const RadialGradient = drawing_model.RadialGradient;
+const ConicGradient = drawing_model.ConicGradient;
+const GradientStop = drawing_model.GradientStop;
+const GradientSpread = drawing_model.GradientSpread;
+const GradientInterpolation = drawing_model.GradientInterpolation;
 const Fill = drawing_model.Fill;
 const FillRect = drawing_model.FillRect;
 const StrokeRect = drawing_model.StrokeRect;
@@ -1176,6 +1181,8 @@ fn referenceSampleFill(fill: Fill, transform: Affine, point: geometry.PointF) Co
     return switch (fill) {
         .color => |color| color,
         .linear_gradient => |gradient| referenceSampleLinearGradient(gradient, transform, point),
+        .radial_gradient => |gradient| referenceSampleRadialGradient(gradient, transform, point),
+        .conic_gradient => |gradient| referenceSampleConicGradient(gradient, transform, point),
     };
 }
 
@@ -1213,43 +1220,160 @@ fn referenceGlyphCodepoint(text: []const u8, start: usize, len: usize) ?u21 {
 }
 
 fn referenceSampleLinearGradient(gradient: LinearGradient, transform: Affine, point: geometry.PointF) Color {
-    if (gradient.stops.len == 0) return Color.rgba8(0, 0, 0, 0);
-    if (gradient.stops.len == 1) return gradient.stops[0].color;
-
     const start = transform.transformPoint(gradient.start);
     const end = transform.transformPoint(gradient.end);
     const dx = end.x - start.x;
     const dy = end.y - start.y;
     const length_sq = dx * dx + dy * dy;
     const t = if (length_sq <= 0.000001) 0 else ((point.x - start.x) * dx + (point.y - start.y) * dy) / length_sq;
+    return referenceSampleGradientStops(gradient.stops, t, gradient.spread, gradient.interpolation);
+}
 
-    var previous = gradient.stops[0];
-    if (t <= previous.offset) return previous.color;
-    for (gradient.stops[1..]) |stop| {
-        if (t <= stop.offset) {
-            const span = stop.offset - previous.offset;
-            const local_t = if (@abs(span) <= 0.000001) 1 else std.math.clamp((t - previous.offset) / span, 0, 1);
-            return referenceMixColor(previous.color, stop.color, local_t);
+fn referenceSampleRadialGradient(gradient: RadialGradient, transform: Affine, point: geometry.PointF) Color {
+    const center = transform.transformPoint(gradient.center);
+    // The transform may rotate or skew. Transforming the two radius basis
+    // points and projecting into that basis keeps an authored ellipse attached
+    // to the same affine transform as the filled geometry.
+    const radius_x_point = transform.transformPoint(.{ .x = gradient.center.x + gradient.radii.width, .y = gradient.center.y });
+    const radius_y_point = transform.transformPoint(.{ .x = gradient.center.x, .y = gradient.center.y + gradient.radii.height });
+    const basis_x = geometry.PointF.init(radius_x_point.x - center.x, radius_x_point.y - center.y);
+    const basis_y = geometry.PointF.init(radius_y_point.x - center.x, radius_y_point.y - center.y);
+    const determinant = basis_x.x * basis_y.y - basis_x.y * basis_y.x;
+    const delta_x = point.x - center.x;
+    const delta_y = point.y - center.y;
+    const t = if (@abs(determinant) <= 0.000001)
+        (if (@abs(delta_x) <= 0.000001 and @abs(delta_y) <= 0.000001) 0 else std.math.inf(f32))
+    else blk: {
+        const local_x = (delta_x * basis_y.y - delta_y * basis_y.x) / determinant;
+        const local_y = (basis_x.x * delta_y - basis_x.y * delta_x) / determinant;
+        break :blk @sqrt(local_x * local_x + local_y * local_y);
+    };
+    return referenceSampleGradientStops(gradient.stops, t, gradient.spread, gradient.interpolation);
+}
+
+fn referenceSampleConicGradient(gradient: ConicGradient, transform: Affine, point: geometry.PointF) Color {
+    const center = transform.transformPoint(gradient.center);
+    const delta_x = point.x - center.x;
+    const delta_y = point.y - center.y;
+    const angle = if (@abs(delta_x) <= 0.000001 and @abs(delta_y) <= 0.000001)
+        gradient.start_angle_radians
+    else
+        std.math.atan2(delta_y, delta_x);
+    const t = (angle - gradient.start_angle_radians) / (2 * std.math.pi);
+    // A conic axis is periodic even when its authored stop interval pads: map
+    // the geometric turn to [0,1), then apply the stop interval's spread.
+    const turn = t - @floor(t);
+    return referenceSampleGradientStops(gradient.stops, turn, gradient.spread, gradient.interpolation);
+}
+
+fn referenceSampleGradientStops(stops: []const GradientStop, raw_t: f32, spread: GradientSpread, interpolation: GradientInterpolation) Color {
+    if (stops.len == 0) return Color.rgba8(0, 0, 0, 0);
+    if (stops.len == 1) return stops[0].color;
+
+    const first_offset = stops[0].offset;
+    var last_offset = first_offset;
+    for (stops[1..]) |stop| last_offset = @max(last_offset, stop.offset);
+    if (spread != .pad and last_offset - first_offset <= 0.000001) {
+        // CSS repeating gradients with a zero-length period collapse to the
+        // average endpoint color instead of dividing by zero or choosing an
+        // arbitrary side of the discontinuity.
+        return referenceMixColor(stops[0].color, stops[stops.len - 1].color, 0.5, interpolation);
+    }
+    const t = referenceApplyGradientSpread(raw_t, first_offset, last_offset, spread);
+
+    var previous = stops[0];
+    var previous_offset = previous.offset;
+    if (t < previous_offset) return previous.color;
+    for (stops[1..]) |stop| {
+        const stop_offset = @max(previous_offset, stop.offset);
+        if (t < stop_offset) {
+            const span = stop_offset - previous_offset;
+            const local_t = if (@abs(span) <= 0.000001) 1 else std.math.clamp((t - previous_offset) / span, 0, 1);
+            return referenceMixColor(previous.color, stop.color, local_t, interpolation);
         }
         previous = stop;
+        previous_offset = stop_offset;
     }
     return previous.color;
 }
 
-fn referenceMixColor(a: Color, b: Color, t: f32) Color {
-    const value = std.math.clamp(t, 0, 1);
-    return .{
-        .r = referenceMixSrgb(a.r, b.r, value),
-        .g = referenceMixSrgb(a.g, b.g, value),
-        .b = referenceMixSrgb(a.b, b.b, value),
-        .a = a.a + (b.a - a.a) * value,
+fn referenceApplyGradientSpread(t: f32, first: f32, last: f32, spread: GradientSpread) f32 {
+    if (spread == .pad) return t;
+    const interval = last - first;
+    if (!std.math.isFinite(t) or !std.math.isFinite(interval) or interval <= 0.000001) return first;
+    const unit = (t - first) / interval;
+    return switch (spread) {
+        .pad => t,
+        .repeat => first + (unit - @floor(unit)) * interval,
+        .reflect => blk: {
+            const doubled = unit - @floor(unit / 2) * 2;
+            const reflected = if (doubled <= 1) doubled else 2 - doubled;
+            break :blk first + reflected * interval;
+        },
     };
 }
 
-fn referenceMixSrgb(a: f32, b: f32, t: f32) f32 {
-    const start = referenceSrgbToLinear(a);
-    const end = referenceSrgbToLinear(b);
-    return referenceLinearToSrgb(start + (end - start) * std.math.clamp(t, 0, 1));
+fn referenceMixColor(a: Color, b: Color, t: f32, interpolation: GradientInterpolation) Color {
+    const value = std.math.clamp(t, 0, 1);
+    const alpha = a.a + (b.a - a.a) * value;
+    if (alpha <= 0.000001) return Color.rgba(0, 0, 0, 0);
+    const start = referenceColorToInterpolation(a, interpolation);
+    const end = referenceColorToInterpolation(b, interpolation);
+    const mixed = [3]f32{
+        (start[0] * a.a + (end[0] * b.a - start[0] * a.a) * value) / alpha,
+        (start[1] * a.a + (end[1] * b.a - start[1] * a.a) * value) / alpha,
+        (start[2] * a.a + (end[2] * b.a - start[2] * a.a) * value) / alpha,
+    };
+    const rgb = referenceColorFromInterpolation(mixed, interpolation);
+    return Color.rgba(rgb[0], rgb[1], rgb[2], alpha);
+}
+
+fn referenceColorToInterpolation(color: Color, interpolation: GradientInterpolation) [3]f32 {
+    return switch (interpolation) {
+        .srgb => .{ color.r, color.g, color.b },
+        .srgb_linear => .{ referenceSrgbToLinear(color.r), referenceSrgbToLinear(color.g), referenceSrgbToLinear(color.b) },
+        .oklab => referenceLinearSrgbToOklab(.{ referenceSrgbToLinear(color.r), referenceSrgbToLinear(color.g), referenceSrgbToLinear(color.b) }),
+    };
+}
+
+fn referenceColorFromInterpolation(color: [3]f32, interpolation: GradientInterpolation) [3]f32 {
+    const rgb = switch (interpolation) {
+        .srgb => color,
+        .srgb_linear => .{ referenceLinearToSrgb(color[0]), referenceLinearToSrgb(color[1]), referenceLinearToSrgb(color[2]) },
+        .oklab => blk: {
+            const linear = referenceOklabToLinearSrgb(color);
+            break :blk [3]f32{ referenceLinearToSrgb(linear[0]), referenceLinearToSrgb(linear[1]), referenceLinearToSrgb(linear[2]) };
+        },
+    };
+    return .{ std.math.clamp(rgb[0], 0, 1), std.math.clamp(rgb[1], 0, 1), std.math.clamp(rgb[2], 0, 1) };
+}
+
+fn referenceLinearSrgbToOklab(rgb: [3]f32) [3]f32 {
+    const l = 0.4122214708 * rgb[0] + 0.5363325363 * rgb[1] + 0.0514459929 * rgb[2];
+    const m = 0.2119034982 * rgb[0] + 0.6806995451 * rgb[1] + 0.1073969566 * rgb[2];
+    const s = 0.0883024619 * rgb[0] + 0.2817188376 * rgb[1] + 0.6299787005 * rgb[2];
+    const l_root = std.math.cbrt(l);
+    const m_root = std.math.cbrt(m);
+    const s_root = std.math.cbrt(s);
+    return .{
+        0.2104542553 * l_root + 0.7936177850 * m_root - 0.0040720468 * s_root,
+        1.9779984951 * l_root - 2.4285922050 * m_root + 0.4505937099 * s_root,
+        0.0259040371 * l_root + 0.7827717662 * m_root - 0.8086757660 * s_root,
+    };
+}
+
+fn referenceOklabToLinearSrgb(lab: [3]f32) [3]f32 {
+    const l_root = lab[0] + 0.3963377774 * lab[1] + 0.2158037573 * lab[2];
+    const m_root = lab[0] - 0.1055613458 * lab[1] - 0.0638541728 * lab[2];
+    const s_root = lab[0] - 0.0894841775 * lab[1] - 1.2914855480 * lab[2];
+    const l = l_root * l_root * l_root;
+    const m = m_root * m_root * m_root;
+    const s = s_root * s_root * s_root;
+    return .{
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+    };
 }
 
 fn referenceSrgbToLinear(value: f32) f32 {

@@ -12,6 +12,8 @@ const Affine = drawing_model.Affine;
 const Color = drawing_model.Color;
 const Radius = drawing_model.Radius;
 const LinearGradient = drawing_model.LinearGradient;
+const RadialGradient = drawing_model.RadialGradient;
+const ConicGradient = drawing_model.ConicGradient;
 const Fill = drawing_model.Fill;
 const LineCap = drawing_model.LineCap;
 const PathElement = drawing_model.PathElement;
@@ -151,6 +153,8 @@ pub const CanvasGpuPaint = union(enum) {
     none,
     color: Color,
     linear_gradient: LinearGradient,
+    radial_gradient: RadialGradient,
+    conic_gradient: ConicGradient,
 };
 
 pub const CanvasGpuImage = struct {
@@ -622,6 +626,8 @@ fn canvasGpuPaint(fill: Fill) CanvasGpuPaint {
     return switch (fill) {
         .color => |color| .{ .color = color },
         .linear_gradient => |gradient| .{ .linear_gradient = gradient },
+        .radial_gradient => |gradient| .{ .radial_gradient = gradient },
+        .conic_gradient => |gradient| .{ .conic_gradient = gradient },
     };
 }
 
@@ -629,40 +635,42 @@ fn canvasGpuFillPipeline(fill: Fill) RenderPipelineKind {
     return switch (fill) {
         .color => .solid,
         .linear_gradient => .linear_gradient,
+        .radial_gradient => .radial_gradient,
+        .conic_gradient => .conic_gradient,
     };
 }
 
 fn canvasGpuFillUsesResource(fill: Fill) bool {
     return switch (fill) {
         .color => false,
-        .linear_gradient => true,
+        .linear_gradient, .radial_gradient, .conic_gradient => true,
     };
 }
 
 fn canvasGpuFillRectKind(fill: Fill) CanvasGpuCommandKind {
     return switch (fill) {
         .color => .fill_rect_solid,
-        .linear_gradient => .fill_rect_gradient,
+        .linear_gradient, .radial_gradient, .conic_gradient => .fill_rect_gradient,
     };
 }
 
 fn canvasGpuRoundedRectKind(fill: Fill) CanvasGpuCommandKind {
     return switch (fill) {
         .color => .fill_rounded_rect_solid,
-        .linear_gradient => .fill_rounded_rect_gradient,
+        .linear_gradient, .radial_gradient, .conic_gradient => .fill_rounded_rect_gradient,
     };
 }
 
 fn canvasGpuStrokeRectKind(fill: Fill) CanvasGpuCommandKind {
     return switch (fill) {
         .color => .stroke_rect_solid,
-        .linear_gradient => .stroke_rect_gradient,
+        .linear_gradient, .radial_gradient, .conic_gradient => .stroke_rect_gradient,
     };
 }
 
 fn canvasGpuLineKind(fill: Fill) CanvasGpuCommandKind {
     return switch (fill) {
         .color => .draw_line_solid,
-        .linear_gradient => .draw_line_gradient,
+        .linear_gradient, .radial_gradient, .conic_gradient => .draw_line_gradient,
     };
 }

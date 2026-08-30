@@ -119,15 +119,62 @@ pub const GradientStop = struct {
     color: Color,
 };
 
+/// What happens outside the authored stop interval. CSS repeating gradients
+/// are `repeat` applied to a linear/radial/conic geometry, not separate paint
+/// shapes. `reflect` is kept at this low-level seam because both GPU APIs and
+/// image paint systems expose it cheaply even though Weaver's CSS-compatible
+/// authoring does not need to surface it initially.
+pub const GradientSpread = enum {
+    pad,
+    repeat,
+    reflect,
+};
+
+/// Interpolation spaces supported by the current sRGB `Color` storage. Every
+/// mode interpolates premultiplied components and then unpremultiplies, matching
+/// CSS Color 4's alpha rule. Wider-gamut source colors require a future Color
+/// model rather than pretending four sRGB floats carry Display-P3.
+pub const GradientInterpolation = enum {
+    srgb,
+    srgb_linear,
+    oklab,
+};
+
 pub const LinearGradient = struct {
     start: geometry.PointF,
     end: geometry.PointF,
     stops: []const GradientStop = &.{},
+    spread: GradientSpread = .pad,
+    interpolation: GradientInterpolation = .srgb_linear,
+};
+
+/// Elliptical radial gradient: `center` is t=0 and `radii` is the t=1
+/// ellipse. This exactly represents CSS radial-gradient geometry after the
+/// author-side size/position keywords have resolved against the final box.
+pub const RadialGradient = struct {
+    center: geometry.PointF,
+    radii: geometry.SizeF,
+    stops: []const GradientStop = &.{},
+    spread: GradientSpread = .pad,
+    interpolation: GradientInterpolation = .srgb_linear,
+};
+
+/// Conic gradient in the canvas' y-down coordinates. Zero radians points
+/// along +x and positive angles turn clockwise. CSS's zero-at-top convention
+/// is an authoring conversion (`css_angle - pi/2`), not a renderer branch.
+pub const ConicGradient = struct {
+    center: geometry.PointF,
+    start_angle_radians: f32 = 0,
+    stops: []const GradientStop = &.{},
+    spread: GradientSpread = .pad,
+    interpolation: GradientInterpolation = .srgb_linear,
 };
 
 pub const Fill = union(enum) {
     color: Color,
     linear_gradient: LinearGradient,
+    radial_gradient: RadialGradient,
+    conic_gradient: ConicGradient,
 };
 
 pub const Stroke = struct {
