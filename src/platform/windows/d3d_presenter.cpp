@@ -482,8 +482,9 @@ float4 sampleMesh(Out i) {
   return float4(0,0,0,0);
 }
 float4 psMain(Out i):SV_TARGET {
-  if (i.clip.z>=0 && (i.pixel.x<i.clip.x || i.pixel.y<i.clip.y ||
-      i.pixel.x>i.clip.x+i.clip.z || i.pixel.y>i.clip.y+i.clip.w)) discard;
+  if (i.clip.z>=0 && (i.clip.z<=0 || i.clip.w<=0 ||
+      i.pixel.x<i.clip.x || i.pixel.y<i.clip.y ||
+      i.pixel.x>=i.clip.x+i.clip.z || i.pixel.y>=i.clip.y+i.clip.w)) discard;
   float distance;
   if (i.extra.w > 0.5) {
     float2 a=i.shape.xy, b=i.extra.xy, pa=i.pixel-a, ba=b-a;
@@ -1276,6 +1277,7 @@ extern "C" int native_sdk_d3d_presenter_tests() {
     appendTestScalar(&bytes, 0.0f); // stroke width
     appendTestScalar(&bytes, static_cast<uint8_t>(0)); // butt cap
     appendTestRect(&bytes, 20.0f, 25.0f, 50.0f, 25.0f); // structural clip
+    const size_t clip_radius_offset = bytes.size();
     for (uint8_t corner = 0; corner < 4; ++corner) appendTestScalar(&bytes, 0.0f);
     appendTestScalar(&bytes, static_cast<uint8_t>(1)); // rect
     appendTestRect(&bytes, 10.0f, 20.0f, 80.0f, 40.0f);
@@ -1312,6 +1314,14 @@ extern "C" int native_sdk_d3d_presenter_tests() {
         expect(closeEnough(command.gradient_stops[0].color.x, 1.0f));
         expect(closeEnough(command.gradient_stops[0].color.w, 0.5f));
     }
+
+    std::vector<uint8_t> rounded_clip_bytes = bytes;
+    const float rounded_clip_radius = 4.0f;
+    memcpy(rounded_clip_bytes.data() + clip_radius_offset,
+        &rounded_clip_radius, sizeof(rounded_clip_radius));
+    reader = { rounded_clip_bytes.data(),
+        rounded_clip_bytes.data() + rounded_clip_bytes.size() };
+    expect(!readCommand(reader, &command));
 
     const auto append_path_command = [&bytes](uint8_t kind) {
         bytes.clear();
