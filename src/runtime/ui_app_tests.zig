@@ -2459,6 +2459,28 @@ test "a stale automation widget click degrades instead of killing the frame call
     try cwd.createDirPath(io, directory);
     defer cwd.deleteTree(io, directory) catch {};
     harness.runtime.options.automation = automation.Server.init(io, directory, "Degrade");
+
+    // A real surface completion publishes the observed presentation state
+    // directly. It must not need a fabricated general lifecycle frame: that
+    // pairing creates a scheduler feedback loop in live Windows UiApp hosts.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 2,
+        .timestamp_ns = 2_000_000,
+        .nonblank = true,
+    } });
+    var snapshot_path_buffer: [128]u8 = undefined;
+    const snapshot_path = try std.fmt.bufPrint(&snapshot_path_buffer, "{s}/snapshot.txt", .{directory});
+    var snapshot_file = try cwd.openFile(io, snapshot_path, .{});
+    defer snapshot_file.close(io);
+    var snapshot_buffer: [16 * 1024]u8 = undefined;
+    const snapshot_len = try snapshot_file.readPositionalAll(io, &snapshot_buffer, 0);
+    const snapshot_text = snapshot_buffer[0..snapshot_len];
+    try std.testing.expect(std.mem.indexOf(u8, snapshot_text, "ready=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot_text, "gpu_nonblank=true") != null);
+
     var command_path_buffer: [128]u8 = undefined;
     const command_path = try std.fmt.bufPrint(&command_path_buffer, "{s}/command-1.txt", .{directory});
     try cwd.writeFile(io, .{ .sub_path = command_path, .data = "widget-click counter-canvas 999999\n" });
