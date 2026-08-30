@@ -190,6 +190,24 @@ pub fn build(b: *std.Build) void {
         artifact.root_module.linkSystemLibrary("c", .{});
         break :tests artifact;
     } else null;
+    const windows_d3d_gradient_benchmark: ?*std.Build.Step.Compile = if (target.result.os.tag == .windows) benchmark: {
+        const benchmark_mod = module(b, target, optimize, "src/platform/windows/d3d_presenter_benchmark_runner.zig");
+        const artifact = b.addExecutable(.{
+            .name = "native-sdk-d3d-gradient-benchmark",
+            .root_module = benchmark_mod,
+        });
+        artifact.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/windows/d3d_presenter.cpp"),
+            .flags = &.{ "-std=c++17", "-DWEAVER_D3D_PRESENTER_TESTS" },
+        });
+        artifact.root_module.addIncludePath(b.path("src/platform/windows"));
+        artifact.root_module.linkSystemLibrary("d3d11", .{});
+        artifact.root_module.linkSystemLibrary("dcomp", .{});
+        artifact.root_module.linkSystemLibrary("dxgi", .{});
+        artifact.root_module.linkSystemLibrary("c++", .{});
+        artifact.root_module.linkSystemLibrary("c", .{});
+        break :benchmark artifact;
+    } else null;
     const windows_image_decoder_tests: ?*std.Build.Step.Compile = if (target.result.os.tag == .windows) tests: {
         const image_decoder_test_mod = module(b, target, optimize, "src/platform/windows/image_decoder_test_runner.zig");
         image_decoder_test_mod.addImport("native_sdk_test_assets", native_sdk_test_assets);
@@ -1071,6 +1089,14 @@ pub fn build(b: *std.Build) void {
         addTestStep(b, "test-windows-d3d-presenter", "Compile and run D3D gradient decoder and shader tests", tests);
         const compile_step = b.step("build-windows-d3d-presenter-tests", "Cross-compile the D3D gradient test executable without running it");
         compile_step.dependOn(&tests.step);
+    }
+    if (windows_d3d_gradient_benchmark) |benchmark| {
+        const run = b.addRunArtifact(benchmark);
+        run.has_side_effects = true;
+        const benchmark_step = b.step("bench-windows-d3d-gradient", "Measure the 16-patch Oklab mesh on a hardware D3D11 adapter");
+        benchmark_step.dependOn(&run.step);
+        const compile_step = b.step("build-windows-d3d-gradient-benchmark", "Cross-compile the hardware D3D gradient benchmark without running it");
+        compile_step.dependOn(&benchmark.step);
     }
     if (windows_image_decoder_tests) |tests| {
         addTestStep(b, "test-windows-image-decoder", "Decode real Windows image fixtures at framework budgets", tests);

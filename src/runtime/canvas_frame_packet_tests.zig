@@ -1111,6 +1111,26 @@ test "hybrid packet keeps a GPU gradient below retained effects" {
         .{ .offset = 1, .color = canvas.Color.rgb8(168, 85, 247) },
     };
     const commands = [_]canvas.CanvasCommand{
+        .{ .shadow = .{
+            .id = 3,
+            .rect = geometry.RectF.init(0, 0, 96, 48),
+            .radius = canvas.Radius.all(12),
+            .blur = 2,
+            .color = canvas.Color.rgba8(0, 0, 0, 41),
+        } },
+        .{ .fill_rounded_rect = .{
+            .id = 4,
+            .rect = geometry.RectF.init(0, 0, 96, 48),
+            .radius = canvas.Radius.all(12),
+            .fill = .{ .color = canvas.Color.rgb8(20, 24, 32) },
+        } },
+        .{ .shadow = .{
+            .id = 5,
+            .rect = geometry.RectF.init(0, 0, 96, 48),
+            .radius = canvas.Radius.all(12),
+            .blur = 4,
+            .color = canvas.Color.rgba8(0, 0, 0, 96),
+        } },
         .{ .push_clip = .{
             .id = 1,
             .rect = geometry.RectF.init(0, 0, 96, 48),
@@ -1128,7 +1148,7 @@ test "hybrid packet keeps a GPU gradient below retained effects" {
         } },
         .pop_clip,
         .{ .shadow = .{
-            .id = 3,
+            .id = 6,
             .rect = geometry.RectF.init(12, 12, 72, 24),
             .blur = 4,
             .color = canvas.Color.rgba8(0, 0, 0, 96),
@@ -1159,7 +1179,7 @@ test "hybrid packet keeps a GPU gradient below retained effects" {
         &scratch,
     )).?;
 
-    try std.testing.expectEqual(@as(usize, 1), packet.commandCount());
+    try std.testing.expectEqual(@as(usize, 4), packet.commandCount());
     try std.testing.expectEqual(@as(usize, 0), packet.unsupported_command_count);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_binary_count);
     try std.testing.expectEqual(
@@ -1168,6 +1188,7 @@ test "hybrid packet keeps a GPU gradient below retained effects" {
     );
     try std.testing.expect(harness.runtime.views[0].hybrid_retained_valid);
     try std.testing.expectEqual(@as(u64, 1), harness.runtime.views[0].hybrid_retained_generation);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, pixels[0..4]);
 }
 
 test "chat-transcript-shaped heavy frame stays on the packet path through the binary encoding" {

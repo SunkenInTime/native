@@ -53,6 +53,138 @@ threadlocal var canvas_frame_immediate_commands_scratch: [max_canvas_commands_pe
 threadlocal var canvas_frame_underlay_commands_scratch: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
 threadlocal var canvas_frame_retained_commands_scratch: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
 
+fn hybridGpuUnderlayDisplayList(
+    display_list: canvas.DisplayList,
+    surface_size: geometry.SizeF,
+) !canvas.DisplayList {
+    const surface = geometry.RectF.init(0, 0, surface_size.width, surface_size.height).normalized();
+    var layer: canvas.PresentationLayer = .retained;
+    var stack: [32]canvas.PresentationLayer = undefined;
+    var depth: usize = 0;
+    var output_len: usize = 0;
+    var moved_surface_shadow = false;
+    var moved_surface_background = false;
+    for (display_list.commands, 0..) |command, command_index| {
+        const include = switch (command) {
+            .push_clip => |clip| include: {
+                if (depth >= stack.len) return error.RenderStackOverflow;
+                stack[depth] = layer;
+                depth += 1;
+                layer = clip.presentation_layer;
+                break :include true;
+            },
+            .pop_clip => include: {
+                if (depth == 0) return error.RenderStackUnderflow;
+                depth -= 1;
+                layer = stack[depth];
+                break :include true;
+            },
+            .push_opacity, .pop_opacity, .transform => true,
+            else => include: {
+                if (layer == .gpu_underlay) break :include true;
+                if (layer == .retained and
+                    hybridCommandIsGpuUnderlayShadow(display_list.commands, command_index))
+                {
+                    break :include true;
+                }
+                if (!moved_surface_shadow and !moved_surface_background and layer == .retained and
+                    hybridCommandIsSurfaceShadow(command, surface))
+                {
+                    moved_surface_shadow = true;
+                    break :include true;
+                }
+                if (!moved_surface_background and layer == .retained and
+                    hybridCommandIsSurfaceBackground(command, surface))
+                {
+                    moved_surface_background = true;
+                    break :include true;
+                }
+                break :include false;
+            },
+        };
+        if (!include) continue;
+        if (output_len >= canvas_frame_underlay_commands_scratch.len) return error.DisplayListFull;
+        canvas_frame_underlay_commands_scratch[output_len] = command;
+        output_len += 1;
+    }
+    if (depth != 0) return error.RenderStackUnderflow;
+    return .{ .commands = canvas_frame_underlay_commands_scratch[0..output_len] };
+}
+
+fn hybridRetainedOverlayDisplayList(
+    display_list: canvas.DisplayList,
+    surface_size: geometry.SizeF,
+) !canvas.DisplayList {
+    const retained = try display_list.copyPresentationLayer(
+        .retained,
+        &canvas_frame_retained_commands_scratch,
+    );
+    const surface = geometry.RectF.init(0, 0, surface_size.width, surface_size.height).normalized();
+    var output_len: usize = 0;
+    var moved_surface_shadow = false;
+    var moved_surface_background = false;
+    for (retained.commands, 0..) |command, command_index| {
+        if (hybridCommandIsGpuUnderlayShadow(retained.commands, command_index)) continue;
+        if (!moved_surface_shadow and !moved_surface_background and
+            hybridCommandIsSurfaceShadow(command, surface))
+        {
+            moved_surface_shadow = true;
+            continue;
+        }
+        if (!moved_surface_background and
+            hybridCommandIsSurfaceBackground(command, surface))
+        {
+            moved_surface_background = true;
+            continue;
+        }
+        canvas_frame_retained_commands_scratch[output_len] = command;
+        output_len += 1;
+    }
+    return .{ .commands = canvas_frame_retained_commands_scratch[0..output_len] };
+}
+
+fn hybridCommandIsGpuUnderlayShadow(
+    commands: []const canvas.CanvasCommand,
+    command_index: usize,
+) bool {
+    if (command_index >= commands.len or commands[command_index] != .shadow) return false;
+    for (commands[command_index + 1 ..]) |next| {
+        switch (next) {
+            .push_opacity, .transform => continue,
+            .push_clip => |clip| return clip.presentation_layer == .gpu_underlay,
+            else => return false,
+        }
+    }
+    return false;
+}
+
+fn hybridCommandIsSurfaceShadow(
+    command: canvas.CanvasCommand,
+    surface: geometry.RectF,
+) bool {
+    return switch (command) {
+        .shadow => |shadow| !shadow.inset and std.meta.eql(shadow.rect.normalized(), surface),
+        else => false,
+    };
+}
+
+fn hybridCommandIsSurfaceBackground(
+    command: canvas.CanvasCommand,
+    surface: geometry.RectF,
+) bool {
+    return switch (command) {
+        .fill_rect => |fill| std.meta.eql(fill.rect.normalized(), surface) and switch (fill.fill) {
+            .color => true,
+            else => false,
+        },
+        .fill_rounded_rect => |fill| std.meta.eql(fill.rect.normalized(), surface) and switch (fill.fill) {
+            .color => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
 /// One entry of the frame's CURRENT keyed command list — the full draw
 /// order the retained packet protocol works on (never the scissor
 /// subset). `render_index` points back into the frame's render plan so
@@ -352,7 +484,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 view.hybridImmediateDisplayList() orelse
                     try display_list.copyPresentationLayer(.immediate, &canvas_frame_immediate_commands_scratch)
             else
-                try display_list.copyPresentationLayer(.gpu_underlay, &canvas_frame_underlay_commands_scratch);
+                try hybridGpuUnderlayDisplayList(display_list, frame_options.surface_size);
             const plan_begin = self.frame_profile.begin();
             const gpu_frame = try gpu_list.framePlan(null, frame_options, storage);
             self.frame_profile.end(.plan, plan_begin);
@@ -379,7 +511,10 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             var retained_generation: u64 = 0;
             var retained_fingerprint = view.hybrid_retained_fingerprint;
             if (retained_changed) {
-                const retained_list = try display_list.copyPresentationLayer(.retained, &canvas_frame_retained_commands_scratch);
+                const retained_list = try hybridRetainedOverlayDisplayList(
+                    display_list,
+                    gpu_frame.surface_size,
+                );
                 const retained_frame = try retained_list.framePlan(null, frame_options, storage);
                 var retained_pass = retained_frame.renderPass();
                 retained_fingerprint = retained_pass.presentationLayerFingerprint(.retained);

@@ -54,9 +54,10 @@ struct Instance {
     F4 shape; // radius, kind (0 rounded rect / 1 line), x1, y1
     F4 extra; // x2, y2, thickness, unused
     F4 clip; // x/y/width/height; negative width means no clip
+    F4 clip_radius; // top-left, top-right, bottom-right, bottom-left
     F4 gradient; // linear start/end; radial center/radii; conic center/start angle
-    F4 gradient_options; // spread (pad/repeat/reflect), interpolation, unused
-    F4 paint; // kind (0 color / 1 linear / 2 radial / 3 conic), stop offset/count, opacity
+    F4 gradient_options; // spread, interpolation, shadow blur, radial basis
+    F4 paint; // kind (-1 shadow / 0 color / 1 linear / 2 radial / 3 conic / 4 mesh), offsets/count, opacity
 };
 
 struct GradientStopInstance {
@@ -71,7 +72,7 @@ struct MeshPatchInstance {
     F4 options; // interpolation, unused
 };
 
-static_assert(sizeof(Instance) == 128);
+static_assert(sizeof(Instance) == 144);
 static_assert(sizeof(GradientStopInstance) == 32);
 static_assert(sizeof(MeshPatchInstance) == 224);
 
@@ -307,24 +308,82 @@ bool readPaint(PacketReader &reader, Instance *instance,
 
 bool readCommand(PacketReader &reader, RetainedCommand *out) {
     uint8_t kind = 0, flags = 0, cap = 0;
-    F4 bounds = {}, clip = { 0, 0, -1, -1 };
+    F4 bounds = {}, clip = { 0, 0, -1, -1 }, clip_radius = {};
     Affine2D transform;
     float opacity = 1, stroke_width = 0;
     if (!reader.u8(&kind) || !reader.u8(&flags) || !reader.rect(&bounds) ||
         !reader.f32(&opacity) || !reader.f32(&stroke_width) || !reader.u8(&cap)) return false;
     if (flags & 0x01) { uint64_t id; if (!reader.u64(&id)) return false; }
     if (flags & 0x02) {
-        F4 clip_radius = {};
         if (!reader.rect(&clip) || !readRadius(reader, &clip_radius)) return false;
-        // Production hybrid/immediate canvas draws all carry a structural
-        // rectangular clip. Rounded clips need a second corner SDF that this
-        // instance shader does not represent yet, so only those fall back to
-        // the reference pixel renderer.
-        if (clip_radius.x != 0 || clip_radius.y != 0 ||
-            clip_radius.z != 0 || clip_radius.w != 0) return false;
     }
     if (flags & 0x04) {
         if (!readAffine(reader, &transform)) return false;
+    }
+    if (kind == 12) { // shadow
+        if ((flags & 0x80) == 0 || (flags & (0x08 | 0x10 | 0x20 | 0x40)) != 0) return false;
+        uint8_t effect_tag = 0, inset = 0;
+        F4 shadow_rect = {}, radius = {}, color = {};
+        float offset_x = 0, offset_y = 0, blur = 0, spread = 0;
+        if (!reader.u8(&effect_tag) || effect_tag != 1 ||
+            !reader.rect(&shadow_rect) || !readRadius(reader, &radius) ||
+            !reader.f32(&offset_x) || !reader.f32(&offset_y) ||
+            !reader.f32(&blur) || !reader.f32(&spread) ||
+            !readColor(reader, &color) || !reader.u8(&inset) || inset != 0) return false;
+
+        shadow_rect.x += offset_x - spread;
+        shadow_rect.y += offset_y - spread;
+        shadow_rect.z += spread * 2;
+        shadow_rect.w += spread * 2;
+        if (shadow_rect.z <= 0 || shadow_rect.w <= 0) {
+            out->instances.clear();
+            out->gradient_stops.clear();
+            out->mesh_patches.clear();
+            return true;
+        }
+        radius.x = std::max(0.0f, radius.x + spread);
+        radius.y = std::max(0.0f, radius.y + spread);
+        radius.z = std::max(0.0f, radius.z + spread);
+        radius.w = std::max(0.0f, radius.w + spread);
+        blur = std::max(0.0f, blur);
+
+        F4 draw_rect = {
+            shadow_rect.x - blur,
+            shadow_rect.y - blur,
+            shadow_rect.z + blur * 2,
+            shadow_rect.w + blur * 2,
+        };
+        F4 transformed_shadow = {}, transformed_draw = {};
+        if (!transformRect(transform, shadow_rect, &transformed_shadow) ||
+            !transformRect(transform, draw_rect, &transformed_draw)) return false;
+        const float scale = std::max(0.0001f, std::max(
+            std::hypot(transform.a, transform.b),
+            std::hypot(transform.c, transform.d)));
+        if (!std::isfinite(scale)) return false;
+
+        Instance instance = {};
+        instance.rect = transformed_draw;
+        instance.color = {
+            color.x * opacity,
+            color.y * opacity,
+            color.z * opacity,
+            color.w * opacity,
+        };
+        instance.shape = {
+            radius.x * scale,
+            radius.y * scale,
+            radius.z * scale,
+            radius.w * scale,
+        };
+        instance.clip = clip;
+        instance.clip_radius = clip_radius;
+        instance.gradient = transformed_shadow;
+        instance.gradient_options.z = blur * scale;
+        instance.paint.x = -1.0f;
+        out->instances = { instance };
+        out->gradient_stops.clear();
+        out->mesh_patches.clear();
+        return true;
     }
     if ((flags & 0x08) == 0 || (flags & 0x10) == 0) return false;
     if (flags & (0x20 | 0x40 | 0x80)) return false; // image, text, effects
@@ -336,6 +395,7 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     base.rect = bounds;
     base.extra.w = 0;
     base.clip = clip;
+    base.clip_radius = clip_radius;
 
     if (shape_tag == 1) {
         if (kind != 0 && kind != 1) return false; // fill_rect solid/gradient
@@ -394,18 +454,19 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
 }
 
 const char *shaderSource = R"(
-struct Instance { float4 rect; float4 color; float4 shape; float4 extra; float4 clip; float4 gradient; float4 gradientOptions; float4 paint; };
+struct Instance { float4 rect; float4 color; float4 shape; float4 extra; float4 clip; float4 clipRadius; float4 gradient; float4 gradientOptions; float4 paint; };
 struct GradientStopInstance { float4 color; float4 data; };
 struct MeshPatchInstance { float4 points[8]; float4 colors[4]; float4 bounds; float4 options; };
 StructuredBuffer<Instance> instances : register(t0);
 StructuredBuffer<GradientStopInstance> gradientStops : register(t1);
 StructuredBuffer<MeshPatchInstance> meshPatches : register(t2);
-struct Out { float4 position:SV_POSITION; float2 pixel:TEXCOORD0; nointerpolation float4 rect:TEXCOORD1; nointerpolation float4 color:COLOR0; nointerpolation float4 shape:TEXCOORD2; nointerpolation float4 extra:TEXCOORD3; nointerpolation float4 clip:TEXCOORD4; nointerpolation float4 gradient:TEXCOORD5; nointerpolation float4 gradientOptions:TEXCOORD6; nointerpolation float4 paint:TEXCOORD7; };
+Texture2D<float4> retainedTexture : register(t3);
+struct Out { float4 position:SV_POSITION; float2 pixel:TEXCOORD0; nointerpolation float4 rect:TEXCOORD1; nointerpolation float4 color:COLOR0; nointerpolation float4 shape:TEXCOORD2; nointerpolation float4 extra:TEXCOORD3; nointerpolation float4 clip:TEXCOORD4; nointerpolation float4 clipRadius:TEXCOORD5; nointerpolation float4 gradient:TEXCOORD6; nointerpolation float4 gradientOptions:TEXCOORD7; nointerpolation float4 paint:TEXCOORD8; };
 cbuffer Surface : register(b0) { float2 surface; float2 padding; };
 Out vsMain(uint vertex:SV_VertexID, uint instance:SV_InstanceID) {
   const float2 corners[6] = { float2(0,0),float2(1,0),float2(0,1),float2(0,1),float2(1,0),float2(1,1) };
   Instance i=instances[instance]; float2 p=i.rect.xy+corners[vertex]*i.rect.zw;
-  Out o; o.position=float4(p.x/surface.x*2-1,1-p.y/surface.y*2,0,1); o.pixel=p; o.rect=i.rect; o.color=i.color; o.shape=i.shape; o.extra=i.extra; o.clip=i.clip; o.gradient=i.gradient; o.gradientOptions=i.gradientOptions; o.paint=i.paint; return o;
+  Out o; o.position=float4(p.x/surface.x*2-1,1-p.y/surface.y*2,0,1); o.pixel=p; o.rect=i.rect; o.color=i.color; o.shape=i.shape; o.extra=i.extra; o.clip=i.clip; o.clipRadius=i.clipRadius; o.gradient=i.gradient; o.gradientOptions=i.gradientOptions; o.paint=i.paint; return o;
 }
 float srgbToLinear(float value) {
   value=saturate(value);
@@ -604,27 +665,54 @@ float4 sampleMesh(Out i) {
   }
   return float4(0,0,0,0);
 }
+float roundedRectSignedDistance(float2 pixel,float4 rect,float4 radii) {
+  float2 center=rect.xy+rect.zw*0.5;
+  float radius = pixel.x < center.x
+    ? (pixel.y < center.y ? radii.x : radii.w)
+    : (pixel.y < center.y ? radii.y : radii.z);
+  radius=min(max(radius,0),min(rect.z,rect.w)*0.5);
+  float2 q=abs(pixel-center)-(rect.zw*0.5-radius);
+  return length(max(q,0))+min(max(q.x,q.y),0)-radius;
+}
 float4 psMain(Out i):SV_TARGET {
   if (i.clip.z>=0 && (i.clip.z<=0 || i.clip.w<=0 ||
       i.pixel.x<i.clip.x || i.pixel.y<i.clip.y ||
       i.pixel.x>=i.clip.x+i.clip.z || i.pixel.y>=i.clip.y+i.clip.w)) discard;
+  if (i.clip.z>=0 &&
+      (i.clipRadius.x>0 || i.clipRadius.y>0 || i.clipRadius.z>0 || i.clipRadius.w>0) &&
+      roundedRectSignedDistance(i.pixel,i.clip,i.clipRadius)>0) discard;
+  if (i.paint.x < -0.5) {
+    float distance=max(roundedRectSignedDistance(i.pixel,i.gradient,i.shape),0);
+    float blur=i.gradientOptions.z;
+    float alpha;
+    if (blur<=0) alpha=distance<=0 ? 1 : 0;
+    else {
+      float amount=saturate(1-distance/blur);
+      alpha=amount*amount*(3-2*amount);
+    }
+    return i.color*alpha;
+  }
   float distance;
   if (i.extra.w > 0.5) {
     float2 a=i.shape.xy, b=i.extra.xy, pa=i.pixel-a, ba=b-a;
     float h=saturate(dot(pa,ba)/max(dot(ba,ba),0.0001));
     distance=length(pa-ba*h)-i.extra.z*0.5;
   } else {
-    float2 center=i.rect.xy+i.rect.zw*0.5;
-    float radius = i.pixel.x < center.x
-      ? (i.pixel.y < center.y ? i.shape.x : i.shape.w)
-      : (i.pixel.y < center.y ? i.shape.y : i.shape.z);
-    radius=min(radius,min(i.rect.z,i.rect.w)*0.5);
-    float2 q=abs(i.pixel-center)-(i.rect.zw*0.5-radius);
-    distance=length(max(q,0))+min(max(q.x,q.y),0)-radius;
+    distance=roundedRectSignedDistance(i.pixel,i.rect,i.shape);
   }
   float coverage=saturate(0.5-distance);
   float4 color=i.paint.x>3.5 ? sampleMesh(i) : (i.paint.x>0.5 ? sampleGradient(i) : i.color);
   return color*coverage;
+}
+struct CompositeOut { float4 position:SV_POSITION; };
+CompositeOut vsComposite(uint vertex:SV_VertexID) {
+  const float2 positions[3] = { float2(-1,-1),float2(-1,3),float2(3,-1) };
+  CompositeOut output;
+  output.position=float4(positions[vertex],0,1);
+  return output;
+}
+float4 psComposite(CompositeOut input):SV_TARGET {
+  return retainedTexture.Load(int3(int2(input.position.xy),0));
 })";
 
 HRESULT compileShader(const char *entry, const char *target, ID3DBlob **blob) {
@@ -654,6 +742,7 @@ struct NsgpSurfaceState {
     std::vector<uint64_t> order;
     ComPtr<IDXGISwapChain1> swapchain;
     ComPtr<ID3D11Texture2D> retained_texture;
+    ComPtr<ID3D11ShaderResourceView> retained_srv;
     uint64_t retained_generation = 0;
 };
 
@@ -662,6 +751,8 @@ struct NsgpEngine {
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11VertexShader> vertex_shader;
     ComPtr<ID3D11PixelShader> pixel_shader;
+    ComPtr<ID3D11VertexShader> composite_vertex_shader;
+    ComPtr<ID3D11PixelShader> composite_pixel_shader;
     ComPtr<ID3D11Buffer> constant_buffer;
     ComPtr<ID3D11Buffer> instance_buffer;
     ComPtr<ID3D11ShaderResourceView> instance_srv;
@@ -670,7 +761,6 @@ struct NsgpEngine {
     ComPtr<ID3D11Buffer> mesh_patch_buffer;
     ComPtr<ID3D11ShaderResourceView> mesh_patch_srv;
     ComPtr<ID3D11BlendState> blend;
-    ComPtr<ID3D11BlendState> underlay_blend;
     size_t instance_capacity = 0;
     size_t gradient_stop_capacity = 0;
     size_t mesh_patch_capacity = 0;
@@ -725,34 +815,26 @@ static D3D11_BLEND_DESC sourceOverBlendDesc() {
     return blend;
 }
 
-static D3D11_BLEND_DESC destinationOverBlendDesc() {
-    D3D11_BLEND_DESC blend = sourceOverBlendDesc();
-    blend.RenderTarget[0].SrcBlend = D3D11_BLEND_INV_DEST_ALPHA;
-    blend.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
-    blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_INV_DEST_ALPHA;
-    blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
-    return blend;
-}
-
 static bool createEngine(NsgpEngine *engine) {
     D3D_FEATURE_LEVEL level;
     if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
         D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
         &engine->device, &level, &engine->context))) return false;
 
-    ComPtr<ID3DBlob> vs, ps;
+    ComPtr<ID3DBlob> vs, ps, composite_vs, composite_ps;
     if (FAILED(compileShader("vsMain", "vs_5_0", &vs)) ||
-        FAILED(compileShader("psMain", "ps_5_0", &ps))) return false;
+        FAILED(compileShader("psMain", "ps_5_0", &ps)) ||
+        FAILED(compileShader("vsComposite", "vs_5_0", &composite_vs)) ||
+        FAILED(compileShader("psComposite", "ps_5_0", &composite_ps))) return false;
     if (FAILED(engine->device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &engine->vertex_shader)) ||
-        FAILED(engine->device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &engine->pixel_shader))) return false;
+        FAILED(engine->device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &engine->pixel_shader)) ||
+        FAILED(engine->device->CreateVertexShader(composite_vs->GetBufferPointer(), composite_vs->GetBufferSize(), nullptr, &engine->composite_vertex_shader)) ||
+        FAILED(engine->device->CreatePixelShader(composite_ps->GetBufferPointer(), composite_ps->GetBufferSize(), nullptr, &engine->composite_pixel_shader))) return false;
     D3D11_BUFFER_DESC cb = {};
     cb.ByteWidth = 16; cb.Usage = D3D11_USAGE_DYNAMIC; cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(engine->device->CreateBuffer(&cb, nullptr, &engine->constant_buffer))) return false;
     D3D11_BLEND_DESC blend = sourceOverBlendDesc();
-    D3D11_BLEND_DESC underlay_blend = destinationOverBlendDesc();
-    return SUCCEEDED(engine->device->CreateBlendState(&blend, &engine->blend)) &&
-        SUCCEEDED(engine->device->CreateBlendState(&underlay_blend,
-            &engine->underlay_blend));
+    return SUCCEEDED(engine->device->CreateBlendState(&blend, &engine->blend));
 }
 
 static bool resizeSwapchain(NativeSdkD3DPresenter *p, UINT width, UINT height) {
@@ -962,18 +1044,16 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
     ComPtr<ID3D11RenderTargetView> rtv;
     if (FAILED(state->swapchain->GetBuffer(0, IID_PPV_ARGS(&back))) ||
         FAILED(engine->device->CreateRenderTargetView(back.Get(), nullptr, &rtv))) return false;
-    if (state->retained_texture) {
+    const float alpha = clear_a / 255.0f;
+    const float clear[4] = { clear_r / 255.0f * alpha, clear_g / 255.0f * alpha,
+        clear_b / 255.0f * alpha, alpha };
+    if (state->retained_texture && !retained_above_packet) {
         engine->context->CopyResource(back.Get(), state->retained_texture.Get());
     } else {
-        const float alpha = clear_a / 255.0f;
-        const float clear[4] = { clear_r / 255.0f * alpha, clear_g / 255.0f * alpha,
-            clear_b / 255.0f * alpha, alpha };
         engine->context->ClearRenderTargetView(rtv.Get(), clear);
     }
     engine->context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
-    engine->context->OMSetBlendState(
-        retained_above_packet ? engine->underlay_blend.Get() : engine->blend.Get(),
-        nullptr, 0xffffffff);
+    engine->context->OMSetBlendState(engine->blend.Get(), nullptr, 0xffffffff);
     D3D11_VIEWPORT viewport = { 0, 0, (float)width, (float)height, 0, 1 };
     engine->context->RSSetViewports(1, &viewport);
     engine->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -988,6 +1068,14 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
     engine->context->VSSetShaderResources(0, 1, &null_srv);
     engine->context->PSSetShaderResources(1, 1, &null_srv);
     engine->context->PSSetShaderResources(2, 1, &null_srv);
+    if (retained_above_packet) {
+        if (!state->retained_srv) return false;
+        engine->context->VSSetShader(engine->composite_vertex_shader.Get(), nullptr, 0);
+        engine->context->PSSetShader(engine->composite_pixel_shader.Get(), nullptr, 0);
+        engine->context->PSSetShaderResources(3, 1, state->retained_srv.GetAddressOf());
+        engine->context->Draw(3, 0);
+        engine->context->PSSetShaderResources(3, 1, &null_srv);
+    }
     if (FAILED(state->swapchain->Present(present_interval, 0))) return false;
     state->retained = std::move(next_retained); state->order = std::move(next_order); state->generation = generation;
     return true;
@@ -1053,6 +1141,7 @@ static bool resizeSharedSurface(NativeSdkD3DSharedSurface *surface, UINT width,
     renderer->engine.context->OMSetRenderTargets(0, nullptr, nullptr);
     surface->state.swapchain.Reset();
     surface->state.retained_texture.Reset();
+    surface->state.retained_srv.Reset();
     surface->state.retained_generation = 0;
     if (surface->composition_handle) {
         CloseHandle(surface->composition_handle);
@@ -1128,6 +1217,7 @@ bool nativeSdkD3DSharedSurfacePresent(NativeSdkD3DSharedSurface *surface,
         // pure move preserves the pixel extent. Retained pixels and packet
         // state must be republished once; subsequent frames reuse normally.
         surface->state.retained_texture.Reset();
+        surface->state.retained_srv.Reset();
         surface->state.retained_generation = 0;
         surface->state.retained.clear();
         surface->state.order.clear();
@@ -1146,8 +1236,12 @@ bool nativeSdkD3DSharedSurfacePresent(NativeSdkD3DSharedSurface *surface,
             desc.MipLevels = 1; desc.ArraySize = 1;
             desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
             desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
             if (FAILED(renderer->engine.device->CreateTexture2D(&desc, nullptr,
-                &surface->state.retained_texture))) {
+                    &surface->state.retained_texture)) ||
+                FAILED(renderer->engine.device->CreateShaderResourceView(
+                    surface->state.retained_texture.Get(), nullptr,
+                    &surface->state.retained_srv))) {
                 finish_turn();
                 return false;
             }
@@ -1273,16 +1367,12 @@ bool waitForQuery(ID3D11DeviceContext *context, ID3D11Query *query,
     }
 }
 
-/// Opt-in, hardware-only GPU receipt. CI still compiles and shader-compiles
-/// this lane everywhere; a Windows machine with a real adapter runs it with
-/// NATIVE_SDK_D3D_GRADIENT_BENCH=1. An optional
-/// NATIVE_SDK_D3D_GRADIENT_BUDGET_US makes the measured per-draw timestamp a
-/// hard gate without pretending dissimilar GPUs share one universal budget.
+/// Hardware-only GPU receipt. The dedicated executable calls this outside
+/// Zig's test-runner protocol so a successful measurement has one unambiguous
+/// process exit and command log. NATIVE_SDK_D3D_GRADIENT_BUDGET_US optionally
+/// makes the timestamp a hard gate without pretending dissimilar GPUs share
+/// one universal budget.
 bool runMeshGpuTimestampBenchmark() {
-    char enabled[8] = {};
-    if (GetEnvironmentVariableA("NATIVE_SDK_D3D_GRADIENT_BENCH", enabled,
-            sizeof(enabled)) == 0 || strcmp(enabled, "1") != 0) return true;
-
     NsgpEngine engine;
     if (!createEngine(&engine)) return false; // hardware only; never WARP
     ComPtr<IDXGIDevice> dxgi_device;
@@ -1431,11 +1521,6 @@ extern "C" int native_sdk_d3d_presenter_tests() {
         sourceOverBlendDesc().RenderTarget[0];
     expect(source_over.SrcBlend == D3D11_BLEND_ONE);
     expect(source_over.DestBlend == D3D11_BLEND_INV_SRC_ALPHA);
-    const D3D11_RENDER_TARGET_BLEND_DESC destination_over =
-        destinationOverBlendDesc().RenderTarget[0];
-    expect(destination_over.SrcBlend == D3D11_BLEND_INV_DEST_ALPHA);
-    expect(destination_over.DestBlend == D3D11_BLEND_ONE);
-
     std::vector<uint8_t> bytes;
     appendTestScalar(&bytes, static_cast<uint8_t>(1)); // fill_rect_gradient
     appendTestScalar(&bytes, static_cast<uint8_t>(0x1a)); // clip + shape + paint
@@ -1488,6 +1573,58 @@ extern "C" int native_sdk_d3d_presenter_tests() {
         &rounded_clip_radius, sizeof(rounded_clip_radius));
     reader = { rounded_clip_bytes.data(),
         rounded_clip_bytes.data() + rounded_clip_bytes.size() };
+    expect(readCommand(reader, &command));
+    expect(command.instances.size() == 1);
+    if (command.instances.size() == 1) {
+        expect(closeEnough(command.instances[0].clip_radius.x, 4.0f));
+        expect(closeEnough(command.instances[0].clip_radius.y, 0.0f));
+    }
+
+    // A retained shadow immediately below a GPU gradient stays in the D3D
+    // packet. The decoder expands its rounded-rect distance field by the
+    // reference renderer's spread and blur instead of rejecting the effect
+    // and silently bouncing the whole hybrid frame to CPU pixels.
+    bytes.clear();
+    appendTestScalar(&bytes, static_cast<uint8_t>(12)); // shadow
+    appendTestScalar(&bytes, static_cast<uint8_t>(0x82)); // rounded clip + effect
+    appendTestRect(&bytes, 4.0f, 15.0f, 96.0f, 56.0f); // planned bounds
+    appendTestScalar(&bytes, 0.5f); // opacity
+    appendTestScalar(&bytes, 0.0f); // stroke width
+    appendTestScalar(&bytes, static_cast<uint8_t>(0)); // butt cap
+    appendTestRect(&bytes, 0.0f, 0.0f, 96.0f, 48.0f);
+    for (uint8_t corner = 0; corner < 4; ++corner) appendTestScalar(&bytes, 24.0f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(1)); // shadow effect
+    appendTestRect(&bytes, 10.0f, 20.0f, 80.0f, 40.0f);
+    for (uint8_t corner = 0; corner < 4; ++corner) appendTestScalar(&bytes, 4.0f);
+    appendTestScalar(&bytes, 2.0f); // offset x
+    appendTestScalar(&bytes, 3.0f); // offset y
+    appendTestScalar(&bytes, 6.0f); // blur
+    appendTestScalar(&bytes, 2.0f); // spread
+    appendTestColor(&bytes, 0.0f, 0.0f, 0.0f, 0.5f);
+    appendTestScalar(&bytes, static_cast<uint8_t>(0)); // outset
+    reader = { bytes.data(), bytes.data() + bytes.size() };
+    expect(readCommand(reader, &command));
+    expect(reader.cursor == reader.end);
+    expect(command.instances.size() == 1);
+    if (command.instances.size() == 1) {
+        const Instance &shadow = command.instances[0];
+        expect(closeEnough(shadow.rect.x, 4.0f));
+        expect(closeEnough(shadow.rect.y, 15.0f));
+        expect(closeEnough(shadow.rect.z, 96.0f));
+        expect(closeEnough(shadow.rect.w, 56.0f));
+        expect(closeEnough(shadow.gradient.x, 10.0f));
+        expect(closeEnough(shadow.gradient.y, 21.0f));
+        expect(closeEnough(shadow.gradient.z, 84.0f));
+        expect(closeEnough(shadow.gradient.w, 44.0f));
+        expect(closeEnough(shadow.shape.x, 6.0f));
+        expect(closeEnough(shadow.clip_radius.x, 24.0f));
+        expect(closeEnough(shadow.gradient_options.z, 6.0f));
+        expect(closeEnough(shadow.color.w, 0.25f));
+        expect(closeEnough(shadow.paint.x, -1.0f));
+    }
+
+    bytes.back() = 1; // inset shadows remain on the exact reference path
+    reader = { bytes.data(), bytes.data() + bytes.size() };
     expect(!readCommand(reader, &command));
 
     // A quarter-turn plus non-uniform scale exercises every affine term. The
@@ -1739,7 +1876,10 @@ extern "C" int native_sdk_d3d_presenter_tests() {
     ComPtr<ID3DBlob> pixel_shader;
     expect(SUCCEEDED(compileShader("vsMain", "vs_5_0", &vertex_shader)));
     expect(SUCCEEDED(compileShader("psMain", "ps_5_0", &pixel_shader)));
-    expect(runMeshGpuTimestampBenchmark());
     return failures;
+}
+
+extern "C" int native_sdk_d3d_gradient_benchmark() {
+    return runMeshGpuTimestampBenchmark() ? 0 : 1;
 }
 #endif

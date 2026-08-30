@@ -126,6 +126,9 @@ static void disconnectRenderer(NativeSdkSharedRendererClient *client) {
     client->visual.Reset();
     client->target.Reset();
     client->composition.Reset();
+    if (client->window) {
+        RemovePropW(client->window, kWeaverSharedCompositionSurfaceProperty);
+    }
     if (client->surface_handle) CloseHandle(client->surface_handle);
     client->surface_handle = nullptr;
     client->visual_geometry_generation = 0;
@@ -406,6 +409,11 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
             return false;
         }
         client->surface = surface;
+        if (!SetPropW(client->window,
+                kWeaverSharedCompositionSurfaceProperty, replacement)) {
+            logSharedFailure(client, "publish-composition-handle",
+                logical_width, logical_height, scale, geometry);
+        }
         if (client->surface_handle) CloseHandle(client->surface_handle);
         client->surface_handle = replacement;
         const char *action = client->visual_geometry_generation == 0 ? "created-rebound" : "resized-rebound";
