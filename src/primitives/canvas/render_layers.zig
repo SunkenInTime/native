@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -14,6 +15,21 @@ const radiiEqual = equality_model.radiiEqual;
 const affinesEqual = fingerprints.affinesEqual;
 const renderLayerFingerprint = fingerprints.renderLayerFingerprint;
 const renderLayerFingerprintAppend = fingerprints.renderLayerFingerprintAppend;
+
+// Transform/inverse pairs around vector icons can leave a sub-pixel f32
+// residue (observed at 0.0000305 px). The draw command keeps that exact
+// transform, but it does not need a separate cached compositing layer.
+const layer_transform_epsilon: f32 = 0.0001;
+
+fn affineIsEffectivelyIdentity(transform: Affine) bool {
+    const identity = Affine.identity();
+    return std.math.approxEqAbs(f32, transform.a, identity.a, layer_transform_epsilon) and
+        std.math.approxEqAbs(f32, transform.b, identity.b, layer_transform_epsilon) and
+        std.math.approxEqAbs(f32, transform.c, identity.c, layer_transform_epsilon) and
+        std.math.approxEqAbs(f32, transform.d, identity.d, layer_transform_epsilon) and
+        std.math.approxEqAbs(f32, transform.tx, identity.tx, layer_transform_epsilon) and
+        std.math.approxEqAbs(f32, transform.ty, identity.ty, layer_transform_epsilon);
+}
 
 pub const RenderLayer = struct {
     command_start: usize = 0,
@@ -53,7 +69,7 @@ pub const RenderLayerPlan = struct {
     pub fn transformLayerCount(self: RenderLayerPlan) usize {
         var count: usize = 0;
         for (self.layers) |layer| {
-            if (!affinesEqual(layer.transform, Affine.identity())) count += 1;
+            if (!affineIsEffectivelyIdentity(layer.transform)) count += 1;
         }
         return count;
     }
@@ -232,7 +248,7 @@ pub const RenderLayerCachePlanner = struct {
 };
 
 fn renderCommandNeedsLayer(command: anytype) bool {
-    return command.opacity != 1 or command.clip != null or !affinesEqual(command.transform, Affine.identity());
+    return command.opacity != 1 or command.clip != null or !affineIsEffectivelyIdentity(command.transform);
 }
 
 fn renderLayerCanExtend(layer: RenderLayer, command: anytype, index: usize) bool {

@@ -168,7 +168,7 @@ const catalog_card_children = [_]canvas.Widget{canvas.builtinComponentWidget(.ca
     // The catalog's fixed frames were tuned against 16px card padding;
     // the component default is now the component default of 24, so the compact inset
     // is pinned explicitly here.
-    .layout = .{ .padding = geometry.InsetsF.all(16), .gap = 12, .clip_content = true },
+    .layout = .{ .padding = geometry.InsetsF.all(16), .gap = 12, .flags = .{ .clip_content = true } },
     .children = &catalog_card_preview_children,
 })};
 const catalog_checkbox_children = [_]canvas.Widget{canvas.builtinComponentWidget(.checkbox, .{
@@ -592,7 +592,7 @@ pub fn componentCatalogItem(kind: canvas.BuiltinComponentKind, index: usize) can
         // Fixed-geometry catalog cards keep the compact 16px inset the
         // preview frames were tuned against (the component default is
         // the component default of 24).
-        .layout = .{ .padding = geometry.InsetsF.all(16), .gap = 12, .clip_content = true },
+        .layout = .{ .padding = geometry.InsetsF.all(16), .gap = 12, .flags = .{ .clip_content = true } },
         .semantics = .{ .label = canvas.builtinComponentName(kind) },
         .children = componentCatalogPreviewChildren(kind),
     });
@@ -759,15 +759,18 @@ pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetL
     // commits, Escape dismisses back to the trigger) applies as-is.
     const environment_select_trigger = canvas.Widget{ .id = environment_select_id, .kind = .select, .frame = rect(0, 0, 180, 34), .text = environmentLabel(ui_state.environment_index), .command = environment_toggle_command, .state = .{ .expanded = ui_state.environment_select_open }, .semantics = .{ .label = "Environment select" } };
     const environment_closed_children = [_]canvas.Widget{environment_select_trigger};
-    const environment_open_children = [_]canvas.Widget{ environment_select_trigger, canvas.builtinComponentWidget(.dropdown_menu, .{
-        .id = environment_menu_id,
-        // 3 rows on the menu's comfortable 32px band + the surface's
-        // 4px padding and 2px gaps.
-        .frame = rect(0, 0, 180, 108),
-        .layout = .{ .anchor = .{ .placement = .below, .alignment = .stretch } },
-        .semantics = .{ .label = "Environment options" },
-        .children = &environment_menu_items,
-    }) };
+    const environment_open_children = [_]canvas.Widget{
+        environment_select_trigger,
+        canvas.builtinComponentWidget(.dropdown_menu, .{
+            .id = environment_menu_id,
+            // 3 rows on the menu's comfortable 32px band + the surface's
+            // 4px padding and 2px gaps.
+            .frame = rect(0, 0, 180, 108),
+            .layout = .{ .anchor = .{ .placement = .below, .alignment = .stretch } },
+            .semantics = .{ .label = "Environment options" },
+            .children = &environment_menu_items,
+        }),
+    };
     const form_controls = [_]canvas.Widget{
         .{ .id = 111, .kind = .input, .frame = rect(0, 0, 148, 34), .text = "native-sdk", .semantics = .{ .label = "Project name" } },
         .{ .id = 112, .kind = .combobox, .frame = rect(166, 0, 172, 34), .text = "components", .semantics = .{ .label = "Component combobox" } },
@@ -863,7 +866,7 @@ pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetL
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 106, .kind = .stack, .frame = rect(64, 124, 352, 374), .semantics = .{ .label = "Input controls" }, .children = &form_controls });
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 120, .kind = .list, .frame = rect(456, 124, 170, 56), .value = virtual_scroll.nav, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Component navigation" }, .children = &nav_items });
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 130, .kind = .scroll_view, .frame = rect(652, 124, 186, 56), .value = virtual_scroll.behavior, .layout = .{ .virtualized = true, .virtual_item_extent = 28, .virtual_overscan = 0 }, .semantics = .{ .label = "Scrollable behavior list" }, .children = &scroll_items });
-            try appendComponentWidget(&content_widgets, &content_widget_count, canvas.builtinComponentWidget(.card, .{ .id = 174, .frame = rect(456, 384, 276, 156), .text = "Team plan", .layout = .{ .padding = geometry.InsetsF.all(16), .gap = 12, .clip_content = true }, .semantics = .{ .label = "Team plan card" }, .children = &card_preview_children }));
+            try appendComponentWidget(&content_widgets, &content_widget_count, canvas.builtinComponentWidget(.card, .{ .id = 174, .frame = rect(456, 384, 276, 156), .text = "Team plan", .layout = .{ .padding = geometry.InsetsF.all(16), .gap = 12, .flags = .{ .clip_content = true } }, .semantics = .{ .label = "Team plan card" }, .children = &card_preview_children }));
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 175, .kind = .button, .frame = rect(456, 560, 124, 40), .text = "Dialog", .variant = .outline, .command = surface_dialog_command, .semantics = .{ .label = "Open dialog" } });
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 176, .kind = .button, .frame = rect(594, 560, 108, 40), .text = "Drawer", .variant = .outline, .command = surface_drawer_command, .semantics = .{ .label = "Open drawer" } });
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 177, .kind = .button, .frame = rect(716, 560, 108, 40), .text = "Sheet", .variant = .outline, .command = surface_sheet_command, .semantics = .{ .label = "Open sheet" } });
@@ -891,7 +894,7 @@ pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetL
         },
         .surfaces => {
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 101, .kind = .text, .frame = rect(64, 56, 240, 26), .text = "Surfaces", .size = .lg });
-            try appendComponentWidget(&content_widgets, &content_widget_count, canvas.builtinComponentWidget(.card, .{ .id = 174, .frame = rect(64, 124, 276, 156), .text = "Team plan", .layout = .{ .padding = geometry.InsetsF.all(16), .gap = 12, .clip_content = true }, .semantics = .{ .label = "Team plan card" }, .children = &card_preview_children }));
+            try appendComponentWidget(&content_widgets, &content_widget_count, canvas.builtinComponentWidget(.card, .{ .id = 174, .frame = rect(64, 124, 276, 156), .text = "Team plan", .layout = .{ .padding = geometry.InsetsF.all(16), .gap = 12, .flags = .{ .clip_content = true } }, .semantics = .{ .label = "Team plan card" }, .children = &card_preview_children }));
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 140, .kind = .popover, .frame = rect(384, 124, 260, 126), .backdrop_blur_token = .sm, .semantics = .{ .label = "Project actions popover" }, .children = &popover_children });
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 175, .kind = .button, .frame = rect(64, 320, 170, 44), .text = "Dialog", .variant = .outline, .command = surface_dialog_command, .semantics = .{ .label = "Open dialog" } });
             try appendComponentWidget(&content_widgets, &content_widget_count, .{ .id = 176, .kind = .button, .frame = rect(248, 320, 120, 44), .text = "Drawer", .variant = .outline, .command = surface_drawer_command, .semantics = .{ .label = "Open drawer" } });
@@ -952,7 +955,7 @@ pub fn buildComponentsWidgetLayoutWithStateSizeAndTokens(nodes: []canvas.WidgetL
         .kind = .scroll_view,
         .frame = rect(sidebar_width, content_y, content_width, content_height_available),
         .value = virtual_scroll.page,
-        .layout = .{ .clip_content = true },
+        .layout = .{ .flags = .{ .clip_content = true } },
         .style = transparentContentStyle(),
         .semantics = .{ .label = "Component section content" },
         .children = content_children[0 .. content_widget_count + 1],

@@ -1243,7 +1243,8 @@ test "the uptime value paragraph moved to markup unchanged" {
     try testing.expectEqual(canvas.TextSpanWeight.bold, markup_node.widget.spans[0].weight);
     try testing.expectEqual(hand_node.widget.layout.min_size, markup_node.widget.layout.min_size);
     try testing.expectEqual(hand_node.widget.layout.max_size, markup_node.widget.layout.max_size);
-    try testing.expectEqual(view_mod.spark_width, markup_node.widget.layout.min_size.width);
+    try testing.expect(markup_node.widget.layout.flags.preferred_width_set);
+    try testing.expectEqual(view_mod.spark_width, markup_node.widget.frame.width);
     try testing.expectEqual(canvas.WidgetSize.heading, markup_node.widget.size);
     try testing.expectEqualStrings(hand_node.widget.semantics.label, markup_node.widget.semantics.label);
     // One text run for assistive tech: spans stay visual.

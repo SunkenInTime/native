@@ -958,6 +958,20 @@ test "render layer plan groups composited commands by state" {
     var changed_layers: [1]RenderLayer = undefined;
     const changed_layer_plan = try changed_render_plan.layerPlan(&changed_layers);
     try std.testing.expect(layer_plan.layers[0].fingerprint != changed_layer_plan.layers[0].fingerprint);
+
+    const residual = Affine.translate(0.000030517578, -0.000030517578);
+    const residual_commands = [_]CanvasCommand{
+        .{ .transform = residual },
+        .{ .fill_rect = .{ .id = 5, .rect = geometry.RectF.init(0, 24, 20, 20), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+    };
+    var residual_render_commands: [1]RenderCommand = undefined;
+    const residual_render_plan = try (DisplayList{ .commands = &residual_commands }).renderPlan(&residual_render_commands);
+    var residual_layers: [1]RenderLayer = undefined;
+    const residual_layer_plan = try residual_render_plan.layerPlan(&residual_layers);
+    try std.testing.expectEqual(@as(usize, 0), residual_layer_plan.layerCount());
+    // Layer elision is a cache decision; draw geometry retains the authored
+    // transform byte-for-byte.
+    try std.testing.expectEqualDeep(residual, residual_render_plan.commands[0].transform);
 }
 
 test "render layer cache plan uploads retains and evicts layers" {

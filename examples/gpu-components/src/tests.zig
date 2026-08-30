@@ -387,7 +387,7 @@ test "gpu components layout keeps finished controls visually separated" {
     try expectComponentWidgetFrame(dialog_layout, surface_overlay_close_id, rect(dialog_frame.x + dialog_frame.width - 116, dialog_frame.y + dialog_frame.height - 54, 96, 34));
     try std.testing.expectEqual(@as(i32, surface_backdrop_layer), dialog_layout.findById(surface_overlay_backdrop_id).?.widget.layer.?);
     try std.testing.expectEqual(@as(i32, surface_overlay_layer), dialog_layout.findById(surface_overlay_id).?.widget.layer.?);
-    try std.testing.expect(dialog_layout.findById(surface_overlay_id).?.widget.layout.clip_content);
+    try std.testing.expect(dialog_layout.findById(surface_overlay_id).?.widget.layout.flags.clip_content);
 
     var dialog_commands: [max_component_commands]canvas.CanvasCommand = undefined;
     var dialog_builder = canvas.Builder.init(&dialog_commands);
