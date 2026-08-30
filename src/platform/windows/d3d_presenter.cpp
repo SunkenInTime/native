@@ -43,6 +43,7 @@ struct Instance {
     F4 color;
     F4 shape; // radius, kind (0 rounded rect / 1 line), x1, y1
     F4 extra; // x2, y2, thickness, unused
+    F4 clip; // x/y/width/height; negative width means no clip
     F4 gradient; // linear start/end; radial center/radii; conic center/start angle
     F4 gradient_options; // spread (pad/repeat/reflect), interpolation, unused
     F4 paint; // kind (0 color / 1 linear / 2 radial / 3 conic), stop offset/count, opacity
@@ -60,7 +61,7 @@ struct MeshPatchInstance {
     F4 options; // interpolation, unused
 };
 
-static_assert(sizeof(Instance) == 112);
+static_assert(sizeof(Instance) == 128);
 static_assert(sizeof(GradientStopInstance) == 32);
 static_assert(sizeof(MeshPatchInstance) == 224);
 
@@ -182,7 +183,7 @@ bool readPaint(PacketReader &reader, Instance *instance,
 
 bool readCommand(PacketReader &reader, RetainedCommand *out) {
     uint8_t kind = 0, flags = 0, cap = 0;
-    F4 bounds = {}, clip = {};
+    F4 bounds = {}, clip = { 0, 0, -1, -1 };
     float opacity = 1, stroke_width = 0;
     if (!reader.u8(&kind) || !reader.u8(&flags) || !reader.rect(&bounds) ||
         !reader.f32(&opacity) || !reader.f32(&stroke_width) || !reader.u8(&cap)) return false;
@@ -190,10 +191,12 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     if (flags & 0x02) {
         F4 clip_radius = {};
         if (!reader.rect(&clip) || !readRadius(reader, &clip_radius)) return false;
-        // Per-command rounded clipping is not represented in the instance
-        // pipeline yet. Reject it so the established CPU fallback paints it
-        // correctly instead of silently drawing outside the clip.
-        return false;
+        // Production hybrid/immediate canvas draws all carry a structural
+        // rectangular clip. Rounded clips need a second corner SDF that this
+        // instance shader does not represent yet, so only those fall back to
+        // the reference pixel renderer.
+        if (clip_radius.x != 0 || clip_radius.y != 0 ||
+            clip_radius.z != 0 || clip_radius.w != 0) return false;
     }
     if (flags & 0x04) {
         float transform[6];
@@ -212,6 +215,7 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     Instance base = {};
     base.rect = bounds;
     base.extra.w = 0;
+    base.clip = clip;
 
     if (shape_tag == 1) {
         if (!reader.rect(&base.rect)) return false;
@@ -304,23 +308,22 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     out->instances = std::move(instances);
     out->gradient_stops = std::move(gradient_stops);
     out->mesh_patches = std::move(mesh_patches);
-    (void)clip;
     return true;
 }
 
 const char *shaderSource = R"(
-struct Instance { float4 rect; float4 color; float4 shape; float4 extra; float4 gradient; float4 gradientOptions; float4 paint; };
+struct Instance { float4 rect; float4 color; float4 shape; float4 extra; float4 clip; float4 gradient; float4 gradientOptions; float4 paint; };
 struct GradientStopInstance { float4 color; float4 data; };
 struct MeshPatchInstance { float4 points[8]; float4 colors[4]; float4 bounds; float4 options; };
 StructuredBuffer<Instance> instances : register(t0);
 StructuredBuffer<GradientStopInstance> gradientStops : register(t1);
 StructuredBuffer<MeshPatchInstance> meshPatches : register(t2);
-struct Out { float4 position:SV_POSITION; float2 pixel:TEXCOORD0; nointerpolation float4 rect:TEXCOORD1; nointerpolation float4 color:COLOR0; nointerpolation float4 shape:TEXCOORD2; nointerpolation float4 extra:TEXCOORD3; nointerpolation float4 gradient:TEXCOORD4; nointerpolation float4 gradientOptions:TEXCOORD5; nointerpolation float4 paint:TEXCOORD6; };
+struct Out { float4 position:SV_POSITION; float2 pixel:TEXCOORD0; nointerpolation float4 rect:TEXCOORD1; nointerpolation float4 color:COLOR0; nointerpolation float4 shape:TEXCOORD2; nointerpolation float4 extra:TEXCOORD3; nointerpolation float4 clip:TEXCOORD4; nointerpolation float4 gradient:TEXCOORD5; nointerpolation float4 gradientOptions:TEXCOORD6; nointerpolation float4 paint:TEXCOORD7; };
 cbuffer Surface : register(b0) { float2 surface; float2 padding; };
 Out vsMain(uint vertex:SV_VertexID, uint instance:SV_InstanceID) {
   const float2 corners[6] = { float2(0,0),float2(1,0),float2(0,1),float2(0,1),float2(1,0),float2(1,1) };
   Instance i=instances[instance]; float2 p=i.rect.xy+corners[vertex]*i.rect.zw;
-  Out o; o.position=float4(p.x/surface.x*2-1,1-p.y/surface.y*2,0,1); o.pixel=p; o.rect=i.rect; o.color=i.color; o.shape=i.shape; o.extra=i.extra; o.gradient=i.gradient; o.gradientOptions=i.gradientOptions; o.paint=i.paint; return o;
+  Out o; o.position=float4(p.x/surface.x*2-1,1-p.y/surface.y*2,0,1); o.pixel=p; o.rect=i.rect; o.color=i.color; o.shape=i.shape; o.extra=i.extra; o.clip=i.clip; o.gradient=i.gradient; o.gradientOptions=i.gradientOptions; o.paint=i.paint; return o;
 }
 float srgbToLinear(float value) {
   value=saturate(value);
@@ -516,6 +519,8 @@ float4 sampleMesh(Out i) {
   return float4(0,0,0,0);
 }
 float4 psMain(Out i):SV_TARGET {
+  if (i.clip.z>=0 && (i.pixel.x<i.clip.x || i.pixel.y<i.clip.y ||
+      i.pixel.x>i.clip.x+i.clip.z || i.pixel.y>i.clip.y+i.clip.w)) discard;
   float distance;
   if (i.extra.w > 0.5) {
     float2 a=i.shape.xy, b=i.extra.xy, pa=i.pixel-a, ba=b-a;
@@ -1180,6 +1185,7 @@ bool runMeshGpuTimestampBenchmark() {
 
     Instance instance = {};
     instance.rect = { 0, 0, static_cast<float>(width), static_cast<float>(height) };
+    instance.clip = { 0, 0, -1, -1 };
     instance.paint = { 4, 0, static_cast<float>(patch_columns * patch_rows), 1 };
     std::vector<MeshPatchInstance> patches(patch_columns * patch_rows);
     for (UINT patch_row = 0; patch_row < patch_rows; ++patch_row) {
@@ -1301,11 +1307,13 @@ extern "C" int native_sdk_d3d_presenter_tests() {
 
     std::vector<uint8_t> bytes;
     appendTestScalar(&bytes, static_cast<uint8_t>(1)); // fill_rect_gradient
-    appendTestScalar(&bytes, static_cast<uint8_t>(0x18)); // shape + paint
+    appendTestScalar(&bytes, static_cast<uint8_t>(0x1a)); // clip + shape + paint
     appendTestRect(&bytes, 10.0f, 20.0f, 80.0f, 40.0f); // bounds
     appendTestScalar(&bytes, 0.25f); // opacity
     appendTestScalar(&bytes, 0.0f); // stroke width
     appendTestScalar(&bytes, static_cast<uint8_t>(0)); // butt cap
+    appendTestRect(&bytes, 20.0f, 25.0f, 50.0f, 25.0f); // structural clip
+    for (uint8_t corner = 0; corner < 4; ++corner) appendTestScalar(&bytes, 0.0f);
     appendTestScalar(&bytes, static_cast<uint8_t>(1)); // rect
     appendTestRect(&bytes, 10.0f, 20.0f, 80.0f, 40.0f);
     appendTestGradientPaint(&bytes, 2, 2, 2);
@@ -1320,6 +1328,10 @@ extern "C" int native_sdk_d3d_presenter_tests() {
         const Instance &instance = command.instances[0];
         expect(closeEnough(instance.paint.x, 1.0f));
         expect(closeEnough(instance.paint.w, 0.25f));
+        expect(closeEnough(instance.clip.x, 20.0f));
+        expect(closeEnough(instance.clip.y, 25.0f));
+        expect(closeEnough(instance.clip.z, 50.0f));
+        expect(closeEnough(instance.clip.w, 25.0f));
         expect(closeEnough(instance.gradient.x, 10.0f));
         expect(closeEnough(instance.gradient.y, 20.0f));
         expect(closeEnough(instance.gradient.z, 90.0f));
