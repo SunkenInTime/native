@@ -15,7 +15,9 @@
 # same change, with the reasoning in the commit.
 #
 # Calibration (healthy p50, median of 3): first-frame 4016, keystroke
-# 2064, toggle 6640, scroll 3418, chart-tick 43, doc-edit 1039.
+# 2064, toggle 6640, scroll 3418, chart-tick 43. Markdown was recalibrated
+# at 1583 after retained text styling made the fixture exercise its complete
+# production path; the previous 1039 sample predated that work.
 #
 # first-frame: noisiest scenario (12 iterations, cold caches by design);
 # observed 3971-5010 across healthy runs, so the budget carries extra
@@ -52,8 +54,10 @@ gradient-grid-update 500
 # Windows shader time is a separate D3D timestamp lane.
 mesh-grid-update 500
 # markdown-doc-edit: guards markdown re-render + plan cost on a
-# README-sized doc; the pre-fix number was ~2400.
-markdown-doc-edit 1500
+# README-sized doc; healthy retained-text styling is 1583us and the old
+# full-plan regression was ~2400. The 2100us ratchet preserves that signal
+# while carrying the same ~1.3x noise headroom as the other scenarios.
+markdown-doc-edit 2100
 # keystroke-measured-text: guards the batched measure seam and its
 # retained caches on the provider path (a counting synthetic provider
 # stands in for CoreText). Healthy p50 ~540-660 across calibration runs.

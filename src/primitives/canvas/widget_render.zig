@@ -675,7 +675,7 @@ fn emitImmediateCanvas(builder: *Builder, widget: Widget) Error!void {
                 .color = value.color,
                 .inset = value.inset,
             }),
-            .text_shadow, .text_font, .icon_path, .background_gradient, .background_mesh_gradient, .hover_style, .pressed_style => continue,
+            .text_shadow, .text_font, .icon_path, .background_gradient, .background_mesh_gradient, .corner_radii, .hover_style, .pressed_style => continue,
             .fill_rect => |value| try builder.fillRect(.{
                 .id = id,
                 .rect = value.rect.translate(.{ .dx = widget.frame.x, .dy = widget.frame.y }),
@@ -743,7 +743,7 @@ fn emitContainerGradient(builder: *Builder, widget: Widget) Error!void {
 fn widgetHasImmediateCanvasPaint(widget: Widget) bool {
     for (widget.immediate_commands) |command| switch (command) {
         .fill_rect, .fill_rounded_rect, .fill_circle, .line, .polyline, .box_shadow => return true,
-        .text_style, .text_shadow, .text_font, .icon_path, .background_gradient, .background_mesh_gradient, .hover_style, .pressed_style => {},
+        .text_style, .text_shadow, .text_font, .icon_path, .background_gradient, .background_mesh_gradient, .corner_radii, .hover_style, .pressed_style => {},
     };
     return false;
 }

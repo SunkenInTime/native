@@ -305,6 +305,7 @@ const sampleCanvasRenderAnimations = support.sampleCanvasRenderAnimations;
 const emitWidgetLayout = support.emitWidgetLayout;
 
 test "stack clip content emits its authored asymmetric rounded mask" {
+    const stack_radii = [_]canvas.ImmediateCanvasCommand{.{ .corner_radii = .{ .bottom_left = 2 } }};
     const child = Widget{
         .id = 2,
         .kind = .panel,
@@ -316,7 +317,8 @@ test "stack clip content emits its authored asymmetric rounded mask" {
         .kind = .stack,
         .frame = geometry.RectF.init(0, 0, 100, 60),
         .layout = .{ .flags = .{ .clip_content = true } },
-        .style = .{ .radius = 10, .radius_bottom_left = 2 },
+        .style = .{ .radius = 10 },
+        .immediate_commands = &stack_radii,
         .children = &.{child},
     };
     var commands: [8]CanvasCommand = undefined;
@@ -335,6 +337,7 @@ test "stack clip content emits its authored asymmetric rounded mask" {
 }
 
 test "image widget emits fit tile and asymmetric radius on the draw" {
+    const image_radii = [_]canvas.ImmediateCanvasCommand{.{ .corner_radii = .{ .bottom_left = 3 } }};
     const widget = Widget{
         .id = 4,
         .kind = .image,
@@ -343,7 +346,8 @@ test "image widget emits fit tile and asymmetric radius on the draw" {
         .image_fit = .contain,
         .image_sampling = .nearest,
         .image_tile = true,
-        .style = .{ .radius = 11, .radius_bottom_left = 3 },
+        .style = .{ .radius = 11 },
+        .immediate_commands = &image_radii,
     };
     var commands: [2]CanvasCommand = undefined;
     var builder = Builder.init(&commands);

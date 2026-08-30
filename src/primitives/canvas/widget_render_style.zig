@@ -445,17 +445,13 @@ pub fn controlRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32)
 }
 
 pub fn styleRadius(widget: Widget, base: Radius) Radius {
+    const corners = widget.cornerRadii();
     return .{
-        .top_left = cornerRadius(widget.style.radius_top_left, base.top_left),
-        .top_right = cornerRadius(widget.style.radius_top_right, base.top_right),
-        .bottom_right = cornerRadius(widget.style.radius_bottom_right, base.bottom_right),
-        .bottom_left = cornerRadius(widget.style.radius_bottom_left, base.bottom_left),
+        .top_left = nonNegative(corners.top_left orelse base.top_left),
+        .top_right = nonNegative(corners.top_right orelse base.top_right),
+        .bottom_right = nonNegative(corners.bottom_right orelse base.bottom_right),
+        .bottom_left = nonNegative(corners.bottom_left orelse base.bottom_left),
     };
-}
-
-fn cornerRadius(authored: f32, fallback: f32) f32 {
-    if (authored == widget_model.unset_widget_corner_radius) return nonNegative(fallback);
-    return nonNegative(authored);
 }
 
 /// Button corners: 10 (the lg radius token) at the default and lg

@@ -392,13 +392,6 @@ pub const WidgetLayoutStyle = struct {
     aspect_ratio: f32 = 0,
 };
 
-/// Per-corner radii are hot-path style data on every retained node. Keep an
-/// unset corner in-band so four rare overrides cost four floats, not four
-/// optional-float payload/tag pairs. Negative infinity cannot collide with an
-/// authored radius: every finite negative author value remains an explicit
-/// override and resolves through the existing non-negative clamp.
-pub const unset_widget_corner_radius = -std.math.inf(f32);
-
 /// Optional visual overrides for one pointer-interaction state. A null
 /// channel inherits the base `WidgetStyle` channel, so authors can change one
 /// property without restating the others. Pressed wins over hovered when
@@ -428,6 +421,21 @@ pub const WidgetInteractionStyle = struct {
     shadow: WidgetInteractionShadow = .inherit,
 };
 
+/// Rare per-corner radius overrides. Uniform radius remains in WidgetStyle;
+/// asymmetric corners ride the retained metadata slice so every ordinary
+/// widget does not grow four hot-path floats.
+pub const WidgetCornerRadii = struct {
+    top_left: ?f32 = null,
+    top_right: ?f32 = null,
+    bottom_right: ?f32 = null,
+    bottom_left: ?f32 = null,
+
+    pub fn isDefault(self: WidgetCornerRadii) bool {
+        return self.top_left == null and self.top_right == null and
+            self.bottom_right == null and self.bottom_left == null;
+    }
+};
+
 pub const WidgetStyle = struct {
     background: ?Color = null,
     foreground: ?Color = null,
@@ -436,10 +444,6 @@ pub const WidgetStyle = struct {
     border: ?Color = null,
     focus_ring: ?Color = null,
     radius: ?f32 = null,
-    radius_top_left: f32 = unset_widget_corner_radius,
-    radius_top_right: f32 = unset_widget_corner_radius,
-    radius_bottom_right: f32 = unset_widget_corner_radius,
-    radius_bottom_left: f32 = unset_widget_corner_radius,
     stroke_width: ?f32 = null,
     /// The quiet-surface knob: `true` removes this widget's HOVER wash —
     /// the pointer resting on it paints no fill. For image-forward
@@ -872,6 +876,9 @@ pub const ImmediateCanvasCommand = union(enum) {
     /// Two-dimensional retained background paint. Patches stay normalized in
     /// metadata and are materialized into builder-owned absolute geometry.
     background_mesh_gradient: WidgetMeshGradient,
+    /// Asymmetric retained corner geometry. Uniform radius stays in the
+    /// compact WidgetStyle; only widgets with an override carry this entry.
+    corner_radii: WidgetCornerRadii,
     /// Rare retained visual metadata rides the existing command slice rather
     /// than enlarging every Widget. Emitters consume these entries as style;
     /// immediate canvases never draw them.
@@ -1065,6 +1072,14 @@ pub const Widget = struct {
             else => {},
         };
         return null;
+    }
+
+    pub fn cornerRadii(self: Widget) WidgetCornerRadii {
+        for (self.immediate_commands) |command| switch (command) {
+            .corner_radii => |radii| return radii,
+            else => {},
+        };
+        return .{};
     }
 };
 

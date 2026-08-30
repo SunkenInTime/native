@@ -945,10 +945,10 @@ test "widget text alignment emits local text layout options" {
     }
 }
 
-test "text-only styling does not grow the common retained Widget" {
-    // N3's compact common shape: future text-only metadata belongs in the
-    // existing rare-command side channel, not on every retained widget.
-    try std.testing.expectEqual(@as(usize, 728), @sizeOf(Widget));
+test "rare styling metadata does not grow the common retained Widget" {
+    // Text-only and asymmetric-corner metadata belong in the existing rare
+    // command side channel, not on every retained widget.
+    try std.testing.expectEqual(@as(usize, 712), @sizeOf(Widget));
 }
 
 test "panel chrome projects author inset shadow after its fill" {

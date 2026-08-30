@@ -396,6 +396,7 @@ pub const WidgetAnchorPlacement = widget_model.WidgetAnchorPlacement;
 pub const WidgetAnchorAlignment = widget_model.WidgetAnchorAlignment;
 pub const WidgetStyle = widget_model.WidgetStyle;
 pub const WidgetInteractionStyle = widget_model.WidgetInteractionStyle;
+pub const WidgetCornerRadii = widget_model.WidgetCornerRadii;
 pub const WidgetVariant = widget_model.WidgetVariant;
 pub const WidgetOverscroll = widget_model.WidgetOverscroll;
 pub const WidgetIconPlacement = widget_model.WidgetIconPlacement;
