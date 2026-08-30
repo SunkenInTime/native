@@ -502,11 +502,18 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
 
             const pixel_size = try canvasFramePixelSize(gpu_frame);
             if (pixels.len < pixel_size.byte_len) return error.InvalidGpuSurfacePixels;
+            const retained_clear = if (retained_composite == .above_packet)
+                canvas.Color.rgba8(0, 0, 0, 0)
+            else
+                clear_color;
+            const retained_clear_rgba8 = canvasColorToRgba8(retained_clear);
             const resized = !view.hybrid_retained_valid or
                 !sizesEqual(view.hybrid_retained_surface_size, gpu_frame.surface_size) or
                 view.hybrid_retained_scale != gpu_frame.scale or
                 view.hybrid_retained_composite != retained_composite;
-            const retained_changed = !view.hybrid_retained_valid or resized;
+            const retained_changed = !view.hybrid_retained_valid or
+                resized or
+                !std.meta.eql(view.hybrid_retained_clear_color_rgba8, retained_clear_rgba8);
             const retained_dirty: []const geometry.RectF = &.{};
             var retained_generation: u64 = 0;
             var retained_fingerprint = view.hybrid_retained_fingerprint;
@@ -532,10 +539,6 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 surface = surface.withImages(retained_frame.image_resources).withFonts(retained_frame.font_resources);
                 retained_pass.full_repaint = true;
                 retained_pass.dirty_bounds = null;
-                const retained_clear = if (retained_composite == .above_packet)
-                    canvas.Color.rgba8(0, 0, 0, 0)
-                else
-                    clear_color;
                 try surface.renderPass(retained_pass, retained_clear);
                 retained_generation = if (view.hybrid_retained_generation == std.math.maxInt(u64)) 1 else view.hybrid_retained_generation + 1;
             }
@@ -577,6 +580,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 view.hybrid_retained_surface_size = gpu_frame.surface_size;
                 view.hybrid_retained_scale = gpu_frame.scale;
                 view.hybrid_retained_composite = retained_composite;
+                view.hybrid_retained_clear_color_rgba8 = retained_clear_rgba8;
             }
             try view.copyPresentedCanvasSummary(display_list, gpu_frame.surface_size, gpu_frame.scale);
             var presented_frame = gpu_frame;

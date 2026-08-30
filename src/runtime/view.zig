@@ -215,6 +215,7 @@ pub const RuntimeView = struct {
     hybrid_retained_surface_size: geometry.SizeF = geometry.SizeF.init(0, 0),
     hybrid_retained_scale: f32 = 1,
     hybrid_retained_composite: platform.GpuSurfaceRetainedComposite = .below_packet,
+    hybrid_retained_clear_color_rgba8: [4]u8 = .{ 0, 0, 0, 0 },
     /// Layer-filtered immediate list rebuilt with the owned display list.
     /// Hybrid frame ticks plan this cache directly, so static retained
     /// commands are not even walked by the 60 Hz presentation path.
