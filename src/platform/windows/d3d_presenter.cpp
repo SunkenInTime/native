@@ -57,6 +57,7 @@ struct Instance {
     F4 clip_radius; // top-left, top-right, bottom-right, bottom-left
     F4 gradient; // linear start/end; radial center/radii; conic center/start angle
     F4 gradient_options; // spread, interpolation, shadow blur, radial basis
+    F4 conic_basis; // transformed authored x/y axes for inverse angle sampling
     F4 paint; // kind (-1 shadow / 0 color / 1 linear / 2 radial / 3 conic / 4 mesh), offsets/count, opacity
 };
 
@@ -72,7 +73,7 @@ struct MeshPatchInstance {
     F4 options; // interpolation, unused
 };
 
-static_assert(sizeof(Instance) == 144);
+static_assert(sizeof(Instance) == 160);
 static_assert(sizeof(GradientStopInstance) == 32);
 static_assert(sizeof(MeshPatchInstance) == 224);
 
@@ -222,6 +223,9 @@ bool applyCommandTransform(const Affine2D &transform, Instance *instance,
     } else if (instance->paint.x > 2.5f && instance->paint.x < 3.5f) {
         if (!transformPoint(transform, instance->gradient.x, instance->gradient.y,
                 &instance->gradient.x, &instance->gradient.y)) return false;
+        instance->conic_basis = {
+            transform.a, transform.b, transform.c, transform.d
+        };
     } else if (instance->paint.x > 3.5f) {
         for (MeshPatchInstance &patch : *mesh_patches) {
             patch.bounds = { INFINITY, INFINITY, -INFINITY, -INFINITY };
@@ -445,6 +449,7 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
         instance.color = base.color;
         instance.gradient = base.gradient;
         instance.gradient_options = base.gradient_options;
+        instance.conic_basis = base.conic_basis;
         instance.paint = base.paint;
     }
     out->instances = std::move(instances);
@@ -454,19 +459,19 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
 }
 
 const char *shaderSource = R"(
-struct Instance { float4 rect; float4 color; float4 shape; float4 extra; float4 clip; float4 clipRadius; float4 gradient; float4 gradientOptions; float4 paint; };
+struct Instance { float4 rect; float4 color; float4 shape; float4 extra; float4 clip; float4 clipRadius; float4 gradient; float4 gradientOptions; float4 conicBasis; float4 paint; };
 struct GradientStopInstance { float4 color; float4 data; };
 struct MeshPatchInstance { float4 points[8]; float4 colors[4]; float4 bounds; float4 options; };
 StructuredBuffer<Instance> instances : register(t0);
 StructuredBuffer<GradientStopInstance> gradientStops : register(t1);
 StructuredBuffer<MeshPatchInstance> meshPatches : register(t2);
 Texture2D<float4> retainedTexture : register(t3);
-struct Out { float4 position:SV_POSITION; float2 pixel:TEXCOORD0; nointerpolation float4 rect:TEXCOORD1; nointerpolation float4 color:COLOR0; nointerpolation float4 shape:TEXCOORD2; nointerpolation float4 extra:TEXCOORD3; nointerpolation float4 clip:TEXCOORD4; nointerpolation float4 clipRadius:TEXCOORD5; nointerpolation float4 gradient:TEXCOORD6; nointerpolation float4 gradientOptions:TEXCOORD7; nointerpolation float4 paint:TEXCOORD8; };
+struct Out { float4 position:SV_POSITION; float2 pixel:TEXCOORD0; nointerpolation float4 rect:TEXCOORD1; nointerpolation float4 color:COLOR0; nointerpolation float4 shape:TEXCOORD2; nointerpolation float4 extra:TEXCOORD3; nointerpolation float4 clip:TEXCOORD4; nointerpolation float4 clipRadius:TEXCOORD5; nointerpolation float4 gradient:TEXCOORD6; nointerpolation float4 gradientOptions:TEXCOORD7; nointerpolation float4 conicBasis:TEXCOORD8; nointerpolation float4 paint:TEXCOORD9; };
 cbuffer Surface : register(b0) { float2 surface; float2 padding; };
 Out vsMain(uint vertex:SV_VertexID, uint instance:SV_InstanceID) {
   const float2 corners[6] = { float2(0,0),float2(1,0),float2(0,1),float2(0,1),float2(1,0),float2(1,1) };
   Instance i=instances[instance]; float2 p=i.rect.xy+corners[vertex]*i.rect.zw;
-  Out o; o.position=float4(p.x/surface.x*2-1,1-p.y/surface.y*2,0,1); o.pixel=p; o.rect=i.rect; o.color=i.color; o.shape=i.shape; o.extra=i.extra; o.clip=i.clip; o.clipRadius=i.clipRadius; o.gradient=i.gradient; o.gradientOptions=i.gradientOptions; o.paint=i.paint; return o;
+  Out o; o.position=float4(p.x/surface.x*2-1,1-p.y/surface.y*2,0,1); o.pixel=p; o.rect=i.rect; o.color=i.color; o.shape=i.shape; o.extra=i.extra; o.clip=i.clip; o.clipRadius=i.clipRadius; o.gradient=i.gradient; o.gradientOptions=i.gradientOptions; o.conicBasis=i.conicBasis; o.paint=i.paint; return o;
 }
 float srgbToLinear(float value) {
   value=saturate(value);
@@ -539,7 +544,13 @@ float gradientParameter(Out i) {
     return length(local);
   }
   float2 delta=i.pixel-i.gradient.xy;
-  float angle=dot(delta,delta)<=0.000001 ? i.gradient.z : atan2(delta.y,delta.x);
+  float2 basisX=i.conicBasis.xy, basisY=i.conicBasis.zw;
+  float determinant=basisX.x*basisY.y-basisX.y*basisY.x;
+  if (abs(determinant)<=0.000001) return 0;
+  float2 local=float2(
+    (delta.x*basisY.y-delta.y*basisY.x)/determinant,
+    (basisX.x*delta.y-basisX.y*delta.x)/determinant);
+  float angle=dot(local,local)<=0.000001 ? i.gradient.z : atan2(local.y,local.x);
   float turn=(angle-i.gradient.z)/(2.0*3.14159265358979323846);
   return turn-floor(turn);
 }
@@ -1697,8 +1708,8 @@ extern "C" int native_sdk_d3d_presenter_tests() {
         expect(closeEnough(line.gradient.w, 187.0f));
     }
 
-    // Rounded geometry and conic centers are transformed without changing
-    // the authored screen-space start-angle convention.
+    // Rounded geometry and conic centers are transformed. The shader also
+    // receives the full affine basis so its angle stays in authored space.
     bytes.clear();
     appendTestScalar(&bytes, static_cast<uint8_t>(3)); // rounded gradient
     appendTestScalar(&bytes, static_cast<uint8_t>(0x1c));
@@ -1723,7 +1734,28 @@ extern "C" int native_sdk_d3d_presenter_tests() {
         expect(closeEnough(conic.gradient.x, 25.0f));
         expect(closeEnough(conic.gradient.y, 67.0f));
         expect(closeEnough(conic.gradient.z, 0.75f));
+        expect(closeEnough(conic.conic_basis.x, 2.0f));
+        expect(closeEnough(conic.conic_basis.y, 0.0f));
+        expect(closeEnough(conic.conic_basis.z, 0.0f));
+        expect(closeEnough(conic.conic_basis.w, 3.0f));
     }
+
+    // Rotation and shear terms survive decoding; the pixel shader inverts
+    // this basis before atan2 instead of treating it as a screen-space ray.
+    Instance affine_conic = {};
+    affine_conic.rect = { 0, 0, 10, 10 };
+    affine_conic.gradient = { 1.5f, 2.5f, 0.25f, 0 };
+    affine_conic.paint.x = 3.0f;
+    std::vector<MeshPatchInstance> no_mesh_patches;
+    expect(applyCommandTransform(
+        Affine2D{ 0.0f, 2.0f, -3.0f, 1.0f, 7.0f, 11.0f },
+        &affine_conic, &no_mesh_patches));
+    expect(closeEnough(affine_conic.gradient.x, -0.5f));
+    expect(closeEnough(affine_conic.gradient.y, 16.5f));
+    expect(closeEnough(affine_conic.conic_basis.x, 0.0f));
+    expect(closeEnough(affine_conic.conic_basis.y, 2.0f));
+    expect(closeEnough(affine_conic.conic_basis.z, -3.0f));
+    expect(closeEnough(affine_conic.conic_basis.w, 1.0f));
 
     // Mesh control points follow the same affine before the shader computes
     // Newton iterations and conservative patch bounds.

@@ -1255,9 +1255,17 @@ fn referenceSampleRadialGradient(gradient: RadialGradient, transform: Affine, po
 }
 
 fn referenceSampleConicGradient(gradient: ConicGradient, transform: Affine, point: geometry.PointF) Color {
-    const center = transform.transformPoint(gradient.center);
-    const delta_x = point.x - center.x;
-    const delta_y = point.y - center.y;
+    // Conic angles are authored in local space. Pulling the sample through
+    // the inverse preserves the zero ray under rotation and shear; measuring
+    // a device-space delta from only the transformed center does not.
+    // A singular transform collapses the axis, so every sample deterministically
+    // takes the same zero-ray color used at the conic center.
+    const local_point = if (transform.inverse()) |inverse|
+        inverse.transformPoint(point)
+    else
+        gradient.center;
+    const delta_x = local_point.x - gradient.center.x;
+    const delta_y = local_point.y - gradient.center.y;
     const angle = if (@abs(delta_x) <= 0.000001 and @abs(delta_y) <= 0.000001)
         gradient.start_angle_radians
     else

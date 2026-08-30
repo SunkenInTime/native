@@ -372,12 +372,17 @@ const expectFillColor = support.expectFillColor;
 const expectGpuPaintColor = support.expectGpuPaintColor;
 
 fn renderFillSample(fill: Fill, width: usize, height: usize, x: usize, y: usize) ![4]u8 {
+    return renderTransformedFillSample(fill, .{}, width, height, x, y);
+}
+
+fn renderTransformedFillSample(fill: Fill, transform: Affine, width: usize, height: usize, x: usize, y: usize) ![4]u8 {
     const byte_len = width * height * 4;
     const pixels = try std.testing.allocator.alloc(u8, byte_len);
     defer std.testing.allocator.free(pixels);
     const rect = geometry.RectF.init(0, 0, @floatFromInt(width), @floatFromInt(height));
     const commands = [_]RenderCommand{.{
         .command = .{ .fill_rect = .{ .id = 1, .rect = rect, .fill = fill } },
+        .transform = transform,
         .local_bounds = rect,
         .bounds = rect,
     }};
@@ -463,6 +468,36 @@ test "reference renderer samples radial and conic geometry analytically" {
     try std.testing.expectEqual([4]u8{ 0, 255, 0, 255 }, try renderFillSample(conic, 3, 3, 1, 2));
     try std.testing.expectEqual([4]u8{ 0, 0, 255, 255 }, try renderFillSample(conic, 3, 3, 0, 1));
     try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, try renderFillSample(conic, 3, 3, 1, 0));
+}
+
+test "reference conic axes follow affine transforms" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(255, 0, 0) },
+        .{ .offset = 0.25, .color = Color.rgb8(0, 255, 0) },
+        .{ .offset = 0.5, .color = Color.rgb8(0, 0, 255) },
+        .{ .offset = 0.75, .color = Color.rgb8(255, 255, 255) },
+        .{ .offset = 1, .color = Color.rgb8(255, 0, 0) },
+    };
+    const conic: Fill = .{ .conic_gradient = .{
+        .center = geometry.PointF.init(1.5, 1.5),
+        .stops = &stops,
+        .interpolation = .srgb,
+    } };
+
+    // A device-space point south of a quarter-turned conic center is the
+    // authored east/zero ray; the device-space east point is authored north.
+    const quarter_turn = Affine{ .a = 0, .b = 1, .c = -1, .d = 0, .tx = 3 };
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, try renderTransformedFillSample(conic, quarter_turn, 3, 3, 1, 2));
+    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, try renderTransformedFillSample(conic, quarter_turn, 3, 3, 2, 1));
+
+    // This device-space (2,1) ray is authored north under the x += 2y shear.
+    const shear = Affine{ .a = 1, .b = 0, .c = 2, .d = 1 };
+    try std.testing.expectEqual([4]u8{ 0, 255, 0, 255 }, try renderTransformedFillSample(conic, shear, 8, 4, 6, 2));
+
+    // A collapsed affine has no recoverable angular axis. Its explicit
+    // fallback is the same zero-ray sample at every covered pixel.
+    const singular = Affine{ .a = 0, .d = 1 };
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, try renderTransformedFillSample(conic, singular, 3, 3, 2, 2));
 }
 
 fn rectangularMeshPatch(rect: geometry.RectF, colors: [4]Color) MeshPatch {
