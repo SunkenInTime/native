@@ -33,6 +33,7 @@ const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
 
 const colorFill = widget_render_style.colorFill;
 const emitWidgetRoundedBackground = widget_render_style.emitWidgetRoundedBackground;
+const widgetHasBackgroundGradient = widget_render_style.widgetHasBackgroundGradient;
 const widgetBackgroundIsOpaque = widget_render_style.widgetBackgroundIsOpaque;
 const widgetBorderFill = widget_render_style.widgetBorderFill;
 const widgetFocusRingFill = widget_render_style.widgetFocusRingFill;
@@ -54,12 +55,13 @@ const surfaceControlVisualTokens = widget_render_style.surfaceControlVisualToken
 pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = alertControlVisualTokens(tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 1),
-        .rect = widget.frame,
-        .radius = radius,
-        .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface))),
-    });
+    try emitWidgetRoundedBackground(
+        builder,
+        widget,
+        buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface),
+        radius,
+        widgetPartId(widget.id, 1),
+    );
     try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
@@ -140,12 +142,13 @@ pub fn emitAlertMark(builder: *Builder, widget: Widget, tokens: DesignTokens, fr
 pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = cardControlVisualTokens(tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 1),
-        .rect = widget.frame,
-        .radius = radius,
-        .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface))),
-    });
+    try emitWidgetRoundedBackground(
+        builder,
+        widget,
+        buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface),
+        radius,
+        widgetPartId(widget.id, 1),
+    );
     try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
@@ -328,14 +331,9 @@ pub fn bubbleWidgetRadius(widget: Widget, tokens: DesignTokens) Radius {
 /// land on the default variant, and author `style.*` always wins.
 pub fn emitBubbleWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const radius = bubbleWidgetRadius(widget, tokens);
-    if (bubbleFillColor(widget, tokens)) |background| {
-        try builder.fillRoundedRect(.{
-            .id = widgetPartId(widget.id, 2),
-            .rect = widget.frame,
-            .radius = radius,
-            .fill = colorFill(background),
-        });
-    }
+    const background = bubbleFillColor(widget, tokens);
+    if (background != null or widgetHasBackgroundGradient(widget))
+        try emitWidgetRoundedBackground(builder, widget, background orelse Color.rgba8(0, 0, 0, 0), radius, widgetPartId(widget.id, 2));
     if (bubbleBorderColor(widget, tokens)) |border| {
         try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
             .id = widgetPartId(widget.id, 3),
@@ -607,14 +605,11 @@ pub fn emitTabsListWidgetChrome(builder: *Builder, widget: Widget, tokens: Desig
     if (frame.isEmpty()) return;
     const visual = tokens.controls.tabs;
     const radius = controlRadius(widget, visual, tokens.radius.lg);
+    var paint_widget = widget;
+    paint_widget.frame = frame;
     switch (tokens.controls.tabs_indicator) {
         .pill => {
-            try builder.fillRoundedRect(.{
-                .id = widgetPartId(widget.id, 1),
-                .rect = frame,
-                .radius = radius,
-                .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle)),
-            });
+            try emitWidgetRoundedBackground(builder, paint_widget, visual.background orelse tokens.colors.surface_subtle, radius, widgetPartId(widget.id, 1));
             if (widget.style.border orelse visual.border) |border| {
                 try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
                     .id = widgetPartId(widget.id, 2),
@@ -631,14 +626,9 @@ pub fn emitTabsListWidgetChrome(builder: *Builder, widget: Widget, tokens: Desig
             // The strip stays transparent unless the author or theme
             // states a wash explicitly — the register's ground is the
             // page itself.
-            if (widget.style.background orelse visual.background) |background| {
-                try builder.fillRoundedRect(.{
-                    .id = widgetPartId(widget.id, 1),
-                    .rect = frame,
-                    .radius = radius,
-                    .fill = colorFill(background),
-                });
-            }
+            const background = widget.style.background orelse visual.background;
+            if (background != null or widgetHasBackgroundGradient(widget))
+                try emitWidgetRoundedBackground(builder, paint_widget, background orelse Color.rgba8(0, 0, 0, 0), radius, widgetPartId(widget.id, 1));
             // The closing hairline: a filled rect (not a stroke) so it
             // hugs the frame's bottom edge exactly — a centered stroke
             // would straddle it and thin to a half-covered line.

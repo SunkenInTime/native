@@ -2318,6 +2318,94 @@ test "built-in card renders house surface chrome and title" {
     }
 }
 
+test "surface widget chrome preserves retained linear and mesh gradients" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },
+        .{ .offset = 1, .color = Color.rgb8(217, 70, 239) },
+    };
+    var points: [16]geometry.PointF = undefined;
+    for (0..4) |row| {
+        for (0..4) |column| {
+            points[row * 4 + column] = geometry.PointF.init(
+                @as(f32, @floatFromInt(column)) / 3,
+                @as(f32, @floatFromInt(row)) / 3,
+            );
+        }
+    }
+    const patches = [_]canvas.WidgetMeshPatch{.{
+        .points = points,
+        .colors = .{
+            Color.rgb8(255, 0, 0),
+            Color.rgb8(0, 255, 0),
+            Color.rgb8(0, 0, 255),
+            Color.rgb8(255, 255, 255),
+        },
+    }};
+    const linear_effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .linear = .{
+        .start = .{ .x = 0, .y = 0.5 },
+        .end = .{ .x = 1, .y = 0.5 },
+        .stops = &stops,
+    } } }};
+    const mesh_effects = [_]canvas.ImmediateCanvasCommand{.{ .background_mesh_gradient = .{
+        .patches = &patches,
+        .interpolation = .oklab,
+    } }};
+    const paints = [_][]const canvas.ImmediateCanvasCommand{ &linear_effects, &mesh_effects };
+    const SurfaceCase = struct {
+        kind: WidgetKind,
+        id: ObjectId,
+        fill_slot: ObjectId,
+        underline_tabs: bool = false,
+    };
+    const surface_cases = [_]SurfaceCase{
+        .{ .kind = .alert, .id = 70, .fill_slot = 1 },
+        .{ .kind = .card, .id = 71, .fill_slot = 1 },
+        .{ .kind = .bubble, .id = 72, .fill_slot = 2 },
+        .{ .kind = .tabs, .id = 73, .fill_slot = 1 },
+        .{ .kind = .tabs, .id = 74, .fill_slot = 1, .underline_tabs = true },
+    };
+
+    for (surface_cases) |surface_case| {
+        for (paints, 0..) |effects, paint_index| {
+            var tokens = DesignTokens{};
+            if (surface_case.underline_tabs) tokens.controls.tabs_indicator = .underline;
+            var widget = Widget{
+                .id = surface_case.id,
+                .kind = surface_case.kind,
+                .frame = geometry.RectF.init(12, 20, 80, 40),
+                .immediate_commands = effects,
+            };
+            // A solid ghost bubble and an underline tab strip have no
+            // background command. Authored gradient metadata still wins.
+            if (surface_case.kind == .bubble) widget.variant = .ghost;
+
+            var commands: [16]CanvasCommand = undefined;
+            var builder = Builder.init(&commands);
+            try emitWidgetTree(&builder, widget, tokens);
+            const rounded = switch (builder.displayList().findCommandById(widgetPartId(surface_case.id, surface_case.fill_slot)).?.command) {
+                .fill_rounded_rect => |fill| fill,
+                else => return error.TestUnexpectedResult,
+            };
+            if (paint_index == 0) switch (rounded.fill) {
+                .linear_gradient => |gradient| {
+                    try std.testing.expectEqualDeep(geometry.PointF.init(12, 40), gradient.start);
+                    try std.testing.expectEqualDeep(geometry.PointF.init(92, 40), gradient.end);
+                    try std.testing.expectEqualSlices(GradientStop, &stops, gradient.stops);
+                },
+                else => return error.TestUnexpectedResult,
+            } else switch (rounded.fill) {
+                .mesh_gradient => |gradient| {
+                    try std.testing.expectEqual(@as(usize, 1), gradient.patches.len);
+                    try std.testing.expectEqualDeep(geometry.PointF.init(12, 20), gradient.patches[0].points[0]);
+                    try std.testing.expectEqualDeep(geometry.PointF.init(92, 60), gradient.patches[0].points[15]);
+                    try std.testing.expectEqual(drawing_model.GradientInterpolation.oklab, gradient.interpolation);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        }
+    }
+}
+
 test "built-in status bar renders flat app chrome and text semantics" {
     const status_bar = builtinStatusBarWidget(.{
         .id = 47,
