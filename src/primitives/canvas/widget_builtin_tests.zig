@@ -2363,6 +2363,7 @@ test "surface widget chrome preserves retained linear and mesh gradients" {
         .{ .kind = .bubble, .id = 72, .fill_slot = 2 },
         .{ .kind = .tabs, .id = 73, .fill_slot = 1 },
         .{ .kind = .tabs, .id = 74, .fill_slot = 1, .underline_tabs = true },
+        .{ .kind = .accordion, .id = 75, .fill_slot = 1 },
     };
 
     for (surface_cases) |surface_case| {

@@ -501,13 +501,15 @@ pub fn emitAccordionWidgetChrome(builder: *Builder, widget: Widget, tokens: Desi
     if (frame.isEmpty()) return;
 
     const visual = widget_render_style.accordionControlVisualTokens(tokens);
-    if (widget.style.background orelse visual.background) |background| {
-        try builder.fillRoundedRect(.{
-            .id = widgetPartId(widget.id, 1),
-            .rect = frame,
-            .radius = controlRadius(widget, visual, 0),
-            .fill = colorFill(background),
-        });
+    const background = widget.style.background orelse visual.background;
+    if (background != null or widgetHasBackgroundGradient(widget)) {
+        try emitWidgetRoundedBackground(
+            builder,
+            widget,
+            background orelse Color.rgba8(0, 0, 0, 0),
+            controlRadius(widget, visual, 0),
+            widgetPartId(widget.id, 1),
+        );
     }
     // The hairline separator between items sits on the item's own
     // bottom edge, so a stack of accordions reads as one divided list.
