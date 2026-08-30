@@ -16,6 +16,7 @@ const DesignTokens = token_model.DesignTokens;
 const ControlVisualTokens = token_model.ControlVisualTokens;
 const Widget = widget_model.Widget;
 const WidgetGradient = widget_model.WidgetGradient;
+const WidgetMeshGradient = widget_model.WidgetMeshGradient;
 
 pub const WidgetBoxShadowResolution = union(enum) {
     inherit,
@@ -261,7 +262,7 @@ pub fn widgetGradientFill(widget: Widget, gradient: WidgetGradient) Fill {
 
 pub fn widgetHasBackgroundGradient(widget: Widget) bool {
     for (widget.immediate_commands) |command| switch (command) {
-        .background_gradient => return true,
+        .background_gradient, .background_mesh_gradient => return true,
         else => {},
     };
     return false;
@@ -288,6 +289,15 @@ pub fn emitWidgetRoundedBackground(builder: *Builder, widget: Widget, fallback: 
             });
             layer_index += 1;
         },
+        .background_mesh_gradient => |gradient| {
+            try builder.fillRoundedRect(.{
+                .id = if (layer_index == 0) base_id else widgetBackgroundLayerId(widget.id, layer_index),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = try widgetMeshGradientFill(builder, widget, gradient),
+            });
+            layer_index += 1;
+        },
         else => {},
     };
 }
@@ -308,8 +318,25 @@ pub fn emitWidgetRectBackground(builder: *Builder, widget: Widget, fallback: Col
             });
             layer_index += 1;
         },
+        .background_mesh_gradient => |gradient| {
+            try builder.fillRect(.{
+                .id = if (layer_index == 0) base_id else widgetBackgroundLayerId(widget.id, layer_index),
+                .rect = widget.frame,
+                .fill = try widgetMeshGradientFill(builder, widget, gradient),
+            });
+            layer_index += 1;
+        },
         else => {},
     };
+}
+
+fn widgetMeshGradientFill(builder: *Builder, widget: Widget, gradient: WidgetMeshGradient) Error!Fill {
+    const patches = try builder.allocMeshPatches(gradient.patches.len);
+    for (gradient.patches, patches) |source, *destination| {
+        destination.colors = source.colors;
+        for (source.points, 0..) |point, index| destination.points[index] = widgetNormalizedPoint(widget, point);
+    }
+    return .{ .mesh_gradient = .{ .patches = patches, .interpolation = gradient.interpolation } };
 }
 
 fn widgetBackgroundLayerId(widget_id: ObjectId, layer_index: usize) ObjectId {
@@ -347,6 +374,10 @@ pub fn widgetBackgroundIsOpaque(widget: Widget, fallback: Color) bool {
             // above it cannot make the final surface transparent again.
             if (fully_opaque) return true;
         },
+        // Opaque corner colors cannot prove the authored bicubic patch covers
+        // the whole widget box, so mesh backgrounds conservatively keep the
+        // surface translucent for shadow/occlusion decisions.
+        .background_mesh_gradient => found_gradient = true,
         else => {},
     };
     if (found_gradient) return false;

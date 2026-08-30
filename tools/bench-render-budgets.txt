@@ -43,6 +43,14 @@ chart-tick 200
 # leaking into a quadratic packet path. Host shader time is measured by the
 # live GPU lane.
 gradient-grid-update 500
+# mesh-grid-update: the complete 16-patch per-view ceiling (256 bicubic
+# control points and 64 corner colors), toggled through retained rebuild,
+# post-layout materialization, diff, binary encode, and packet present.
+# Warm isolated p50 was 116us; a cold compile/process pass reached 260us.
+# 500us keeps that startup variance green while catching an accidental
+# per-pixel/reference-render path or patch-count quadratic in the engine.
+# Windows shader time is a separate D3D timestamp lane.
+mesh-grid-update 500
 # markdown-doc-edit: guards markdown re-render + plan cost on a
 # README-sized doc; the pre-fix number was ~2400.
 markdown-doc-edit 1500

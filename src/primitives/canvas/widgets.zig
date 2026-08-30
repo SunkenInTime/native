@@ -835,6 +835,19 @@ pub const WidgetGradient = union(enum) {
     conic: WidgetConicGradient,
 };
 
+/// A mesh patch authored in normalized widget-box coordinates. The renderer
+/// resolves all sixteen points only after layout, matching the other retained
+/// gradient geometries without inflating the common Widget shape.
+pub const WidgetMeshPatch = struct {
+    points: [16]geometry.PointF,
+    colors: [4]Color,
+};
+
+pub const WidgetMeshGradient = struct {
+    patches: []const WidgetMeshPatch,
+    interpolation: canvas.GradientInterpolation = .srgb_linear,
+};
+
 /// One local-space immediate drawing command attached to a retained widget,
 /// or rare metadata sharing the same retained side channel. The renderer
 /// translates drawing coordinates into the laid-out frame and skips metadata.
@@ -856,6 +869,9 @@ pub const ImmediateCanvasCommand = union(enum) {
     /// Rare retained background paint. The renderer resolves normalized
     /// geometry after layout and lowers it into the canvas gradient primitive.
     background_gradient: WidgetGradient,
+    /// Two-dimensional retained background paint. Patches stay normalized in
+    /// metadata and are materialized into builder-owned absolute geometry.
+    background_mesh_gradient: WidgetMeshGradient,
     /// Rare retained visual metadata rides the existing command slice rather
     /// than enlarging every Widget. Emitters consume these entries as style;
     /// immediate canvases never draw them.

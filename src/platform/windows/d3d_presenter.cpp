@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -1124,6 +1126,148 @@ bool closeEnough(float actual, float expected) {
     return std::abs(actual - expected) <= 0.000001f;
 }
 
+bool waitForQuery(ID3D11DeviceContext *context, ID3D11Query *query,
+    void *data, UINT data_size) {
+    const ULONGLONG deadline = GetTickCount64() + 5000;
+    while (true) {
+        const HRESULT result = context->GetData(query, data, data_size, 0);
+        if (result == S_OK) return true;
+        if (result != S_FALSE || GetTickCount64() >= deadline) return false;
+        Sleep(0);
+    }
+}
+
+/// Opt-in, hardware-only GPU receipt. CI still compiles and shader-compiles
+/// this lane everywhere; a Windows machine with a real adapter runs it with
+/// NATIVE_SDK_D3D_GRADIENT_BENCH=1. An optional
+/// NATIVE_SDK_D3D_GRADIENT_BUDGET_US makes the measured per-draw timestamp a
+/// hard gate without pretending dissimilar GPUs share one universal budget.
+bool runMeshGpuTimestampBenchmark() {
+    char enabled[8] = {};
+    if (GetEnvironmentVariableA("NATIVE_SDK_D3D_GRADIENT_BENCH", enabled,
+            sizeof(enabled)) == 0 || strcmp(enabled, "1") != 0) return true;
+
+    NsgpEngine engine;
+    if (!createEngine(&engine)) return false; // hardware only; never WARP
+    constexpr UINT width = 512;
+    constexpr UINT height = 512;
+    constexpr UINT patch_columns = 4;
+    constexpr UINT patch_rows = 4;
+    constexpr UINT draw_count = 64;
+
+    Instance instance = {};
+    instance.rect = { 0, 0, static_cast<float>(width), static_cast<float>(height) };
+    instance.paint = { 4, 0, static_cast<float>(patch_columns * patch_rows), 1 };
+    std::vector<MeshPatchInstance> patches(patch_columns * patch_rows);
+    for (UINT patch_row = 0; patch_row < patch_rows; ++patch_row) {
+        for (UINT patch_column = 0; patch_column < patch_columns; ++patch_column) {
+            MeshPatchInstance &patch = patches[patch_row * patch_columns + patch_column];
+            const float left = static_cast<float>(patch_column * width / patch_columns);
+            const float top = static_cast<float>(patch_row * height / patch_rows);
+            const float right = static_cast<float>((patch_column + 1) * width / patch_columns);
+            const float bottom = static_cast<float>((patch_row + 1) * height / patch_rows);
+            for (UINT row = 0; row < 4; ++row) {
+                for (UINT column = 0; column < 4; ++column) {
+                    const UINT index = row * 4 + column;
+                    const float x = left + (right - left) * column / 3.0f;
+                    const float y = top + (bottom - top) * row / 3.0f;
+                    F4 &pair = patch.points[index / 2];
+                    if ((index & 1) == 0) {
+                        pair.x = x; pair.y = y;
+                    } else {
+                        pair.z = x; pair.w = y;
+                    }
+                }
+            }
+            patch.colors[0] = { 0.96f, 0.25f, 0.37f, 1 };
+            patch.colors[1] = { 0.05f, 0.65f, 0.91f, 1 };
+            patch.colors[2] = { 0.66f, 0.33f, 0.97f, 1 };
+            patch.colors[3] = { 0.98f, 0.80f, 0.08f, 1 };
+            patch.bounds = { left, top, right, bottom };
+            patch.options = { 2, 0, 0, 0 }; // Oklab, the expensive lane
+        }
+    }
+
+    if (!ensureInstances(&engine, 1) ||
+        !ensureMeshPatches(&engine, patches.size())) return false;
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(engine.context->Map(engine.instance_buffer.Get(), 0,
+            D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+    memcpy(mapped.pData, &instance, sizeof(instance));
+    engine.context->Unmap(engine.instance_buffer.Get(), 0);
+    if (FAILED(engine.context->Map(engine.mesh_patch_buffer.Get(), 0,
+            D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+    memcpy(mapped.pData, patches.data(), patches.size() * sizeof(MeshPatchInstance));
+    engine.context->Unmap(engine.mesh_patch_buffer.Get(), 0);
+    if (FAILED(engine.context->Map(engine.constant_buffer.Get(), 0,
+            D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+    const float surface[4] = { static_cast<float>(width), static_cast<float>(height), 0, 0 };
+    memcpy(mapped.pData, surface, sizeof(surface));
+    engine.context->Unmap(engine.constant_buffer.Get(), 0);
+
+    D3D11_TEXTURE2D_DESC texture_desc = {};
+    texture_desc.Width = width; texture_desc.Height = height;
+    texture_desc.MipLevels = 1; texture_desc.ArraySize = 1;
+    texture_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    texture_desc.SampleDesc.Count = 1; texture_desc.Usage = D3D11_USAGE_DEFAULT;
+    texture_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11RenderTargetView> rtv;
+    if (FAILED(engine.device->CreateTexture2D(&texture_desc, nullptr, &texture)) ||
+        FAILED(engine.device->CreateRenderTargetView(texture.Get(), nullptr, &rtv))) return false;
+
+    engine.context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
+    engine.context->OMSetBlendState(engine.blend.Get(), nullptr, 0xffffffff);
+    D3D11_VIEWPORT viewport = { 0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1 };
+    engine.context->RSSetViewports(1, &viewport);
+    engine.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    engine.context->VSSetShader(engine.vertex_shader.Get(), nullptr, 0);
+    engine.context->VSSetConstantBuffers(0, 1, engine.constant_buffer.GetAddressOf());
+    engine.context->VSSetShaderResources(0, 1, engine.instance_srv.GetAddressOf());
+    engine.context->PSSetShader(engine.pixel_shader.Get(), nullptr, 0);
+    engine.context->PSSetShaderResources(2, 1, engine.mesh_patch_srv.GetAddressOf());
+    for (UINT warmup = 0; warmup < 8; ++warmup) engine.context->DrawInstanced(6, 1, 0, 0);
+
+    D3D11_QUERY_DESC query_desc = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
+    ComPtr<ID3D11Query> disjoint;
+    query_desc.Query = D3D11_QUERY_TIMESTAMP;
+    ComPtr<ID3D11Query> start;
+    ComPtr<ID3D11Query> end;
+    if (FAILED(engine.device->CreateQuery(&query_desc, &start)) ||
+        FAILED(engine.device->CreateQuery(&query_desc, &end))) return false;
+    query_desc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+    if (FAILED(engine.device->CreateQuery(&query_desc, &disjoint))) return false;
+
+    engine.context->Begin(disjoint.Get());
+    engine.context->End(start.Get());
+    for (UINT draw = 0; draw < draw_count; ++draw) engine.context->DrawInstanced(6, 1, 0, 0);
+    engine.context->End(end.Get());
+    engine.context->End(disjoint.Get());
+    engine.context->Flush();
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT timing = {};
+    UINT64 start_ticks = 0, end_ticks = 0;
+    if (!waitForQuery(engine.context.Get(), disjoint.Get(), &timing, sizeof(timing)) ||
+        !waitForQuery(engine.context.Get(), start.Get(), &start_ticks, sizeof(start_ticks)) ||
+        !waitForQuery(engine.context.Get(), end.Get(), &end_ticks, sizeof(end_ticks)) ||
+        timing.Disjoint || timing.Frequency == 0 || end_ticks < start_ticks) return false;
+    const double microseconds = static_cast<double>(end_ticks - start_ticks) *
+        1'000'000.0 / static_cast<double>(timing.Frequency) / draw_count;
+    fprintf(stderr, "native-sdk-d3d: mesh-gradient 512x512 16-patch Oklab GPU %.3fus/draw\n", microseconds);
+
+    char budget_text[64] = {};
+    const DWORD budget_length = GetEnvironmentVariableA(
+        "NATIVE_SDK_D3D_GRADIENT_BUDGET_US", budget_text, sizeof(budget_text));
+    if (budget_length > 0) {
+        if (budget_length >= sizeof(budget_text)) return false;
+        char *end_pointer = nullptr;
+        const double budget = strtod(budget_text, &end_pointer);
+        if (end_pointer == budget_text || *end_pointer != '\0' ||
+            !std::isfinite(budget) || budget <= 0 ||
+            microseconds > budget) return false;
+    }
+    return true;
+}
+
 } // namespace
 
 extern "C" int native_sdk_d3d_presenter_tests() {
@@ -1250,6 +1394,7 @@ extern "C" int native_sdk_d3d_presenter_tests() {
     ComPtr<ID3DBlob> pixel_shader;
     expect(SUCCEEDED(compileShader("vsMain", "vs_5_0", &vertex_shader)));
     expect(SUCCEEDED(compileShader("psMain", "ps_5_0", &pixel_shader)));
+    expect(runMeshGpuTimestampBenchmark());
     return failures;
 }
 #endif

@@ -33,6 +33,11 @@ const TextLine = text_model.TextLine;
 const TextLayoutPlan = text_model.TextLayoutPlan;
 const TextLayoutPlanSet = text_model.TextLayoutPlanSet;
 const TextLayoutPlanner = text_model.TextLayoutPlanner;
+
+/// A retained widget background may materialize the full bounded mesh into a
+/// builder before the runtime copies it into view-owned storage. Keep this in
+/// lockstep with the runtime's per-view mesh-patch budget.
+pub const max_builder_mesh_patches: usize = 16;
 const RenderCommand = render_model.RenderCommand;
 const RenderPlan = render_model.RenderPlan;
 const RenderPlanner = render_model.RenderPlanner;
@@ -538,6 +543,8 @@ pub const Builder = struct {
     /// anyway.
     path_elements: [chart_model.max_chart_path_elements_per_frame]drawing_model.PathElement = undefined,
     path_element_len: usize = 0,
+    mesh_patches: [max_builder_mesh_patches]drawing_model.MeshPatch = undefined,
+    mesh_patch_len: usize = 0,
 
     pub fn init(commands: []CanvasCommand) Builder {
         return .{ .commands = commands };
@@ -546,6 +553,7 @@ pub const Builder = struct {
     pub fn reset(self: *Builder) void {
         self.len = 0;
         self.path_element_len = 0;
+        self.mesh_patch_len = 0;
     }
 
     /// Reserve `count` path elements in the builder-owned store. The
@@ -557,6 +565,13 @@ pub const Builder = struct {
         const start = self.path_element_len;
         self.path_element_len += count;
         return self.path_elements[start..self.path_element_len];
+    }
+
+    pub fn allocMeshPatches(self: *Builder, count: usize) error{MeshPatchListFull}![]drawing_model.MeshPatch {
+        if (self.mesh_patch_len + count > self.mesh_patches.len) return error.MeshPatchListFull;
+        const start = self.mesh_patch_len;
+        self.mesh_patch_len += count;
+        return self.mesh_patches[start..self.mesh_patch_len];
     }
 
     pub fn displayList(self: *const Builder) DisplayList {

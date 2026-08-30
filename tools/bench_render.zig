@@ -671,6 +671,94 @@ fn gradientGridOptions() GradientGridApp.Options {
     };
 }
 
+// -------------------------------- fixture: retained mesh grid (16 patches)
+
+fn meshGridPatch(alternate: bool) canvas.WidgetMeshPatch {
+    var points: [16]geometry.PointF = undefined;
+    for (0..4) |row| {
+        for (0..4) |column| {
+            const x = @as(f32, @floatFromInt(column)) / 3;
+            const y = @as(f32, @floatFromInt(row)) / 3;
+            const bend = if (alternate and row > 0 and row < 3)
+                (@as(f32, @floatFromInt(column)) - 1.5) * 0.035
+            else
+                0;
+            points[row * 4 + column] = geometry.PointF.init(x, y + bend);
+        }
+    }
+    return .{
+        .points = points,
+        .colors = if (alternate) .{
+            canvas.Color.rgb8(245, 158, 11),
+            canvas.Color.rgb8(239, 68, 68),
+            canvas.Color.rgb8(14, 165, 233),
+            canvas.Color.rgb8(16, 185, 129),
+        } else .{
+            canvas.Color.rgb8(8, 145, 178),
+            canvas.Color.rgb8(37, 99, 235),
+            canvas.Color.rgb8(168, 85, 247),
+            canvas.Color.rgb8(236, 72, 153),
+        },
+    };
+}
+
+const mesh_grid_patches_a = [_]canvas.WidgetMeshPatch{meshGridPatch(false)};
+const mesh_grid_patches_b = [_]canvas.WidgetMeshPatch{meshGridPatch(true)};
+const mesh_grid_commands_a = [_]canvas.ImmediateCanvasCommand{.{ .background_mesh_gradient = .{
+    .patches = &mesh_grid_patches_a,
+    .interpolation = .oklab,
+} }};
+const mesh_grid_commands_b = [_]canvas.ImmediateCanvasCommand{.{ .background_mesh_gradient = .{
+    .patches = &mesh_grid_patches_b,
+    .interpolation = .oklab,
+} }};
+
+const MeshGridMsg = union(enum) { toggle };
+const MeshGridModel = struct { alternate: bool = false };
+
+fn meshGridUpdate(model: *MeshGridModel, msg: MeshGridMsg) void {
+    switch (msg) {
+        .toggle => model.alternate = !model.alternate,
+    }
+}
+
+const MeshGridApp = native_sdk.UiApp(MeshGridModel, MeshGridMsg);
+const MeshGridUi = MeshGridApp.Ui;
+
+fn meshGridPanel(ui: *MeshGridUi, alternate: bool) MeshGridUi.Node {
+    var node = ui.panel(.{ .grow = 1 }, .{});
+    node.widget.immediate_commands = if (alternate) &mesh_grid_commands_b else &mesh_grid_commands_a;
+    return node;
+}
+
+fn meshGridRow(ui: *MeshGridUi, alternate: bool) MeshGridUi.Node {
+    return ui.row(.{ .grow = 1, .gap = 8 }, .{
+        meshGridPanel(ui, alternate),
+        meshGridPanel(ui, alternate),
+        meshGridPanel(ui, alternate),
+        meshGridPanel(ui, alternate),
+    });
+}
+
+fn meshGridView(ui: *MeshGridUi, model: *const MeshGridModel) MeshGridUi.Node {
+    return ui.column(.{ .padding = 8, .gap = 8 }, .{
+        meshGridRow(ui, model.alternate),
+        meshGridRow(ui, model.alternate),
+        meshGridRow(ui, model.alternate),
+        meshGridRow(ui, model.alternate),
+    });
+}
+
+fn meshGridOptions() MeshGridApp.Options {
+    return .{
+        .name = "bench-mesh-grid",
+        .scene = bench_scene,
+        .canvas_label = canvas_label,
+        .update = meshGridUpdate,
+        .view = meshGridView,
+    };
+}
+
 // -------------------------------------- fixture: large markdown doc
 
 const doc_blocks = 56;
@@ -959,6 +1047,24 @@ fn scenarioGradientGridUpdate() !ScenarioReport {
     );
 }
 
+fn scenarioMeshGridUpdate() !ScenarioReport {
+    var bench = try Bench(MeshGridApp).create(meshGridOptions());
+    defer bench.destroy();
+    const step = struct {
+        fn run(b: *Bench(MeshGridApp)) !void {
+            try b.app.dispatch(&b.harness.runtime, 1, .toggle);
+            try b.frame();
+        }
+    };
+    return measure(
+        "mesh-grid-update",
+        "toggle 16 retained bicubic mesh patches / 256 controls, binary patch",
+        &bench,
+        measured_iterations,
+        step,
+    );
+}
+
 fn scenarioDocEdit() !ScenarioReport {
     var bench = try Bench(DocApp).create(docOptions());
     defer bench.destroy();
@@ -1106,7 +1212,7 @@ fn fmtUs(value: u64) []const u8 {
 
 // ---------------------------------------------------------- check mode
 
-const scenario_count = 8;
+const scenario_count = 9;
 const check_passes = 3;
 
 fn runAllScenarios() ![scenario_count]ScenarioReport {
@@ -1117,8 +1223,9 @@ fn runAllScenarios() ![scenario_count]ScenarioReport {
     reports[3] = try scenarioTranscriptScroll();
     reports[4] = try scenarioChartTick();
     reports[5] = try scenarioGradientGridUpdate();
-    reports[6] = try scenarioDocEdit();
-    reports[7] = try scenarioMeasuredKeystroke();
+    reports[6] = try scenarioMeshGridUpdate();
+    reports[7] = try scenarioDocEdit();
+    reports[8] = try scenarioMeasuredKeystroke();
     return reports;
 }
 
@@ -1129,6 +1236,7 @@ fn runScenarioByName(name: []const u8) !ScenarioReport {
     if (std.mem.eql(u8, name, "scroll-transcript")) return scenarioTranscriptScroll();
     if (std.mem.eql(u8, name, "chart-tick")) return scenarioChartTick();
     if (std.mem.eql(u8, name, "gradient-grid-update")) return scenarioGradientGridUpdate();
+    if (std.mem.eql(u8, name, "mesh-grid-update")) return scenarioMeshGridUpdate();
     if (std.mem.eql(u8, name, "markdown-doc-edit")) return scenarioDocEdit();
     if (std.mem.eql(u8, name, "keystroke-measured-text")) return scenarioMeasuredKeystroke();
     std.debug.print("bench-render: unknown scenario '{s}'\n", .{name});

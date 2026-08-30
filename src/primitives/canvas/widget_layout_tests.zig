@@ -1133,6 +1133,55 @@ test "panel chrome emits repeated gradients in bottom-to-top painter order" {
     }
 }
 
+test "panel chrome resolves normalized mesh control points after layout" {
+    var points: [16]geometry.PointF = undefined;
+    for (0..4) |row| {
+        for (0..4) |column| {
+            points[row * 4 + column] = geometry.PointF.init(
+                @as(f32, @floatFromInt(column)) / 3,
+                @as(f32, @floatFromInt(row)) / 3,
+            );
+        }
+    }
+    const patches = [_]canvas.WidgetMeshPatch{.{
+        .points = points,
+        .colors = .{
+            Color.rgb8(255, 0, 0),
+            Color.rgb8(0, 255, 0),
+            Color.rgb8(0, 0, 255),
+            Color.rgb8(255, 255, 255),
+        },
+    }};
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_mesh_gradient = .{
+        .patches = &patches,
+        .interpolation = .oklab,
+    } }};
+    const panel = Widget{
+        .id = 32,
+        .kind = .panel,
+        .frame = geometry.RectF.init(12, 20, 80, 40),
+        .immediate_commands = &effects,
+    };
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, panel, .{});
+
+    for (builder.displayList().commands) |command| switch (command) {
+        .fill_rounded_rect => |rounded| switch (rounded.fill) {
+            .mesh_gradient => |gradient| {
+                try std.testing.expectEqual(@as(usize, 1), gradient.patches.len);
+                try std.testing.expectEqualDeep(geometry.PointF.init(12, 20), gradient.patches[0].points[0]);
+                try std.testing.expectEqualDeep(geometry.PointF.init(92, 60), gradient.patches[0].points[15]);
+                try std.testing.expectEqual(drawing_model.GradientInterpolation.oklab, gradient.interpolation);
+                return;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    return error.TestUnexpectedResult;
+}
+
 test "pressed solid background overrides a retained widget gradient" {
     const stops = [_]GradientStop{
         .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },

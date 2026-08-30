@@ -47,6 +47,7 @@ pub const Error = error{
     InvalidTransform,
     WidgetDepthExceeded,
     ChartPathElementListFull,
+    MeshPatchListFull,
     ChartLabelBytesFull,
     WidgetEventRouteListFull,
     WidgetInvalidationListFull,
@@ -179,6 +180,7 @@ pub const CommandRef = command_model.CommandRef;
 pub const DiffKind = command_model.DiffKind;
 pub const DiffChange = command_model.DiffChange;
 pub const Builder = command_model.Builder;
+pub const max_builder_mesh_patches = command_model.max_builder_mesh_patches;
 
 // Canvas render data and cache plans live in `render.zig`; root keeps the public API stable.
 pub const max_render_state_stack = render_model.max_render_state_stack;
@@ -415,6 +417,8 @@ pub const WidgetLinearGradient = widget_model.WidgetLinearGradient;
 pub const WidgetRadialGradient = widget_model.WidgetRadialGradient;
 pub const WidgetConicGradient = widget_model.WidgetConicGradient;
 pub const WidgetGradient = widget_model.WidgetGradient;
+pub const WidgetMeshPatch = widget_model.WidgetMeshPatch;
+pub const WidgetMeshGradient = widget_model.WidgetMeshGradient;
 pub const WidgetTextStyle = widget_model.WidgetTextStyle;
 pub const PresentationLayer = drawing_model.PresentationLayer;
 pub const Widget = widget_model.Widget;

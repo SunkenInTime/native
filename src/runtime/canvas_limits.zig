@@ -1,4 +1,5 @@
 const native_sdk_options = @import("native_sdk_options");
+const canvas = @import("canvas");
 
 // Per-view canvas budgets. Fixed, documented, loud: capacities are compile
 // time constants sized for a dense desktop view, overflow errors name the
@@ -33,7 +34,7 @@ pub const max_canvas_gradient_stops_per_view: usize = 64;
 // is enough to reproduce the dense showcase fixtures; bounding the count also
 // bounds the D3D fragment shader's patch search. One patch is 16 points + four
 // colors (192 B), so both retained copies cost 6 KiB per active view.
-pub const max_canvas_mesh_patches_per_view: usize = 16;
+pub const max_canvas_mesh_patches_per_view: usize = canvas.max_builder_mesh_patches;
 // Raised 128 -> 2048 with icon-in-button and the 41-icon registry: vector
 // icons are path commands, and a curated stroke icon lowers to ~10-25
 // elements (folder 10, sun 21, settings 25). A realistic dense view — a
