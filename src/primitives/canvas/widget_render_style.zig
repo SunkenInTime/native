@@ -204,8 +204,49 @@ pub fn colorFill(color: Color) Fill {
     return .{ .color = color };
 }
 
+fn interactionBackground(widget: Widget) ?Color {
+    if (widget.state.disabled) return null;
+    var hovered: ?Color = null;
+    for (widget.immediate_commands) |command| switch (command) {
+        .pressed_style => |style| if (widget.state.pressed) return style.background,
+        .hover_style => |style| {
+            if (widget.state.hovered) hovered = style.background;
+        },
+        else => {},
+    };
+    return hovered;
+}
+
 pub fn widgetBackgroundFill(widget: Widget, fallback: Color) Fill {
+    if (interactionBackground(widget)) |background| return colorFill(background);
+    for (widget.immediate_commands) |command| switch (command) {
+        .background_gradient => |gradient| return .{ .linear_gradient = .{
+            .start = .{
+                .x = widget.frame.x + widget.frame.width * gradient.start.x,
+                .y = widget.frame.y + widget.frame.height * gradient.start.y,
+            },
+            .end = .{
+                .x = widget.frame.x + widget.frame.width * gradient.end.x,
+                .y = widget.frame.y + widget.frame.height * gradient.end.y,
+            },
+            .stops = gradient.stops,
+        } },
+        else => {},
+    };
     return colorFill(widget.style.background orelse fallback);
+}
+
+pub fn widgetBackgroundIsOpaque(widget: Widget, fallback: Color) bool {
+    if (interactionBackground(widget)) |background| return background.a >= 1;
+    for (widget.immediate_commands) |command| switch (command) {
+        .background_gradient => |gradient| {
+            if (gradient.stops.len == 0) return false;
+            for (gradient.stops) |stop| if (stop.color.a < 1) return false;
+            return true;
+        },
+        else => {},
+    };
+    return (widget.style.background orelse fallback).a >= 1;
 }
 
 pub fn widgetAccentFill(widget: Widget, fallback: Color) Fill {

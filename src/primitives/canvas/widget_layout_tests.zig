@@ -981,6 +981,81 @@ test "panel chrome projects author inset shadow after its fill" {
     try std.testing.expect(builder.displayList().commands[2] == .stroke_rect);
 }
 
+test "panel chrome resolves a box-relative linear gradient after layout" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },
+        .{ .offset = 1, .color = Color.rgb8(217, 70, 239) },
+    };
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{
+        .start = .{ .x = 0, .y = 0.5 },
+        .end = .{ .x = 1, .y = 0.5 },
+        .stops = &stops,
+    } }};
+    const panel = Widget{
+        .id = 10,
+        .kind = .panel,
+        .frame = geometry.RectF.init(12, 20, 80, 40),
+        .immediate_commands = &effects,
+    };
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, panel, .{});
+
+    for (builder.displayList().commands) |command| switch (command) {
+        .fill_rounded_rect => |fill| switch (fill.fill) {
+            .linear_gradient => |gradient| {
+                try std.testing.expectEqual(@as(f32, 12), gradient.start.x);
+                try std.testing.expectEqual(@as(f32, 40), gradient.start.y);
+                try std.testing.expectEqual(@as(f32, 92), gradient.end.x);
+                try std.testing.expectEqual(@as(f32, 40), gradient.end.y);
+                try std.testing.expectEqualSlices(GradientStop, &stops, gradient.stops);
+                return;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "pressed solid background overrides a retained widget gradient" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },
+        .{ .offset = 1, .color = Color.rgb8(217, 70, 239) },
+    };
+    const pressed = Color.rgb8(30, 41, 59);
+    const effects = [_]canvas.ImmediateCanvasCommand{
+        .{ .background_gradient = .{
+            .start = .{ .x = 0, .y = 0.5 },
+            .end = .{ .x = 1, .y = 0.5 },
+            .stops = &stops,
+        } },
+        .{ .pressed_style = .{ .background = pressed } },
+    };
+    const panel = Widget{
+        .id = 11,
+        .kind = .panel,
+        .frame = geometry.RectF.init(12, 20, 80, 40),
+        .state = .{ .pressed = true },
+        .immediate_commands = &effects,
+    };
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, panel, .{});
+
+    for (builder.displayList().commands) |command| switch (command) {
+        .fill_rounded_rect => |fill| switch (fill.fill) {
+            .color => |color| {
+                try std.testing.expectEqual(pressed, color);
+                return;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    return error.TestUnexpectedResult;
+}
+
 test "widget opacity wraps subtree display list commands" {
     const children = [_]Widget{.{
         .id = 2,

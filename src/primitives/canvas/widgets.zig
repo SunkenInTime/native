@@ -802,6 +802,15 @@ pub const WidgetIconPath = struct {
     stroke_width: f32 = 0,
 };
 
+/// Box-relative linear-gradient geometry for a retained widget background.
+/// Start and end coordinates are normalized to the laid-out widget frame, so
+/// the same retained value follows resizing without author-side recomputation.
+pub const WidgetLinearGradient = struct {
+    start: geometry.PointF,
+    end: geometry.PointF,
+    stops: []const canvas.GradientStop,
+};
+
 /// One local-space immediate drawing command attached to a retained widget,
 /// or rare metadata sharing the same retained side channel. The renderer
 /// translates drawing coordinates into the laid-out frame and skips metadata.
@@ -820,6 +829,9 @@ pub const ImmediateCanvasCommand = union(enum) {
     text_font: FontId,
     /// Retained vector geometry for a path-authored icon. Metadata only.
     icon_path: WidgetIconPath,
+    /// Rare retained background paint. The renderer resolves normalized
+    /// geometry after layout and lowers it into the canvas gradient primitive.
+    background_gradient: WidgetLinearGradient,
     /// Rare retained visual metadata rides the existing command slice rather
     /// than enlarging every Widget. Emitters consume these entries as style;
     /// immediate canvases never draw them.

@@ -33,6 +33,7 @@ const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
 
 const colorFill = widget_render_style.colorFill;
 const widgetBackgroundFill = widget_render_style.widgetBackgroundFill;
+const widgetBackgroundIsOpaque = widget_render_style.widgetBackgroundIsOpaque;
 const widgetBorderFill = widget_render_style.widgetBorderFill;
 const widgetFocusRingFill = widget_render_style.widgetFocusRingFill;
 const widgetBackgroundColor = widget_render_style.widgetBackgroundColor;
@@ -258,7 +259,7 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
             .spread = custom.spread,
             .color = custom.color,
         }),
-        .inherit => if (background.a >= 1 and (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0)) {
+        .inherit => if (widgetBackgroundIsOpaque(widget, background) and (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0)) {
             try builder.shadow(.{
                 .id = widgetPartId(widget.id, 1),
                 .rect = widget.frame,
@@ -276,7 +277,7 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
-        .fill = colorFill(background),
+        .fill = widgetBackgroundFill(widget, background),
     });
     switch (box_shadow) {
         .shadow => |custom| if (custom.inset) try builder.shadow(.{
