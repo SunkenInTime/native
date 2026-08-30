@@ -355,13 +355,13 @@ float3 oklabToLinearSrgb(float3 lab) {
 }
 float3 gradientColorToSpace(float3 color,float interpolation) {
   if (interpolation<0.5) return color;
-  float3 linear=float3(srgbToLinear(color.r),srgbToLinear(color.g),srgbToLinear(color.b));
-  return interpolation<1.5 ? linear : linearSrgbToOklab(linear);
+  float3 linearRgb=float3(srgbToLinear(color.r),srgbToLinear(color.g),srgbToLinear(color.b));
+  return interpolation<1.5 ? linearRgb : linearSrgbToOklab(linearRgb);
 }
 float3 gradientColorFromSpace(float3 color,float interpolation) {
   if (interpolation<0.5) return saturate(color);
-  float3 linear=interpolation<1.5 ? color : oklabToLinearSrgb(color);
-  return saturate(float3(linearToSrgb(linear.r),linearToSrgb(linear.g),linearToSrgb(linear.b)));
+  float3 linearRgb=interpolation<1.5 ? color : oklabToLinearSrgb(color);
+  return saturate(float3(linearToSrgb(linearRgb.r),linearToSrgb(linearRgb.g),linearToSrgb(linearRgb.b)));
 }
 float4 mixGradientColors(float4 a,float4 b,float amount,float interpolation) {
   float alpha=lerp(a.a,b.a,amount);
