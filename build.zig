@@ -824,7 +824,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRetainedFrameIntervalSeconds(screen)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRetainedFrameIntervalSeconds(frameWindow.screen ?: NSScreen.mainScreen)" },
         .{ .path = "build/app.zig", .pattern = "app_mod.linkFramework(\"CoreVideo\", .{})" },
+        .{ .path = "build/app.zig", .pattern = "app_mod.linkFramework(\"IOSurface\", .{})" },
         .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkFramework(\"CoreVideo\", .{})" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkFramework(\"IOSurface\", .{})" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-production-metal-lifetime", "Verify AppKit ships the measured process-lifetime Metal architecture", &.{
         .{ .path = "build/app.zig", .pattern = "embeddedMetalLibrary(b, dep)" },
