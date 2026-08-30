@@ -474,6 +474,7 @@ fn writeCanvasGpuPaintJson(paint: CanvasGpuPaint, writer: anytype) !void {
             try writeGradientOptionsJson(gradient.spread, gradient.interpolation, writer);
             try writer.writeByte('}');
         },
+        .mesh_gradient => |gradient| try writeMeshGradientJson(gradient, writer),
     }
 }
 
@@ -495,6 +496,30 @@ fn writeGradientOptionsJson(spread: drawing_model.GradientSpread, interpolation:
         try writer.writeAll(",\"interpolation\":");
         try json.writeString(writer, @tagName(interpolation));
     }
+}
+
+fn writeMeshGradientJson(gradient: drawing_model.MeshGradient, writer: anytype) !void {
+    try writer.writeAll("{\"kind\":\"mesh_gradient\",\"patches\":[");
+    for (gradient.patches, 0..) |patch, patch_index| {
+        if (patch_index > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"points\":[");
+        for (patch.points, 0..) |point, point_index| {
+            if (point_index > 0) try writer.writeByte(',');
+            try writePointJson(point, writer);
+        }
+        try writer.writeAll("],\"colors\":[");
+        for (patch.colors, 0..) |color, color_index| {
+            if (color_index > 0) try writer.writeByte(',');
+            try writeColorJson(color, writer);
+        }
+        try writer.writeAll("]}");
+    }
+    try writer.writeByte(']');
+    if (gradient.interpolation != .srgb_linear) {
+        try writer.writeAll(",\"interpolation\":");
+        try json.writeString(writer, @tagName(gradient.interpolation));
+    }
+    try writer.writeByte('}');
 }
 
 fn writeCanvasGpuImageJson(image: ?CanvasGpuImage, writer: anytype) !void {
@@ -792,10 +817,11 @@ fn writeRenderResourceJson(resource: RenderResource, writer: anytype) !void {
     try writeOptionalObjectIdJson(resource.id, writer);
     try writer.writeAll(",\"bounds\":");
     try writeOptionalRectJson(resource.bounds, writer);
-    try writer.print(",\"imageId\":{d},\"fontId\":{d},\"gradientStopCount\":{d},\"glyphCount\":{d},\"textLen\":{d},\"fingerprint\":{d}}}", .{
+    try writer.print(",\"imageId\":{d},\"fontId\":{d},\"gradientStopCount\":{d},\"meshPatchCount\":{d},\"glyphCount\":{d},\"textLen\":{d},\"fingerprint\":{d}}}", .{
         resource.image_id,
         resource.font_id,
         resource.gradient_stop_count,
+        resource.mesh_patch_count,
         resource.glyph_count,
         resource.text_len,
         resource.fingerprint,
@@ -1023,6 +1049,7 @@ fn writeFillJson(fill: Fill, writer: anytype) !void {
             try writeGradientOptionsJson(gradient.spread, gradient.interpolation, writer);
             try writer.writeByte('}');
         },
+        .mesh_gradient => |gradient| try writeMeshGradientJson(gradient, writer),
     }
 }
 
@@ -1070,7 +1097,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Compact binary gpu-surface packet encoding (wire format v8).
+// Compact binary gpu-surface packet encoding (wire format v9).
 //
 // The version this comment names, the `binary_packet_version` constant
 // below, and the host decoder's spec comment (appkit_host.m) must agree;
@@ -1120,6 +1147,9 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 // v8 (from v7): gradient paints identify linear, radial, or conic geometry
 // and carry explicit spread and interpolation codes before their stop list.
 //
+// v9 (from v8): mesh paints carry an interpolation code followed by bounded
+// tensor bicubic patches (16 points and four corner colors per patch).
+//
 // Layout:
 //   "NSGP" u8[4] | version u8 | load_action u8 (1 load / 2 clear /
 //     3 patch) | flags u8 (bit0 scissor, bit1 dirty rect list) | reserved u8
@@ -1137,7 +1167,7 @@ fn writeGlyphsJson(glyphs: []const Glyph, writer: anytype) !void {
 //     | order_count u32 | order keys u64[]
 
 pub const binary_packet_magic = "NSGP";
-pub const binary_packet_version: u8 = 8;
+pub const binary_packet_version: u8 = 9;
 
 /// Most dirty rects a patch header carries: enough to keep far-apart
 /// small changes (a switch plus a status line) from fusing into a
@@ -1221,6 +1251,15 @@ pub fn canvasGpuCommandFingerprint(command: CanvasGpuCommand) u64 {
             for (gradient.stops) |stop| {
                 h = hash.resourceHashF32(h, stop.offset);
                 h = hash.resourceHashColor(h, stop.color);
+            }
+        },
+        .mesh_gradient => |gradient| {
+            h = hash.resourceHashU8(h, 5);
+            h = hash.resourceHashEnum(h, @intFromEnum(gradient.interpolation));
+            h = hash.resourceHashUsize(h, gradient.patches.len);
+            for (gradient.patches) |patch| {
+                for (patch.points) |point| h = hash.resourceHashPoint(h, point);
+                for (patch.colors) |color| h = hash.resourceHashColor(h, color);
             }
         },
         .conic_gradient => |gradient| {
@@ -1525,7 +1564,7 @@ fn writeBinaryShape(shape: CanvasGpuShape, writer: anytype) !void {
     }
 }
 
-/// Paint: tag u8 (1 color / 2 linear / 3 radial / 4 conic) + payload.
+/// Paint: tag u8 (1 color / 2 linear / 3 radial / 4 conic / 5 mesh) + payload.
 fn writeBinaryPaint(paint: CanvasGpuPaint, writer: anytype) !void {
     switch (paint) {
         .none => unreachable, // callers gate on the paint flag
@@ -1551,6 +1590,15 @@ fn writeBinaryPaint(paint: CanvasGpuPaint, writer: anytype) !void {
             try writeBinaryPoint(gradient.center, writer);
             try writeBinaryF32(gradient.start_angle_radians, writer);
             try writeBinaryGradientStops(gradient.stops, gradient.spread, gradient.interpolation, writer);
+        },
+        .mesh_gradient => |gradient| {
+            try writer.writeByte(5);
+            try writer.writeByte(@intFromEnum(gradient.interpolation));
+            try writer.writeInt(u32, @intCast(gradient.patches.len), .little);
+            for (gradient.patches) |patch| {
+                for (patch.points) |point| try writeBinaryPoint(point, writer);
+                for (patch.colors) |color| try writeBinaryColor(color, writer);
+            }
         },
     }
 }
@@ -1767,4 +1815,40 @@ test "binary gradient paints pin geometry options and stop layout" {
         try std.testing.expectEqual(@as(u32, stops.len), std.mem.readInt(u32, bytes[options_offset + 2 ..][0..4], .little));
         try std.testing.expectEqual(if (index == 2) @as(usize, 59) else @as(usize, 63), bytes.len);
     }
+}
+
+test "binary mesh paint pins patch geometry color and interpolation layout" {
+    var points: [16]geometry.PointF = undefined;
+    for (0..16) |index| {
+        points[index] = geometry.PointF.init(
+            @floatFromInt(index),
+            @floatFromInt(index + 100),
+        );
+    }
+    const patches = [_]drawing_model.MeshPatch{.{
+        .points = points,
+        .colors = .{
+            Color.rgba8(255, 0, 0, 64),
+            Color.rgba8(0, 255, 0, 128),
+            Color.rgba8(0, 0, 255, 192),
+            Color.rgba8(255, 255, 255, 255),
+        },
+    }};
+    const paint: CanvasGpuPaint = .{ .mesh_gradient = .{
+        .patches = &patches,
+        .interpolation = .oklab,
+    } };
+
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeBinaryPaint(paint, &writer);
+    const bytes = writer.buffered();
+
+    try std.testing.expectEqual(@as(usize, 198), bytes.len);
+    try std.testing.expectEqual(@as(u8, 5), bytes[0]);
+    try std.testing.expectEqual(@as(u8, 2), bytes[1]);
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, bytes[2..6], .little));
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(std.mem.readInt(u32, bytes[6..10], .little))));
+    try std.testing.expectEqual(@as(f32, 115), @as(f32, @bitCast(std.mem.readInt(u32, bytes[130..134], .little))));
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(std.mem.readInt(u32, bytes[194..198], .little))));
 }

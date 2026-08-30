@@ -25,6 +25,8 @@ const GradientStop = support.GradientStop;
 const LinearGradient = support.LinearGradient;
 const RadialGradient = support.RadialGradient;
 const ConicGradient = support.ConicGradient;
+const MeshPatch = support.MeshPatch;
+const MeshGradient = support.MeshGradient;
 const Fill = support.Fill;
 const Stroke = support.Stroke;
 const Clip = support.Clip;
@@ -669,6 +671,57 @@ test "radial and conic gradients keep distinct pipelines resources and gpu paint
     }
     switch (conic_gpu.paint) {
         .conic_gradient => |gradient| try std.testing.expectEqualDeep(conic, gradient),
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "mesh gradients keep patch resources and gpu paint identity" {
+    var points: [16]geometry.PointF = undefined;
+    for (0..4) |row| {
+        for (0..4) |column| {
+            points[row * 4 + column] = geometry.PointF.init(
+                @floatFromInt(column * 10),
+                @floatFromInt(row * 10),
+            );
+        }
+    }
+    const patches = [_]MeshPatch{.{
+        .points = points,
+        .colors = .{
+            Color.rgb8(255, 0, 0),
+            Color.rgb8(0, 255, 0),
+            Color.rgb8(0, 0, 255),
+            Color.rgb8(255, 255, 255),
+        },
+    }};
+    const gradient = MeshGradient{
+        .patches = &patches,
+        .interpolation = .oklab,
+    };
+    const commands = [_]CanvasCommand{
+        .{ .fill_rect = .{
+            .id = 71,
+            .rect = geometry.RectF.init(0, 0, 30, 30),
+            .fill = .{ .mesh_gradient = gradient },
+        } },
+    };
+
+    var render_commands: [1]RenderCommand = undefined;
+    const render_plan = try (DisplayList{ .commands = &commands }).renderPlan(&render_commands);
+    var batches: [1]RenderBatch = undefined;
+    const batch_plan = try render_plan.batchPlan(&batches);
+    try std.testing.expectEqual(RenderPipelineKind.mesh_gradient, batch_plan.batches[0].pipeline);
+
+    var resources: [1]RenderResource = undefined;
+    const resource_plan = try (DisplayList{ .commands = &commands }).resourcePlan(&resources);
+    try std.testing.expectEqual(RenderResourceKind.mesh_gradient, resource_plan.resources[0].kind);
+    try std.testing.expectEqual(@as(usize, 1), resource_plan.resources[0].mesh_patch_count);
+    try std.testing.expect(resource_plan.resources[0].fingerprint != 0);
+
+    const gpu = canvas.canvasGpuCommandFromRenderCommand(render_plan.commands[0], 0);
+    try std.testing.expectEqual(@as(?RenderPipelineKind, .mesh_gradient), gpu.pipeline);
+    switch (gpu.paint) {
+        .mesh_gradient => |actual| try std.testing.expectEqualDeep(gradient, actual),
         else => return error.TestExpectedEqual,
     }
 }

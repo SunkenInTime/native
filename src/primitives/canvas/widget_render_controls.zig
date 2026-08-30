@@ -62,7 +62,9 @@ const textEditingInkColor = widget_render_style.textEditingInkColor;
 const textSelectionFillColor = widget_render_style.textSelectionFillColor;
 const textSelectionTextColor = widget_render_style.textSelectionTextColor;
 const colorFill = widget_render_style.colorFill;
-const widgetBackgroundFill = widget_render_style.widgetBackgroundFill;
+const emitWidgetRoundedBackground = widget_render_style.emitWidgetRoundedBackground;
+const emitWidgetRectBackground = widget_render_style.emitWidgetRectBackground;
+const widgetHasBackgroundGradient = widget_render_style.widgetHasBackgroundGradient;
 const widgetAccentFill = widget_render_style.widgetAccentFill;
 const widgetBorderFill = widget_render_style.widgetBorderFill;
 const widgetFocusRingFill = widget_render_style.widgetFocusRingFill;
@@ -726,14 +728,8 @@ pub fn emitMenuItemWidget(builder: *Builder, widget: Widget, tokens: DesignToken
     const visual = listItemControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.sm);
     const wash = menuItemWashColor(widget, tokens, visual);
-    if (wash.a > 0) {
-        try builder.fillRoundedRect(.{
-            .id = widgetPartId(widget.id, 1),
-            .rect = widget.frame,
-            .radius = radius,
-            .fill = widgetBackgroundFill(widget, wash),
-        });
-    }
+    if (wash.a > 0 or widgetHasBackgroundGradient(widget))
+        try emitWidgetRoundedBackground(builder, widget, wash, radius, widgetPartId(widget.id, 1));
     const text_size = widgetBodyTextSize(widget, tokens);
     const text_inset = widgetControlInset(widget, tokens, tokens.spacing.md);
     const content_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
@@ -810,14 +806,8 @@ pub fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignToken
     const visual = listItemControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.md);
     const fill = listItemFillColor(widget, tokens, widget.state);
-    if (fill.a > 0) {
-        try builder.fillRoundedRect(.{
-            .id = widgetPartId(widget.id, 1),
-            .rect = widget.frame,
-            .radius = radius,
-            .fill = widgetBackgroundFill(widget, fill),
-        });
-    }
+    if (fill.a > 0 or widgetHasBackgroundGradient(widget))
+        try emitWidgetRoundedBackground(builder, widget, fill, radius, widgetPartId(widget.id, 1));
     if (widget.state.focused) try emitWidgetFocusRing(builder, widget, tokens, 2);
     const text_size = widgetBodyTextSize(widget, tokens);
     const text_inset = widgetControlInset(widget, tokens, tokens.spacing.md);
@@ -883,13 +873,8 @@ pub fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignToken
 pub fn emitDataCellWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!ControlVisualTokens {
     const visual = listItemControlVisualTokens(widget, tokens);
     const state_fill = listItemFillColor(widget, tokens, widget.state);
-    if (state_fill.a > 0) {
-        try builder.fillRect(.{
-            .id = widgetPartId(widget.id, 1),
-            .rect = widget.frame,
-            .fill = widgetBackgroundFill(widget, state_fill),
-        });
-    }
+    if (state_fill.a > 0 or widgetHasBackgroundGradient(widget))
+        try emitWidgetRectBackground(builder, widget, state_fill, widgetPartId(widget.id, 1));
     // Borderless by default: the table's chrome is its hairline ROW
     // separators, never a grid of cell boxes. A theme or per-widget
     // border/stroke opts a cell back into an edge.

@@ -544,6 +544,7 @@ pub const RenderPipelineKind = enum {
     linear_gradient,
     radial_gradient,
     conic_gradient,
+    mesh_gradient,
     image,
     glyph_run,
     path,
@@ -798,6 +799,7 @@ fn renderPipelineForFill(fill: Fill) RenderPipelineKind {
         .linear_gradient => .linear_gradient,
         .radial_gradient => .radial_gradient,
         .conic_gradient => .conic_gradient,
+        .mesh_gradient => .mesh_gradient,
     };
 }
 

@@ -12,6 +12,7 @@ const GradientStop = drawing_model.GradientStop;
 const LinearGradient = drawing_model.LinearGradient;
 const RadialGradient = drawing_model.RadialGradient;
 const ConicGradient = drawing_model.ConicGradient;
+const MeshGradient = drawing_model.MeshGradient;
 const Fill = drawing_model.Fill;
 const Stroke = drawing_model.Stroke;
 const Clip = drawing_model.Clip;
@@ -208,6 +209,10 @@ pub fn fillsEqual(a: Fill, b: Fill) bool {
             .conic_gradient => |other| conicGradientsEqual(value, other),
             else => false,
         },
+        .mesh_gradient => |value| switch (b) {
+            .mesh_gradient => |other| meshGradientsEqual(value, other),
+            else => false,
+        },
     };
 }
 
@@ -232,6 +237,19 @@ pub fn conicGradientsEqual(a: ConicGradient, b: ConicGradient) bool {
     return pointsEqual(a.center, b.center) and a.start_angle_radians == b.start_angle_radians and
         a.spread == b.spread and a.interpolation == b.interpolation and
         gradientStopsEqual(a.stops, b.stops);
+}
+
+pub fn meshGradientsEqual(a: MeshGradient, b: MeshGradient) bool {
+    if (a.interpolation != b.interpolation or a.patches.len != b.patches.len) return false;
+    for (a.patches, b.patches) |left, right| {
+        for (left.points, right.points) |left_point, right_point| {
+            if (!pointsEqual(left_point, right_point)) return false;
+        }
+        for (left.colors, right.colors) |left_color, right_color| {
+            if (!colorsEqual(left_color, right_color)) return false;
+        }
+    }
+    return true;
 }
 
 pub fn gradientStopsEqual(a: []const GradientStop, b: []const GradientStop) bool {

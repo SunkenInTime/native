@@ -14,6 +14,8 @@ const Radius = drawing_model.Radius;
 const LinearGradient = drawing_model.LinearGradient;
 const RadialGradient = drawing_model.RadialGradient;
 const ConicGradient = drawing_model.ConicGradient;
+const MeshGradient = drawing_model.MeshGradient;
+const MeshPatch = drawing_model.MeshPatch;
 const GradientStop = drawing_model.GradientStop;
 const GradientSpread = drawing_model.GradientSpread;
 const GradientInterpolation = drawing_model.GradientInterpolation;
@@ -1183,6 +1185,7 @@ fn referenceSampleFill(fill: Fill, transform: Affine, point: geometry.PointF) Co
         .linear_gradient => |gradient| referenceSampleLinearGradient(gradient, transform, point),
         .radial_gradient => |gradient| referenceSampleRadialGradient(gradient, transform, point),
         .conic_gradient => |gradient| referenceSampleConicGradient(gradient, transform, point),
+        .mesh_gradient => |gradient| referenceSampleMeshGradient(gradient, transform, point),
     };
 }
 
@@ -1264,6 +1267,131 @@ fn referenceSampleConicGradient(gradient: ConicGradient, transform: Affine, poin
     // the geometric turn to [0,1), then apply the stop interval's spread.
     const turn = t - @floor(t);
     return referenceSampleGradientStops(gradient.stops, turn, gradient.spread, gradient.interpolation);
+}
+
+const ReferenceMeshEvaluation = struct {
+    position: geometry.PointF,
+    derivative_u: geometry.PointF,
+    derivative_v: geometry.PointF,
+};
+
+fn referenceSampleMeshGradient(gradient: MeshGradient, transform: Affine, point: geometry.PointF) Color {
+    var patch_index = gradient.patches.len;
+    while (patch_index > 0) {
+        patch_index -= 1;
+        const patch = gradient.patches[patch_index];
+        var min_x = std.math.inf(f32);
+        var min_y = std.math.inf(f32);
+        var max_x = -std.math.inf(f32);
+        var max_y = -std.math.inf(f32);
+        for (patch.points) |control| {
+            const transformed = transform.transformPoint(control);
+            min_x = @min(min_x, transformed.x);
+            min_y = @min(min_y, transformed.y);
+            max_x = @max(max_x, transformed.x);
+            max_y = @max(max_y, transformed.y);
+        }
+        if (point.x < min_x - 0.01 or point.x > max_x + 0.01 or
+            point.y < min_y - 0.01 or point.y > max_y + 0.01) continue;
+
+        var u = if (max_x - min_x <= 0.000001) 0.5 else std.math.clamp((point.x - min_x) / (max_x - min_x), 0, 1);
+        var v = if (max_y - min_y <= 0.000001) 0.5 else std.math.clamp((point.y - min_y) / (max_y - min_y), 0, 1);
+        for (0..10) |_| {
+            const evaluation = referenceEvaluateMeshPatch(patch, transform, u, v);
+            const delta_x = evaluation.position.x - point.x;
+            const delta_y = evaluation.position.y - point.y;
+            const determinant = evaluation.derivative_u.x * evaluation.derivative_v.y -
+                evaluation.derivative_u.y * evaluation.derivative_v.x;
+            if (@abs(determinant) <= 0.000001) break;
+            const step_u = (delta_x * evaluation.derivative_v.y - delta_y * evaluation.derivative_v.x) / determinant;
+            const step_v = (evaluation.derivative_u.x * delta_y - evaluation.derivative_u.y * delta_x) / determinant;
+            u -= step_u;
+            v -= step_v;
+            if (@abs(step_u) + @abs(step_v) <= 0.00001) break;
+        }
+        if (u < -0.001 or u > 1.001 or v < -0.001 or v > 1.001) continue;
+        u = std.math.clamp(u, 0, 1);
+        v = std.math.clamp(v, 0, 1);
+        const final_position = referenceEvaluateMeshPatch(patch, transform, u, v).position;
+        const residual_x = final_position.x - point.x;
+        const residual_y = final_position.y - point.y;
+        if (residual_x * residual_x + residual_y * residual_y > 0.0001) continue;
+        return referenceMixMeshColors(patch, u, v, gradient.interpolation);
+    }
+    return Color.rgba(0, 0, 0, 0);
+}
+
+fn referenceEvaluateMeshPatch(patch: MeshPatch, transform: Affine, u: f32, v: f32) ReferenceMeshEvaluation {
+    const basis_u = referenceCubicBasis(u);
+    const basis_v = referenceCubicBasis(v);
+    const derivative_u = referenceCubicBasisDerivative(u);
+    const derivative_v = referenceCubicBasisDerivative(v);
+    var evaluation = ReferenceMeshEvaluation{
+        .position = geometry.PointF.zero(),
+        .derivative_u = geometry.PointF.zero(),
+        .derivative_v = geometry.PointF.zero(),
+    };
+    for (0..4) |row| {
+        for (0..4) |column| {
+            const control = transform.transformPoint(patch.points[row * 4 + column]);
+            const position_weight = basis_u[column] * basis_v[row];
+            const u_weight = derivative_u[column] * basis_v[row];
+            const v_weight = basis_u[column] * derivative_v[row];
+            evaluation.position.x += control.x * position_weight;
+            evaluation.position.y += control.y * position_weight;
+            evaluation.derivative_u.x += control.x * u_weight;
+            evaluation.derivative_u.y += control.y * u_weight;
+            evaluation.derivative_v.x += control.x * v_weight;
+            evaluation.derivative_v.y += control.y * v_weight;
+        }
+    }
+    return evaluation;
+}
+
+fn referenceCubicBasis(value: f32) [4]f32 {
+    const inverse = 1 - value;
+    return .{
+        inverse * inverse * inverse,
+        3 * inverse * inverse * value,
+        3 * inverse * value * value,
+        value * value * value,
+    };
+}
+
+fn referenceCubicBasisDerivative(value: f32) [4]f32 {
+    const inverse = 1 - value;
+    return .{
+        -3 * inverse * inverse,
+        3 * inverse * inverse - 6 * inverse * value,
+        6 * inverse * value - 3 * value * value,
+        3 * value * value,
+    };
+}
+
+fn referenceMixMeshColors(patch: MeshPatch, u: f32, v: f32, interpolation: GradientInterpolation) Color {
+    const weights = [4]f32{
+        (1 - u) * (1 - v),
+        u * (1 - v),
+        u * v,
+        (1 - u) * v,
+    };
+    var alpha: f32 = 0;
+    var premultiplied = [3]f32{ 0, 0, 0 };
+    for (patch.colors, weights) |color, weight| {
+        const weighted_alpha = color.a * weight;
+        const converted = referenceColorToInterpolation(color, interpolation);
+        alpha += weighted_alpha;
+        premultiplied[0] += converted[0] * weighted_alpha;
+        premultiplied[1] += converted[1] * weighted_alpha;
+        premultiplied[2] += converted[2] * weighted_alpha;
+    }
+    if (alpha <= 0.000001) return Color.rgba(0, 0, 0, 0);
+    const rgb = referenceColorFromInterpolation(.{
+        premultiplied[0] / alpha,
+        premultiplied[1] / alpha,
+        premultiplied[2] / alpha,
+    }, interpolation);
+    return Color.rgba(rgb[0], rgb[1], rgb[2], alpha);
 }
 
 fn referenceSampleGradientStops(stops: []const GradientStop, raw_t: f32, spread: GradientSpread, interpolation: GradientInterpolation) Color {

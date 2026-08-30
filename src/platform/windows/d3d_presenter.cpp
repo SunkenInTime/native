@@ -51,20 +51,30 @@ struct GradientStopInstance {
     F4 data; // offset, unused
 };
 
+struct MeshPatchInstance {
+    F4 points[8]; // two row-major float2 control points per float4
+    F4 colors[4]; // top-left, top-right, bottom-right, bottom-left
+    F4 bounds; // min x/y, max x/y
+    F4 options; // interpolation, unused
+};
+
 static_assert(sizeof(Instance) == 112);
 static_assert(sizeof(GradientStopInstance) == 32);
+static_assert(sizeof(MeshPatchInstance) == 224);
 
 struct RetainedCommand {
     std::vector<Instance> instances;
     std::vector<GradientStopInstance> gradient_stops;
+    std::vector<MeshPatchInstance> mesh_patches;
 };
 
 // Must match serialization.zig `binary_packet_version`; the build-time
 // wire-format ratchet checks this independently of the macOS decoder.
-static constexpr uint8_t kBinaryPacketVersion = 8;
+static constexpr uint8_t kBinaryPacketVersion = 9;
 // Matches canvas_limits.max_canvas_gradient_stops_per_view. Keep the decoder
 // bound even though the runtime already applies the same aggregate budget.
 static constexpr uint32_t kMaxGradientStopsPerSurface = 64;
+static constexpr uint32_t kMaxMeshPatchesPerSurface = 16;
 
 struct PacketReader {
     const uint8_t *cursor;
@@ -103,7 +113,8 @@ bool readStraightColor(PacketReader &reader, F4 *color) {
 }
 
 bool readPaint(PacketReader &reader, Instance *instance,
-    std::vector<GradientStopInstance> *gradient_stops) {
+    std::vector<GradientStopInstance> *gradient_stops,
+    std::vector<MeshPatchInstance> *mesh_patches) {
     uint8_t tag = 0;
     if (!reader.u8(&tag)) return false;
     if (tag == 1) {
@@ -137,6 +148,31 @@ bool readPaint(PacketReader &reader, Instance *instance,
         instance->paint = {
             static_cast<float>(tag - 1), 0.0f, static_cast<float>(count), 1.0f
         };
+        return true;
+    }
+    if (tag == 5) {
+        uint8_t interpolation = 0;
+        uint32_t count = 0;
+        if (!reader.u8(&interpolation) || interpolation > 2 ||
+            !reader.u32(&count) || count > kMaxMeshPatchesPerSurface) return false;
+        mesh_patches->reserve(count);
+        for (uint32_t patch_index = 0; patch_index < count; ++patch_index) {
+            MeshPatchInstance patch = {};
+            patch.bounds = { INFINITY, INFINITY, -INFINITY, -INFINITY };
+            for (F4 &pair : patch.points) {
+                if (!reader.rect(&pair)) return false;
+                patch.bounds.x = std::min(patch.bounds.x, std::min(pair.x, pair.z));
+                patch.bounds.y = std::min(patch.bounds.y, std::min(pair.y, pair.w));
+                patch.bounds.z = std::max(patch.bounds.z, std::max(pair.x, pair.z));
+                patch.bounds.w = std::max(patch.bounds.w, std::max(pair.y, pair.w));
+            }
+            for (F4 &color : patch.colors) {
+                if (!readStraightColor(reader, &color)) return false;
+            }
+            patch.options.x = static_cast<float>(interpolation);
+            mesh_patches->push_back(patch);
+        }
+        instance->paint = { 4.0f, 0.0f, static_cast<float>(count), 1.0f };
         return true;
     }
     return false;
@@ -242,7 +278,8 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     }
 
     std::vector<GradientStopInstance> gradient_stops;
-    if (!readPaint(reader, &base, &gradient_stops)) return false;
+    std::vector<MeshPatchInstance> mesh_patches;
+    if (!readPaint(reader, &base, &gradient_stops, &mesh_patches)) return false;
     if (base.paint.x < 0.5f) {
         base.color.x *= opacity;
         base.color.y *= opacity;
@@ -259,6 +296,7 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     }
     out->instances = std::move(instances);
     out->gradient_stops = std::move(gradient_stops);
+    out->mesh_patches = std::move(mesh_patches);
     (void)kind;
     (void)clip;
     return true;
@@ -267,8 +305,10 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
 const char *shaderSource = R"(
 struct Instance { float4 rect; float4 color; float4 shape; float4 extra; float4 gradient; float4 gradientOptions; float4 paint; };
 struct GradientStopInstance { float4 color; float4 data; };
+struct MeshPatchInstance { float4 points[8]; float4 colors[4]; float4 bounds; float4 options; };
 StructuredBuffer<Instance> instances : register(t0);
 StructuredBuffer<GradientStopInstance> gradientStops : register(t1);
+StructuredBuffer<MeshPatchInstance> meshPatches : register(t2);
 struct Out { float4 position:SV_POSITION; float2 pixel:TEXCOORD0; nointerpolation float4 rect:TEXCOORD1; nointerpolation float4 color:COLOR0; nointerpolation float4 shape:TEXCOORD2; nointerpolation float4 extra:TEXCOORD3; nointerpolation float4 gradient:TEXCOORD4; nointerpolation float4 gradientOptions:TEXCOORD5; nointerpolation float4 paint:TEXCOORD6; };
 cbuffer Surface : register(b0) { float2 surface; float2 padding; };
 Out vsMain(uint vertex:SV_VertexID, uint instance:SV_InstanceID) {
@@ -386,6 +426,89 @@ float4 sampleGradient(Out i) {
   }
   return premultiply(previous.color)*i.paint.w;
 }
+float2 meshPoint(MeshPatchInstance patch,uint index) {
+  float4 pair=patch.points[index/2];
+  return (index&1)==0 ? pair.xy : pair.zw;
+}
+float4 cubicBasis(float value) {
+  float inverse=1.0-value;
+  return float4(
+    inverse*inverse*inverse,
+    3.0*inverse*inverse*value,
+    3.0*inverse*value*value,
+    value*value*value);
+}
+float4 cubicBasisDerivative(float value) {
+  float inverse=1.0-value;
+  return float4(
+    -3.0*inverse*inverse,
+    3.0*inverse*inverse-6.0*inverse*value,
+    6.0*inverse*value-3.0*value*value,
+    3.0*value*value);
+}
+void evaluateMeshPatch(MeshPatchInstance patch,float u,float v,
+  out float2 position,out float2 derivativeU,out float2 derivativeV) {
+  float4 basisU=cubicBasis(u), basisV=cubicBasis(v);
+  float4 derivativeBasisU=cubicBasisDerivative(u), derivativeBasisV=cubicBasisDerivative(v);
+  position=float2(0,0); derivativeU=float2(0,0); derivativeV=float2(0,0);
+  [unroll] for (uint row=0;row<4;++row) {
+    [unroll] for (uint column=0;column<4;++column) {
+      float2 control=meshPoint(patch,row*4+column);
+      position+=control*basisU[column]*basisV[row];
+      derivativeU+=control*derivativeBasisU[column]*basisV[row];
+      derivativeV+=control*basisU[column]*derivativeBasisV[row];
+    }
+  }
+}
+float4 mixMeshColors(MeshPatchInstance patch,float2 uv) {
+  float4 weights=float4(
+    (1.0-uv.x)*(1.0-uv.y),
+    uv.x*(1.0-uv.y),
+    uv.x*uv.y,
+    (1.0-uv.x)*uv.y);
+  float interpolation=patch.options.x;
+  float alpha=0; float3 premultiplied=float3(0,0,0);
+  [unroll] for (uint index=0;index<4;++index) {
+    float weightedAlpha=patch.colors[index].a*weights[index];
+    alpha+=weightedAlpha;
+    premultiplied+=gradientColorToSpace(patch.colors[index].rgb,interpolation)*weightedAlpha;
+  }
+  if (alpha<=0.000001) return float4(0,0,0,0);
+  float3 mixed=gradientColorFromSpace(premultiplied/alpha,interpolation);
+  return float4(mixed*alpha,alpha);
+}
+float4 sampleMesh(Out i) {
+  uint first=(uint)i.paint.y, count=(uint)i.paint.z;
+  [loop] for (uint remaining=count;remaining>0;--remaining) {
+    MeshPatchInstance patch=meshPatches[first+remaining-1];
+    if (i.pixel.x<patch.bounds.x-0.01 || i.pixel.y<patch.bounds.y-0.01 ||
+        i.pixel.x>patch.bounds.z+0.01 || i.pixel.y>patch.bounds.w+0.01) continue;
+    float2 extent=patch.bounds.zw-patch.bounds.xy;
+    float2 uv=float2(
+      extent.x<=0.000001 ? 0.5 : saturate((i.pixel.x-patch.bounds.x)/extent.x),
+      extent.y<=0.000001 ? 0.5 : saturate((i.pixel.y-patch.bounds.y)/extent.y));
+    [loop] for (uint iteration=0;iteration<10;++iteration) {
+      float2 position, derivativeU, derivativeV;
+      evaluateMeshPatch(patch,uv.x,uv.y,position,derivativeU,derivativeV);
+      float2 delta=position-i.pixel;
+      float determinant=derivativeU.x*derivativeV.y-derivativeU.y*derivativeV.x;
+      if (abs(determinant)<=0.000001) break;
+      float2 step=float2(
+        (delta.x*derivativeV.y-delta.y*derivativeV.x)/determinant,
+        (derivativeU.x*delta.y-derivativeU.y*delta.x)/determinant);
+      uv-=step;
+      if (abs(step.x)+abs(step.y)<=0.00001) break;
+    }
+    if (uv.x < -0.001 || uv.x > 1.001 || uv.y < -0.001 || uv.y > 1.001) continue;
+    uv=saturate(uv);
+    float2 finalPosition, finalDerivativeU, finalDerivativeV;
+    evaluateMeshPatch(patch,uv.x,uv.y,finalPosition,finalDerivativeU,finalDerivativeV);
+    float2 residual=finalPosition-i.pixel;
+    if (dot(residual,residual)>0.0001) continue;
+    return mixMeshColors(patch,uv)*i.paint.w;
+  }
+  return float4(0,0,0,0);
+}
 float4 psMain(Out i):SV_TARGET {
   float distance;
   if (i.extra.w > 0.5) {
@@ -402,7 +525,7 @@ float4 psMain(Out i):SV_TARGET {
     distance=length(max(q,0))+min(max(q.x,q.y),0)-radius;
   }
   float coverage=saturate(0.5-distance);
-  float4 color=i.paint.x>0.5 ? sampleGradient(i) : i.color;
+  float4 color=i.paint.x>3.5 ? sampleMesh(i) : (i.paint.x>0.5 ? sampleGradient(i) : i.color);
   return color*coverage;
 })";
 
@@ -441,9 +564,12 @@ struct NsgpEngine {
     ComPtr<ID3D11ShaderResourceView> instance_srv;
     ComPtr<ID3D11Buffer> gradient_stop_buffer;
     ComPtr<ID3D11ShaderResourceView> gradient_stop_srv;
+    ComPtr<ID3D11Buffer> mesh_patch_buffer;
+    ComPtr<ID3D11ShaderResourceView> mesh_patch_srv;
     ComPtr<ID3D11BlendState> blend;
     size_t instance_capacity = 0;
     size_t gradient_stop_capacity = 0;
+    size_t mesh_patch_capacity = 0;
 };
 
 struct NativeSdkD3DPresenter {
@@ -585,6 +711,28 @@ static bool ensureGradientStops(NsgpEngine *engine, size_t count) {
         engine->gradient_stop_buffer.Get(), &srv, &engine->gradient_stop_srv));
 }
 
+static bool ensureMeshPatches(NsgpEngine *engine, size_t count) {
+    if (count <= engine->mesh_patch_capacity) return true;
+    engine->mesh_patch_capacity = std::max<size_t>(kMaxMeshPatchesPerSurface, count);
+    D3D11_BUFFER_DESC desc = {};
+    desc.ByteWidth = (UINT)(engine->mesh_patch_capacity * sizeof(MeshPatchInstance));
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    desc.StructureByteStride = sizeof(MeshPatchInstance);
+    engine->mesh_patch_srv.Reset();
+    engine->mesh_patch_buffer.Reset();
+    if (FAILED(engine->device->CreateBuffer(&desc, nullptr,
+        &engine->mesh_patch_buffer))) return false;
+    D3D11_SHADER_RESOURCE_VIEW_DESC srv = {};
+    srv.Format = DXGI_FORMAT_UNKNOWN;
+    srv.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+    srv.Buffer.NumElements = (UINT)engine->mesh_patch_capacity;
+    return SUCCEEDED(engine->device->CreateShaderResourceView(
+        engine->mesh_patch_buffer.Get(), &srv, &engine->mesh_patch_srv));
+}
+
 static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
     double logical_width,
     double logical_height, double scale, UINT physical_width_px,
@@ -636,25 +784,35 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
 
     std::vector<Instance> instances;
     std::vector<GradientStopInstance> gradient_stops;
+    std::vector<MeshPatchInstance> mesh_patches;
     for (uint64_t key : next_order) {
         const auto found = next_retained.find(key);
         if (found == next_retained.end()) return false;
         if (gradient_stops.size() + found->second.gradient_stops.size() >
             kMaxGradientStopsPerSurface) return false;
+        if (mesh_patches.size() + found->second.mesh_patches.size() >
+            kMaxMeshPatchesPerSurface) return false;
         const float stop_offset = static_cast<float>(gradient_stops.size());
+        const float mesh_offset = static_cast<float>(mesh_patches.size());
         gradient_stops.insert(gradient_stops.end(),
             found->second.gradient_stops.begin(), found->second.gradient_stops.end());
+        mesh_patches.insert(mesh_patches.end(),
+            found->second.mesh_patches.begin(), found->second.mesh_patches.end());
         for (const Instance &retained_instance : found->second.instances) {
             Instance instance = retained_instance;
-            if (instance.paint.x > 0.5f) {
+            if (instance.paint.x > 0.5f && instance.paint.x < 3.5f) {
                 instance.paint.y = stop_offset;
                 instance.paint.z = static_cast<float>(found->second.gradient_stops.size());
+            } else if (instance.paint.x > 3.5f) {
+                instance.paint.y = mesh_offset;
+                instance.paint.z = static_cast<float>(found->second.mesh_patches.size());
             }
             instances.push_back(instance);
         }
     }
     if (!ensureInstances(engine, instances.size()) ||
-        !ensureGradientStops(engine, gradient_stops.size())) return false;
+        !ensureGradientStops(engine, gradient_stops.size()) ||
+        !ensureMeshPatches(engine, mesh_patches.size())) return false;
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     if (!instances.empty()) {
         if (FAILED(engine->context->Map(engine->instance_buffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
@@ -667,6 +825,13 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
         memcpy(mapped.pData, gradient_stops.data(),
             gradient_stops.size() * sizeof(GradientStopInstance));
         engine->context->Unmap(engine->gradient_stop_buffer.Get(), 0);
+    }
+    if (!mesh_patches.empty()) {
+        if (FAILED(engine->context->Map(engine->mesh_patch_buffer.Get(), 0,
+            D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+        memcpy(mapped.pData, mesh_patches.data(),
+            mesh_patches.size() * sizeof(MeshPatchInstance));
+        engine->context->Unmap(engine->mesh_patch_buffer.Get(), 0);
     }
     if (FAILED(engine->context->Map(engine->constant_buffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
     float surface[4] = { (float)logical_width, (float)logical_height, 0, 0 };
@@ -694,10 +859,12 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
     engine->context->VSSetShaderResources(0, 1, engine->instance_srv.GetAddressOf());
     engine->context->PSSetShader(engine->pixel_shader.Get(), nullptr, 0);
     engine->context->PSSetShaderResources(1, 1, engine->gradient_stop_srv.GetAddressOf());
+    engine->context->PSSetShaderResources(2, 1, engine->mesh_patch_srv.GetAddressOf());
     if (!instances.empty()) engine->context->DrawInstanced(6, (UINT)instances.size(), 0, 0);
     ID3D11ShaderResourceView *null_srv = nullptr;
     engine->context->VSSetShaderResources(0, 1, &null_srv);
     engine->context->PSSetShaderResources(1, 1, &null_srv);
+    engine->context->PSSetShaderResources(2, 1, &null_srv);
     if (FAILED(state->swapchain->Present(present_interval, 0))) return false;
     state->retained = std::move(next_retained); state->order = std::move(next_order); state->generation = generation;
     return true;
@@ -937,6 +1104,22 @@ void appendTestGradientPaint(std::vector<uint8_t> *bytes, uint8_t tag,
     appendTestColor(bytes, 0.0f, 0.0f, 1.0f, 1.0f);
 }
 
+void appendTestMeshPaint(std::vector<uint8_t> *bytes) {
+    appendTestScalar(bytes, static_cast<uint8_t>(5));
+    appendTestScalar(bytes, static_cast<uint8_t>(2)); // Oklab
+    appendTestScalar(bytes, static_cast<uint32_t>(1));
+    for (uint32_t row = 0; row < 4; ++row) {
+        for (uint32_t column = 0; column < 4; ++column) {
+            appendTestScalar(bytes, 10.0f + column * 20.0f);
+            appendTestScalar(bytes, 20.0f + row * 10.0f);
+        }
+    }
+    appendTestColor(bytes, 1.0f, 0.0f, 0.0f, 0.5f);
+    appendTestColor(bytes, 0.0f, 1.0f, 0.0f, 0.75f);
+    appendTestColor(bytes, 0.0f, 0.0f, 1.0f, 1.0f);
+    appendTestColor(bytes, 1.0f, 1.0f, 1.0f, 1.0f);
+}
+
 bool closeEnough(float actual, float expected) {
     return std::abs(actual - expected) <= 0.000001f;
 }
@@ -989,13 +1172,15 @@ extern "C" int native_sdk_d3d_presenter_tests() {
     }
 
     std::vector<GradientStopInstance> stops;
+    std::vector<MeshPatchInstance> mesh_patches;
     for (uint8_t tag = 3; tag <= 4; ++tag) {
         bytes.clear();
         appendTestGradientPaint(&bytes, tag, 1, 0);
         reader = { bytes.data(), bytes.data() + bytes.size() };
         Instance gradient_instance = {};
         stops.clear();
-        expect(readPaint(reader, &gradient_instance, &stops));
+        mesh_patches.clear();
+        expect(readPaint(reader, &gradient_instance, &stops, &mesh_patches));
         expect(reader.cursor == reader.end);
         expect(closeEnough(gradient_instance.paint.x, static_cast<float>(tag - 1)));
         expect(closeEnough(gradient_instance.gradient_options.x, 1.0f));
@@ -1019,7 +1204,8 @@ extern "C" int native_sdk_d3d_presenter_tests() {
     reader = { bytes.data(), bytes.data() + bytes.size() };
     Instance instance = {};
     stops.clear();
-    expect(!readPaint(reader, &instance, &stops));
+    mesh_patches.clear();
+    expect(!readPaint(reader, &instance, &stops, &mesh_patches));
 
     bytes.clear();
     appendTestScalar(&bytes, static_cast<uint8_t>(4));
@@ -1031,7 +1217,34 @@ extern "C" int native_sdk_d3d_presenter_tests() {
     appendTestScalar(&bytes, static_cast<uint32_t>(0));
     reader = { bytes.data(), bytes.data() + bytes.size() };
     stops.clear();
-    expect(!readPaint(reader, &instance, &stops));
+    mesh_patches.clear();
+    expect(!readPaint(reader, &instance, &stops, &mesh_patches));
+
+    bytes.clear();
+    appendTestMeshPaint(&bytes);
+    reader = { bytes.data(), bytes.data() + bytes.size() };
+    stops.clear(); mesh_patches.clear();
+    expect(readPaint(reader, &instance, &stops, &mesh_patches));
+    expect(reader.cursor == reader.end);
+    expect(closeEnough(instance.paint.x, 4.0f));
+    expect(mesh_patches.size() == 1);
+    if (mesh_patches.size() == 1) {
+        expect(closeEnough(mesh_patches[0].bounds.x, 10.0f));
+        expect(closeEnough(mesh_patches[0].bounds.y, 20.0f));
+        expect(closeEnough(mesh_patches[0].bounds.z, 70.0f));
+        expect(closeEnough(mesh_patches[0].bounds.w, 50.0f));
+        expect(closeEnough(mesh_patches[0].options.x, 2.0f));
+        expect(closeEnough(mesh_patches[0].colors[0].x, 1.0f));
+        expect(closeEnough(mesh_patches[0].colors[0].w, 0.5f));
+    }
+
+    bytes.clear();
+    appendTestScalar(&bytes, static_cast<uint8_t>(5));
+    appendTestScalar(&bytes, static_cast<uint8_t>(1));
+    appendTestScalar(&bytes, kMaxMeshPatchesPerSurface + 1);
+    reader = { bytes.data(), bytes.data() + bytes.size() };
+    mesh_patches.clear();
+    expect(!readPaint(reader, &instance, &stops, &mesh_patches));
 
     ComPtr<ID3DBlob> vertex_shader;
     ComPtr<ID3DBlob> pixel_shader;

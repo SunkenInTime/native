@@ -170,11 +170,29 @@ pub const ConicGradient = struct {
     interpolation: GradientInterpolation = .srgb_linear,
 };
 
+/// One tensor-product bicubic mesh patch. Control points are row-major from
+/// top-left (`points[0]`) to bottom-right (`points[15]`); colors name the four
+/// corners in clockwise order. Adjacent patches should share their edge
+/// control points and corner colors for a seamless mesh.
+pub const MeshPatch = struct {
+    points: [16]geometry.PointF,
+    colors: [4]Color,
+};
+
+/// A two-dimensional gradient made from authored bicubic patches. Patch order
+/// is deterministic: later patches win where malformed input overlaps. Unlike
+/// linear/radial/conic gradients, a mesh has no one-dimensional spread axis.
+pub const MeshGradient = struct {
+    patches: []const MeshPatch = &.{},
+    interpolation: GradientInterpolation = .srgb_linear,
+};
+
 pub const Fill = union(enum) {
     color: Color,
     linear_gradient: LinearGradient,
     radial_gradient: RadialGradient,
     conic_gradient: ConicGradient,
+    mesh_gradient: MeshGradient,
 };
 
 pub const Stroke = struct {

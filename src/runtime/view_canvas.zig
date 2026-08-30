@@ -6,6 +6,7 @@ const platform = @import("../platform/root.zig");
 
 const max_canvas_commands_per_view = canvas_limits.max_canvas_commands_per_view;
 const max_canvas_gradient_stops_per_view = canvas_limits.max_canvas_gradient_stops_per_view;
+const max_canvas_mesh_patches_per_view = canvas_limits.max_canvas_mesh_patches_per_view;
 const max_canvas_path_elements_per_view = canvas_limits.max_canvas_path_elements_per_view;
 const max_canvas_glyphs_per_view = canvas_limits.max_canvas_glyphs_per_view;
 const max_canvas_text_bytes_per_view = canvas_limits.max_canvas_text_bytes_per_view;
@@ -32,6 +33,7 @@ pub const CanvasRenderAnimationDirtyBounds = struct {
 pub const CanvasResourceCounts = struct {
     command_count: usize = 0,
     gradient_stop_count: usize = 0,
+    mesh_patch_count: usize = 0,
     path_element_count: usize = 0,
     glyph_count: usize = 0,
     text_byte_count: usize = 0,
@@ -78,6 +80,7 @@ pub const CanvasResourceCounts = struct {
             .linear_gradient => |gradient| try addCanvasCount(&self.gradient_stop_count, gradient.stops.len, max_canvas_gradient_stops_per_view, error.CanvasGradientStopLimitReached),
             .radial_gradient => |gradient| try addCanvasCount(&self.gradient_stop_count, gradient.stops.len, max_canvas_gradient_stops_per_view, error.CanvasGradientStopLimitReached),
             .conic_gradient => |gradient| try addCanvasCount(&self.gradient_stop_count, gradient.stops.len, max_canvas_gradient_stops_per_view, error.CanvasGradientStopLimitReached),
+            .mesh_gradient => |gradient| try addCanvasCount(&self.mesh_patch_count, gradient.patches.len, max_canvas_mesh_patches_per_view, error.CanvasMeshPatchLimitReached),
         }
     }
 };
@@ -85,6 +88,8 @@ pub const CanvasResourceCounts = struct {
 pub const CanvasDisplayListScratch = struct {
     gradient_stops: [max_canvas_gradient_stops_per_view]canvas.GradientStop = undefined,
     gradient_stop_count: usize = 0,
+    mesh_patches: [max_canvas_mesh_patches_per_view]canvas.MeshPatch = undefined,
+    mesh_patch_count: usize = 0,
     path_elements: [max_canvas_path_elements_per_view]canvas.PathElement = undefined,
     path_element_count: usize = 0,
     glyphs: [max_canvas_glyphs_per_view]canvas.Glyph = undefined,
@@ -177,6 +182,10 @@ pub const CanvasDisplayListScratch = struct {
                 .spread = gradient.spread,
                 .interpolation = gradient.interpolation,
             } },
+            .mesh_gradient => |gradient| .{ .mesh_gradient = .{
+                .patches = try self.copyCanvasMeshPatches(gradient.patches),
+                .interpolation = gradient.interpolation,
+            } },
         };
     }
 
@@ -187,6 +196,15 @@ pub const CanvasDisplayListScratch = struct {
         @memcpy(self.gradient_stops[start..end], stops);
         self.gradient_stop_count = end;
         return self.gradient_stops[start..end];
+    }
+
+    pub fn copyCanvasMeshPatches(self: *CanvasDisplayListScratch, patches: []const canvas.MeshPatch) anyerror![]const canvas.MeshPatch {
+        const end = self.mesh_patch_count + patches.len;
+        if (end > self.mesh_patches.len) return error.CanvasMeshPatchLimitReached;
+        const start = self.mesh_patch_count;
+        @memcpy(self.mesh_patches[start..end], patches);
+        self.mesh_patch_count = end;
+        return self.mesh_patches[start..end];
     }
 
     pub fn copyCanvasPathElements(self: *CanvasDisplayListScratch, elements: []const canvas.PathElement) anyerror![]const canvas.PathElement {
@@ -326,6 +344,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
 
             self.canvas_command_count = 0;
             self.canvas_gradient_stop_count = 0;
+            self.canvas_mesh_patch_count = 0;
             self.canvas_path_element_count = 0;
             self.canvas_glyph_count = 0;
             self.canvas_text_len = 0;
@@ -875,6 +894,10 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
                     .spread = gradient.spread,
                     .interpolation = gradient.interpolation,
                 } },
+                .mesh_gradient => |gradient| .{ .mesh_gradient = .{
+                    .patches = try self.copyCanvasMeshPatches(gradient.patches),
+                    .interpolation = gradient.interpolation,
+                } },
             };
         }
 
@@ -885,6 +908,15 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             @memcpy(self.canvas_gradient_stops[start..end], stops);
             self.canvas_gradient_stop_count = end;
             return self.canvas_gradient_stops[start..end];
+        }
+
+        pub fn copyCanvasMeshPatches(self: *RuntimeView, patches: []const canvas.MeshPatch) anyerror![]const canvas.MeshPatch {
+            const end = self.canvas_mesh_patch_count + patches.len;
+            if (end > self.canvas_mesh_patches.len) return error.CanvasMeshPatchLimitReached;
+            const start = self.canvas_mesh_patch_count;
+            @memcpy(self.canvas_mesh_patches[start..end], patches);
+            self.canvas_mesh_patch_count = end;
+            return self.canvas_mesh_patches[start..end];
         }
 
         pub fn copyCanvasPathElements(self: *RuntimeView, elements: []const canvas.PathElement) anyerror![]const canvas.PathElement {

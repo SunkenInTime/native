@@ -61,30 +61,76 @@ const repeating_stops = [_]canvas.GradientStop{
     .{ .offset = 0.12, .color = canvas.Color.rgb8(56, 189, 248) },
     .{ .offset = 0.24, .color = canvas.Color.rgb8(56, 189, 248) },
 };
+const layered_overlay_stops = [_]canvas.GradientStop{
+    .{ .offset = 0, .color = canvas.Color.rgba8(255, 255, 255, 224) },
+    .{ .offset = 0.55, .color = canvas.Color.rgba8(236, 72, 153, 96) },
+    .{ .offset = 1, .color = canvas.Color.rgba8(236, 72, 153, 0) },
+};
+const layered_gradients = [_]canvas.WidgetGradient{
+    .{ .linear = .{
+        .start = geometry.PointF.init(0, 0.5),
+        .end = geometry.PointF.init(1, 0.5),
+        .stops = &spectrum_stops,
+        .interpolation = .oklab,
+    } },
+    .{ .radial = .{
+        .center = geometry.PointF.init(0.25, 0.35),
+        .radii = geometry.SizeF.init(0.8, 1.1),
+        .stops = &layered_overlay_stops,
+        .interpolation = .srgb,
+    } },
+};
+
+const mesh_patches = [_]canvas.MeshPatch{.{
+    .points = .{
+        geometry.PointF.init(0.5, 0.5),  geometry.PointF.init(38, 4),  geometry.PointF.init(88, 12), geometry.PointF.init(127.5, 0.5),
+        geometry.PointF.init(4, 18),     geometry.PointF.init(42, 10), geometry.PointF.init(86, 24), geometry.PointF.init(124, 18),
+        geometry.PointF.init(10, 46),    geometry.PointF.init(46, 56), geometry.PointF.init(82, 38), geometry.PointF.init(118, 46),
+        geometry.PointF.init(0.5, 63.5), geometry.PointF.init(36, 54), geometry.PointF.init(92, 62), geometry.PointF.init(127.5, 63.5),
+    },
+    .colors = .{
+        canvas.Color.rgb8(244, 63, 94),
+        canvas.Color.rgb8(14, 165, 233),
+        canvas.Color.rgb8(168, 85, 247),
+        canvas.Color.rgb8(250, 204, 21),
+    },
+}};
+
+const ScenePaint = union(enum) {
+    widget_gradient: canvas.WidgetGradient,
+    widget_gradient_layers: []const canvas.WidgetGradient,
+    direct_fill: canvas.Fill,
+};
 
 const Scene = struct {
     name: []const u8,
-    gradient: canvas.WidgetGradient,
+    paint: ScenePaint,
 
     fn kind(self: Scene) []const u8 {
-        return @tagName(self.gradient);
+        return switch (self.paint) {
+            .widget_gradient => |gradient| @tagName(gradient),
+            .widget_gradient_layers => "layered_gradient",
+            .direct_fill => |fill| @tagName(fill),
+        };
     }
 };
 
 const scenes = [_]Scene{
-    .{ .name = "opaque-horizontal", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &opaque_stops } } },
-    .{ .name = "transparent-horizontal", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &transparent_stops } } },
-    .{ .name = "oklab-horizontal", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &opaque_stops, .interpolation = .oklab } } },
-    .{ .name = "sharp-stop", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &sharp_stops } } },
-    .{ .name = "arbitrary-angle", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &offset_stops } } },
-    .{ .name = "repeating-linear", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &repeating_stops, .spread = .repeat, .interpolation = .srgb } } },
-    .{ .name = "radial-ellipse", .gradient = .{ .radial = .{ .center = geometry.PointF.init(0.5, 0.5), .radii = geometry.SizeF.init(0.5, 0.5), .stops = &spectrum_stops, .interpolation = .oklab } } },
-    .{ .name = "repeating-radial", .gradient = .{ .radial = .{ .center = geometry.PointF.init(0.5, 0.5), .radii = geometry.SizeF.init(0.5, 0.5), .stops = &repeating_stops, .spread = .repeat, .interpolation = .srgb } } },
-    .{ .name = "conic", .gradient = .{ .conic = .{ .center = geometry.PointF.init(0.5, 0.5), .start_angle_radians = -@as(f32, std.math.pi) / 2, .stops = &spectrum_stops, .interpolation = .oklab } } },
-    .{ .name = "repeating-conic", .gradient = .{ .conic = .{ .center = geometry.PointF.init(0.5, 0.5), .start_angle_radians = -@as(f32, std.math.pi) / 2, .stops = &repeating_stops, .spread = .repeat, .interpolation = .srgb } } },
-    .{ .name = "degenerate-line", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0.5, 0.5), .end = geometry.PointF.init(0.5, 0.5), .stops = &opaque_stops } } },
-    .{ .name = "single-stop", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &single_stop } } },
-    .{ .name = "empty-stops", .gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &.{} } } },
+    .{ .name = "opaque-horizontal", .paint = .{ .widget_gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &opaque_stops } } } },
+    .{ .name = "transparent-horizontal", .paint = .{ .widget_gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &transparent_stops } } } },
+    .{ .name = "oklab-horizontal", .paint = .{ .widget_gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &opaque_stops, .interpolation = .oklab } } } },
+    .{ .name = "sharp-stop", .paint = .{ .widget_gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &sharp_stops } } } },
+    .{ .name = "arbitrary-angle", .paint = .{ .widget_gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &offset_stops } } } },
+    .{ .name = "repeating-linear", .paint = .{ .widget_gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0.5), .end = geometry.PointF.init(1, 0.5), .stops = &repeating_stops, .spread = .repeat, .interpolation = .srgb } } } },
+    .{ .name = "radial-ellipse", .paint = .{ .widget_gradient = .{ .radial = .{ .center = geometry.PointF.init(0.5, 0.5), .radii = geometry.SizeF.init(0.5, 0.5), .stops = &spectrum_stops, .interpolation = .oklab } } } },
+    .{ .name = "repeating-radial", .paint = .{ .widget_gradient = .{ .radial = .{ .center = geometry.PointF.init(0.5, 0.5), .radii = geometry.SizeF.init(0.5, 0.5), .stops = &repeating_stops, .spread = .repeat, .interpolation = .srgb } } } },
+    .{ .name = "conic", .paint = .{ .widget_gradient = .{ .conic = .{ .center = geometry.PointF.init(0.5, 0.5), .start_angle_radians = -@as(f32, std.math.pi) / 2, .stops = &spectrum_stops, .interpolation = .oklab } } } },
+    .{ .name = "repeating-conic", .paint = .{ .widget_gradient = .{ .conic = .{ .center = geometry.PointF.init(0.5, 0.5), .start_angle_radians = -@as(f32, std.math.pi) / 2, .stops = &repeating_stops, .spread = .repeat, .interpolation = .srgb } } } },
+    .{ .name = "layered-linear-radial", .paint = .{ .widget_gradient_layers = &layered_gradients } },
+    .{ .name = "mesh-bicubic", .paint = .{ .direct_fill = .{ .mesh_gradient = .{ .patches = &mesh_patches, .interpolation = .oklab } } } },
+    .{ .name = "degenerate-line", .paint = .{ .widget_gradient = .{ .linear = .{ .start = geometry.PointF.init(0.5, 0.5), .end = geometry.PointF.init(0.5, 0.5), .stops = &opaque_stops } } } },
+    .{ .name = "single-stop", .paint = .{ .widget_gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &single_stop } } } },
+    .{ .name = "empty-stops", .paint = .{ .widget_gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 1), .stops = &.{} } } } },
 };
 
 const CatalogApp = struct {
@@ -127,16 +173,43 @@ fn renderScene(
         .frame = geometry.RectF.init(0, 0, width, height),
     });
 
-    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = scene.gradient }};
-    const root = canvas.Widget{
-        .id = 1,
-        .kind = .panel,
-        .immediate_commands = &effects,
-    };
-    var nodes: [1]canvas.WidgetLayoutNode = undefined;
-    const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, width, height), &nodes);
-    _ = try harness.runtime.setCanvasWidgetLayout(1, view_label, layout);
-    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, view_label, .{});
+    switch (scene.paint) {
+        .widget_gradient => |gradient| {
+            const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = gradient }};
+            const root = canvas.Widget{
+                .id = 1,
+                .kind = .panel,
+                .immediate_commands = &effects,
+            };
+            var nodes: [1]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, width, height), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, view_label, layout);
+            _ = try harness.runtime.emitCanvasWidgetDisplayList(1, view_label, .{});
+        },
+        .widget_gradient_layers => |gradients| {
+            const effects = try gpa.alloc(canvas.ImmediateCanvasCommand, gradients.len);
+            defer gpa.free(effects);
+            for (gradients, 0..) |gradient, index| effects[index] = .{ .background_gradient = gradient };
+            const root = canvas.Widget{
+                .id = 1,
+                .kind = .panel,
+                .immediate_commands = effects,
+            };
+            var nodes: [1]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, width, height), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, view_label, layout);
+            _ = try harness.runtime.emitCanvasWidgetDisplayList(1, view_label, .{});
+        },
+        .direct_fill => |fill| {
+            const commands = [_]canvas.CanvasCommand{.{ .fill_rounded_rect = .{
+                .id = 1,
+                .rect = geometry.RectF.init(0, 0, width, height),
+                .radius = canvas.Radius.all(12),
+                .fill = fill,
+            } }};
+            _ = try harness.runtime.setCanvasDisplayList(1, view_label, .{ .commands = &commands });
+        },
+    }
 
     const pixel_size = try harness.runtime.canvasScreenshotPixelSize(1, view_label, 1);
     const pixels = try gpa.alloc(u8, pixel_size.byte_len);

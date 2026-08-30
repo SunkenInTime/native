@@ -27,6 +27,7 @@ const GradientInterpolation = support.GradientInterpolation;
 const LinearGradient = support.LinearGradient;
 const RadialGradient = support.RadialGradient;
 const ConicGradient = support.ConicGradient;
+const MeshPatch = support.MeshPatch;
 const Fill = support.Fill;
 const Stroke = support.Stroke;
 const Clip = support.Clip;
@@ -462,6 +463,47 @@ test "reference renderer samples radial and conic geometry analytically" {
     try std.testing.expectEqual([4]u8{ 0, 255, 0, 255 }, try renderFillSample(conic, 3, 3, 1, 2));
     try std.testing.expectEqual([4]u8{ 0, 0, 255, 255 }, try renderFillSample(conic, 3, 3, 0, 1));
     try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, try renderFillSample(conic, 3, 3, 1, 0));
+}
+
+fn rectangularMeshPatch(rect: geometry.RectF, colors: [4]Color) MeshPatch {
+    var points: [16]geometry.PointF = undefined;
+    for (0..4) |row| {
+        for (0..4) |column| {
+            points[row * 4 + column] = geometry.PointF.init(
+                rect.x + rect.width * @as(f32, @floatFromInt(column)) / 3,
+                rect.y + rect.height * @as(f32, @floatFromInt(row)) / 3,
+            );
+        }
+    }
+    return .{ .points = points, .colors = colors };
+}
+
+test "reference renderer inverts bicubic mesh patches and premultiplies corner colors" {
+    const patch = rectangularMeshPatch(geometry.RectF.init(0.5, 0.5, 2, 2), .{
+        Color.rgb8(255, 0, 0),
+        Color.rgb8(0, 255, 0),
+        Color.rgb8(0, 0, 255),
+        Color.rgb8(255, 255, 255),
+    });
+    const fill: Fill = .{ .mesh_gradient = .{
+        .patches = &.{patch},
+        .interpolation = .srgb,
+    } };
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, try renderFillSample(fill, 3, 3, 0, 0));
+    try std.testing.expectEqual([4]u8{ 128, 128, 128, 255 }, try renderFillSample(fill, 3, 3, 1, 1));
+    try std.testing.expectEqual([4]u8{ 0, 0, 255, 255 }, try renderFillSample(fill, 3, 3, 2, 2));
+
+    const transparent_patch = rectangularMeshPatch(geometry.RectF.init(0.5, 0.5, 2, 2), .{
+        Color.rgba8(255, 0, 0, 0),
+        Color.rgb8(0, 0, 255),
+        Color.rgb8(0, 0, 255),
+        Color.rgba8(255, 0, 0, 0),
+    });
+    const transparent_fill: Fill = .{ .mesh_gradient = .{
+        .patches = &.{transparent_patch},
+        .interpolation = .srgb,
+    } };
+    try std.testing.expectEqual([4]u8{ 0, 0, 255, 128 }, try renderFillSample(transparent_fill, 3, 3, 1, 0));
 }
 
 test "gradient spread repeats reflects and fixes descending stops" {

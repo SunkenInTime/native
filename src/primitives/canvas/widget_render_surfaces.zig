@@ -32,7 +32,7 @@ const widgetControlInset = widget_metrics.widgetControlInset;
 const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
 
 const colorFill = widget_render_style.colorFill;
-const widgetBackgroundFill = widget_render_style.widgetBackgroundFill;
+const emitWidgetRoundedBackground = widget_render_style.emitWidgetRoundedBackground;
 const widgetBackgroundIsOpaque = widget_render_style.widgetBackgroundIsOpaque;
 const widgetBorderFill = widget_render_style.widgetBorderFill;
 const widgetFocusRingFill = widget_render_style.widgetFocusRingFill;
@@ -203,12 +203,7 @@ pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: D
         });
     }
 
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 2),
-        .rect = widget.frame,
-        .radius = radius,
-        .fill = widgetBackgroundFill(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface)),
-    });
+    try emitWidgetRoundedBackground(builder, widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface), radius, widgetPartId(widget.id, 2));
     try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
@@ -273,12 +268,7 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
         .none => {},
     }
 
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 2),
-        .rect = widget.frame,
-        .radius = radius,
-        .fill = widgetBackgroundFill(widget, background),
-    });
+    try emitWidgetRoundedBackground(builder, widget, background, radius, widgetPartId(widget.id, 2));
     switch (box_shadow) {
         .shadow => |custom| if (custom.inset) try builder.shadow(.{
             .id = widgetPartId(widget.id, 1),
@@ -712,12 +702,7 @@ pub fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: Design
         });
     }
 
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 2),
-        .rect = widget.frame,
-        .radius = radius,
-        .fill = widgetBackgroundFill(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface)),
-    });
+    try emitWidgetRoundedBackground(builder, widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface), radius, widgetPartId(widget.id, 2));
     try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,
@@ -745,12 +730,7 @@ pub fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: De
         });
     }
 
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 2),
-        .rect = widget.frame,
-        .radius = radius,
-        .fill = widgetBackgroundFill(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface)),
-    });
+    try emitWidgetRoundedBackground(builder, widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.surface), radius, widgetPartId(widget.id, 2));
     try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 3),
         .rect = widget.frame,

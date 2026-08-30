@@ -1078,6 +1078,61 @@ test "panel chrome resolves box-relative radial and conic gradients after layout
     }
 }
 
+test "panel chrome emits repeated gradients in bottom-to-top painter order" {
+    const bottom_stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(15, 23, 42) },
+        .{ .offset = 1, .color = Color.rgb8(30, 41, 59) },
+    };
+    const top_stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgba8(56, 189, 248, 192) },
+        .{ .offset = 1, .color = Color.rgba8(168, 85, 247, 0) },
+    };
+    const effects = [_]canvas.ImmediateCanvasCommand{
+        .{ .background_gradient = .{ .linear = .{
+            .start = .{ .x = 0, .y = 0.5 },
+            .end = .{ .x = 1, .y = 0.5 },
+            .stops = &bottom_stops,
+        } } },
+        .{ .background_gradient = .{ .radial = .{
+            .center = .{ .x = 0.25, .y = 0.5 },
+            .radii = .{ .width = 0.75, .height = 1 },
+            .stops = &top_stops,
+        } } },
+    };
+    const panel = Widget{
+        .id = 31,
+        .kind = .panel,
+        .frame = geometry.RectF.init(12, 20, 80, 40),
+        .immediate_commands = &effects,
+    };
+    var commands: [5]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, panel, .{});
+
+    var layers: [2]FillRoundedRect = undefined;
+    var layer_count: usize = 0;
+    for (builder.displayList().commands) |command| switch (command) {
+        .fill_rounded_rect => |rounded| {
+            if (layer_count >= layers.len) return error.TestUnexpectedResult;
+            layers[layer_count] = rounded;
+            layer_count += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), layer_count);
+    try std.testing.expect(layers[0].id != layers[1].id);
+    try std.testing.expectEqualDeep(panel.frame, layers[0].rect);
+    try std.testing.expectEqualDeep(panel.frame, layers[1].rect);
+    switch (layers[0].fill) {
+        .linear_gradient => |gradient| try std.testing.expectEqualSlices(GradientStop, &bottom_stops, gradient.stops),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (layers[1].fill) {
+        .radial_gradient => |gradient| try std.testing.expectEqualSlices(GradientStop, &top_stops, gradient.stops),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "pressed solid background overrides a retained widget gradient" {
     const stops = [_]GradientStop{
         .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },
