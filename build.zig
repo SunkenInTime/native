@@ -828,6 +828,41 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkFramework(\"CoreVideo\", .{})" },
         .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkFramework(\"IOSurface\", .{})" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-shared-renderer-build-links", "Verify generated apps link the Windows shared renderer client", &.{
+        .{ .path = "build/app.zig", .pattern = "src/platform/windows/shared_renderer_client.cpp" },
+        .{ .path = "build/app.zig", .pattern = "app_mod.linkSystemLibrary(\"dcomp\", .{})" },
+        .{ .path = "build/app.zig", .pattern = "app_mod.linkSystemLibrary(\"dwmapi\", .{})" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "src/platform/windows/shared_renderer_client.cpp" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkSystemLibrary(\"dcomp\", .{})" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkSystemLibrary(\"dwmapi\", .{})" },
+    });
+    const owned_windows_example_builds = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "browser", .path = "examples/browser/build.zig" },
+        .{ .name = "capabilities", .path = "examples/capabilities/build.zig" },
+        .{ .name = "command-app", .path = "examples/command-app/build.zig" },
+        .{ .name = "hello", .path = "examples/hello/build.zig" },
+        .{ .name = "native-panels", .path = "examples/native-panels/build.zig" },
+        .{ .name = "native-shell", .path = "examples/native-shell/build.zig" },
+        .{ .name = "next", .path = "examples/next/build.zig" },
+        .{ .name = "react", .path = "examples/react/build.zig" },
+        .{ .name = "svelte", .path = "examples/svelte/build.zig" },
+        .{ .name = "vue", .path = "examples/vue/build.zig" },
+        .{ .name = "webview", .path = "examples/webview/build.zig" },
+    };
+    for (owned_windows_example_builds) |example| {
+        addFileContainsCheckStep(
+            b,
+            file_contains_checker,
+            test_step,
+            b.fmt("test-owned-{s}-windows-renderer-links", .{example.name}),
+            b.fmt("Verify the {s} example links the Windows shared renderer client", .{example.name}),
+            &.{
+                .{ .path = example.path, .pattern = "src/platform/windows/shared_renderer_client.cpp" },
+                .{ .path = example.path, .pattern = "app_mod.linkSystemLibrary(\"dcomp\", .{})" },
+                .{ .path = example.path, .pattern = "app_mod.linkSystemLibrary(\"dwmapi\", .{})" },
+            },
+        );
+    }
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-production-metal-lifetime", "Verify AppKit ships the measured process-lifetime Metal architecture", &.{
         .{ .path = "build/app.zig", .pattern = "embeddedMetalLibrary(b, dep)" },
         .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "native_sdk_composite_fragment" },
@@ -1787,7 +1822,10 @@ pub fn build(b: *std.Build) void {
         \\    sleep 0.1
         \\  done
         \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=68'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard GPU canvas did not present the retained display list as a packet" >&2; exit 1 ;; esac
-        \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xff171717'*) ;; *) echo "dashboard CAMetalDrawable did not contain the retained canvas sample" >&2; exit 1 ;; esac
+        \\  # The center lands on palette ink whose exact role changes with the
+        \\  # system appearance and the dashboard's live state. Both values are
+        \\  # authored retained colors; the clear surface contains neither.
+        \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xff171717'*|*'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xff0a0a0a'*) ;; *) echo "dashboard CAMetalDrawable did not contain a retained palette sample" >&2; exit 1 ;; esac
         \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_commands=68'*'widget_semantics=48'*) ;; *) echo "dashboard GPU canvas was missing retained commands or widget semantics" >&2; exit 1 ;; esac
         \\  first_frame_latency="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/dashboard-canvas kind=gpu_surface.* gpu_first_frame_latency_ns=\([0-9][0-9]*\).*/\1/p')"
         \\  case "$first_frame_latency" in ''|*[!0-9]*) echo "dashboard GPU first frame latency was missing" >&2; exit 1 ;; esac

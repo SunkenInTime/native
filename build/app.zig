@@ -691,6 +691,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkSystemLibrary("mfplat", .{});
         app_mod.linkSystemLibrary("winhttp", .{});
         app_mod.linkSystemLibrary("dcomp", .{});
+        app_mod.linkSystemLibrary("dwmapi", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
     }
 }
