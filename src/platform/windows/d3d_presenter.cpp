@@ -547,6 +547,7 @@ struct NsgpEngine {
     ComPtr<ID3D11Buffer> mesh_patch_buffer;
     ComPtr<ID3D11ShaderResourceView> mesh_patch_srv;
     ComPtr<ID3D11BlendState> blend;
+    ComPtr<ID3D11BlendState> underlay_blend;
     size_t instance_capacity = 0;
     size_t gradient_stop_capacity = 0;
     size_t mesh_patch_capacity = 0;
@@ -588,6 +589,28 @@ bool nativeSdkD3DHardwareAvailable() {
         &device, &level, nullptr));
 }
 
+static D3D11_BLEND_DESC sourceOverBlendDesc() {
+    D3D11_BLEND_DESC blend = {};
+    blend.RenderTarget[0].BlendEnable = TRUE;
+    blend.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    blend.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    return blend;
+}
+
+static D3D11_BLEND_DESC destinationOverBlendDesc() {
+    D3D11_BLEND_DESC blend = sourceOverBlendDesc();
+    blend.RenderTarget[0].SrcBlend = D3D11_BLEND_INV_DEST_ALPHA;
+    blend.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+    blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_INV_DEST_ALPHA;
+    blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    return blend;
+}
+
 static bool createEngine(NsgpEngine *engine) {
     D3D_FEATURE_LEVEL level;
     if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
@@ -602,16 +625,11 @@ static bool createEngine(NsgpEngine *engine) {
     D3D11_BUFFER_DESC cb = {};
     cb.ByteWidth = 16; cb.Usage = D3D11_USAGE_DYNAMIC; cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(engine->device->CreateBuffer(&cb, nullptr, &engine->constant_buffer))) return false;
-    D3D11_BLEND_DESC blend = {};
-    blend.RenderTarget[0].BlendEnable = TRUE;
-    blend.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
-    blend.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-    blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-    blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-    blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-    blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-    blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    return SUCCEEDED(engine->device->CreateBlendState(&blend, &engine->blend));
+    D3D11_BLEND_DESC blend = sourceOverBlendDesc();
+    D3D11_BLEND_DESC underlay_blend = destinationOverBlendDesc();
+    return SUCCEEDED(engine->device->CreateBlendState(&blend, &engine->blend)) &&
+        SUCCEEDED(engine->device->CreateBlendState(&underlay_blend,
+            &engine->underlay_blend));
 }
 
 static bool resizeSwapchain(NativeSdkD3DPresenter *p, UINT width, UINT height) {
@@ -718,7 +736,7 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
     double logical_height, double scale, UINT physical_width_px,
     UINT physical_height_px, uint8_t clear_r, uint8_t clear_g,
     uint8_t clear_b, uint8_t clear_a, const uint8_t *packet, size_t packet_len,
-    UINT present_interval) {
+    bool retained_above_packet, UINT present_interval) {
     if (!engine || !state || !state->swapchain || !packet || packet_len < 16 ||
         !weaverValidDeviceScale(scale) ||
         !weaverValidLogicalRect({ 0, 0, logical_width, logical_height }) ||
@@ -830,7 +848,9 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
         engine->context->ClearRenderTargetView(rtv.Get(), clear);
     }
     engine->context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
-    engine->context->OMSetBlendState(engine->blend.Get(), nullptr, 0xffffffff);
+    engine->context->OMSetBlendState(
+        retained_above_packet ? engine->underlay_blend.Get() : engine->blend.Get(),
+        nullptr, 0xffffffff);
     D3D11_VIEWPORT viewport = { 0, 0, (float)width, (float)height, 0, 1 };
     engine->context->RSSetViewports(1, &viewport);
     engine->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -862,7 +882,7 @@ bool nativeSdkD3DPresenterPresent(NativeSdkD3DPresenter *p, double logical_width
     if ((width != p->surface.width || height != p->surface.height) && !resizeSwapchain(p, width, height)) return false;
     return renderPacket(&p->engine, &p->surface, logical_width, logical_height,
         scale, width, height,
-        clear_r, clear_g, clear_b, clear_a, packet, packet_len, 1);
+        clear_r, clear_g, clear_b, clear_a, packet, packet_len, false, 1);
 }
 
 NativeSdkD3DSharedRenderer *nativeSdkD3DSharedRendererCreate() {
@@ -953,7 +973,8 @@ bool nativeSdkD3DSharedSurfacePresent(NativeSdkD3DSharedSurface *surface,
     UINT source_texture_width_px, UINT source_texture_height_px,
     uint64_t geometry_generation,
     uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a,
-    const uint8_t *packet, size_t packet_len, uint64_t retained_generation,
+    const uint8_t *packet, size_t packet_len, bool retained_above_packet,
+    uint64_t retained_generation,
     UINT retained_width, UINT retained_height, const float *retained_dirty_rects,
     size_t retained_dirty_rect_count, const uint8_t *retained_bgra,
     uint64_t *replacement_widget_surface_handle) {
@@ -1030,9 +1051,13 @@ bool nativeSdkD3DSharedSurfacePresent(NativeSdkD3DSharedSurface *surface,
         }
         surface->state.retained_generation = retained_generation;
     }
+    if (retained_above_packet && !surface->state.retained_texture) {
+        finish_turn();
+        return false;
+    }
     const bool rendered = renderPacket(&renderer->engine, &surface->state,
         logical_width, logical_height, scale, width, height, clear_r, clear_g, clear_b,
-        clear_a, packet, packet_len, 0);
+        clear_a, packet, packet_len, retained_above_packet, 0);
     finish_turn();
     return rendered;
 }
@@ -1268,6 +1293,15 @@ extern "C" int native_sdk_d3d_presenter_tests() {
     const auto expect = [&failures](bool condition) {
         if (!condition) ++failures;
     };
+
+    const D3D11_RENDER_TARGET_BLEND_DESC source_over =
+        sourceOverBlendDesc().RenderTarget[0];
+    expect(source_over.SrcBlend == D3D11_BLEND_ONE);
+    expect(source_over.DestBlend == D3D11_BLEND_INV_SRC_ALPHA);
+    const D3D11_RENDER_TARGET_BLEND_DESC destination_over =
+        destinationOverBlendDesc().RenderTarget[0];
+    expect(destination_over.SrcBlend == D3D11_BLEND_INV_DEST_ALPHA);
+    expect(destination_over.DestBlend == D3D11_BLEND_ONE);
 
     std::vector<uint8_t> bytes;
     appendTestScalar(&bytes, static_cast<uint8_t>(1)); // fill_rect_gradient

@@ -1,0 +1,1 @@
+fix: **Keep Windows gradients on the GPU with mixed widget content**: authored gradient backgrounds now travel as a GPU underlay while text, images, and effects remain in a CPU-retained texture composited above them, avoiding whole-frame software demotion without changing painter order.

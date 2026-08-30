@@ -37,6 +37,7 @@ bool nativeSdkSharedRendererClientPresent(
     uint8_t clear_a,
     const uint8_t *packet,
     size_t packet_len,
+    int retained_composite,
     uint64_t retained_generation,
     size_t retained_width,
     size_t retained_height,

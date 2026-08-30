@@ -6367,6 +6367,7 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
     double scale, uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a,
     int requires_render, size_t command_count, size_t unsupported_command_count,
     int representable, const uint8_t *packet, size_t packet_len,
+    int retained_composite,
     uint64_t retained_generation, size_t retained_width, size_t retained_height,
     const float *retained_dirty_rects, size_t retained_dirty_rect_count,
     const uint8_t *retained_rgba8, size_t retained_rgba8_len) {
@@ -6382,6 +6383,7 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
         geometry.source_texture_height_px) || geometry.generation == 0) return 0;
     if (!nativeSdkSharedRendererClientPresent(view.gpu_presenter, surface_width, surface_height,
         scale, &geometry, clear_r, clear_g, clear_b, clear_a, packet, packet_len,
+        retained_composite,
         retained_generation, retained_width, retained_height, retained_dirty_rects,
         retained_dirty_rect_count, retained_rgba8, retained_rgba8_len)) {
         const bool backend_changed = view.gpu_backend != 3;

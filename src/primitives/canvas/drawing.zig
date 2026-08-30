@@ -4,10 +4,13 @@ const ObjectId = u64;
 const ImageId = u64;
 
 /// Presentation ownership survives display-list lowering so a platform can
-/// composite CPU-retained chrome below an immediate GPU island without
+/// composite CPU-retained chrome on either side of a GPU island without
 /// teaching either renderer about the widget tree that produced it.
 pub const PresentationLayer = enum {
     retained,
+    /// GPU-authored widget chrome that must remain below retained text,
+    /// images, and effects when a host splits a mixed display list.
+    gpu_underlay,
     immediate,
 };
 

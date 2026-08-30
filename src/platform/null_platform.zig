@@ -241,6 +241,9 @@ pub const NullPlatform = struct {
     /// (binary refused -> JSON attempt in the same frame) is exactly
     /// what a disabled toggle exercises.
     gpu_surface_packet_binary: bool = false,
+    /// Model a binary host that composites a CPU-retained texture with one
+    /// layer-filtered GPU packet.
+    gpu_surface_hybrid_layers: bool = false,
     /// Model a binary host that ALSO applies incremental `patch`
     /// presents. Disabling it models a binary host without retained
     /// command state (or one that lost it): patch payloads are refused
@@ -416,6 +419,7 @@ pub const NullPlatform = struct {
     gpu_surface_packet_present_cached_resource_command_count: usize = 0,
     gpu_surface_packet_present_unsupported_command_count: usize = 0,
     gpu_surface_packet_present_representable: bool = true,
+    gpu_surface_packet_present_retained_composite: types.GpuSurfaceRetainedComposite = .below_packet,
     gpu_surface_packet_present_json_len: usize = 0,
     gpu_surface_packet_present_binary_len: usize = 0,
     /// First bytes of the last binary packet payload (magic + version +
@@ -639,6 +643,7 @@ pub const NullPlatform = struct {
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
                 .present_gpu_surface_packet_fn = presentGpuSurfacePacket,
                 .present_gpu_surface_packet_binary_fn = presentGpuSurfacePacketBinary,
+                .gpu_surface_hybrid_layers = self.gpu_surface_hybrid_layers,
                 .upload_gpu_surface_image_fn = uploadGpuSurfaceImage,
                 .remove_gpu_surface_image_fn = removeGpuSurfaceImage,
                 .decode_image_fn = decodeImage,
@@ -1760,6 +1765,7 @@ pub const NullPlatform = struct {
         self.gpu_surface_packet_present_cached_resource_command_count = packet.cached_resource_command_count;
         self.gpu_surface_packet_present_unsupported_command_count = packet.unsupported_command_count;
         self.gpu_surface_packet_present_representable = packet.representable;
+        self.gpu_surface_packet_present_retained_composite = packet.retained_composite;
         self.gpu_surface_packet_present_json_len = packet.json.len;
         self.gpu_surface_packet_present_count += 1;
         self.recordGpuSurfacePresentForWindow(packet.window_id);
@@ -1797,6 +1803,7 @@ pub const NullPlatform = struct {
         self.gpu_surface_packet_present_cached_resource_command_count = packet.cached_resource_command_count;
         self.gpu_surface_packet_present_unsupported_command_count = packet.unsupported_command_count;
         self.gpu_surface_packet_present_representable = packet.representable;
+        self.gpu_surface_packet_present_retained_composite = packet.retained_composite;
         self.gpu_surface_packet_present_json_len = 0;
         self.gpu_surface_packet_present_binary_len = packet.binary.len;
         const prefix_len = @min(packet.binary.len, self.gpu_surface_packet_present_binary_prefix.len);

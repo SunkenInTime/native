@@ -148,7 +148,7 @@ extern fn native_sdk_windows_close_view(host: *WindowsHost, window_id: u64, labe
 extern fn native_sdk_windows_request_gpu_surface_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_windows_note_gpu_surface_input(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_windows_present_gpu_surface_pixels(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, has_dirty_rect: c_int, dirty_x: f64, dirty_y: f64, dirty_width: f64, dirty_height: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
-extern fn native_sdk_windows_present_gpu_surface_packet_binary(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, surface_width: f64, surface_height: f64, scale: f64, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, requires_render: c_int, command_count: usize, unsupported_command_count: usize, representable: c_int, packet: [*]const u8, packet_len: usize, retained_generation: u64, retained_width: usize, retained_height: usize, retained_dirty_rects: [*]const geometry.RectF, retained_dirty_rect_count: usize, retained_rgba8: [*]const u8, retained_rgba8_len: usize) c_int;
+extern fn native_sdk_windows_present_gpu_surface_packet_binary(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, surface_width: f64, surface_height: f64, scale: f64, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, requires_render: c_int, command_count: usize, unsupported_command_count: usize, representable: c_int, packet: [*]const u8, packet_len: usize, retained_composite: c_int, retained_generation: u64, retained_width: usize, retained_height: usize, retained_dirty_rects: [*]const geometry.RectF, retained_dirty_rect_count: usize, retained_rgba8: [*]const u8, retained_rgba8_len: usize) c_int;
 extern fn native_sdk_windows_create_webview(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn native_sdk_windows_set_webview_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_windows_navigate_webview(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize) c_int;
@@ -1009,6 +1009,7 @@ fn presentGpuSurfacePacketBinary(context: ?*anyopaque, packet: platform_mod.GpuS
         if (packet.representable) 1 else 0,
         packet.binary.ptr,
         packet.binary.len,
+        @intFromEnum(packet.retained_composite),
         packet.retained_generation,
         packet.retained_width,
         packet.retained_height,

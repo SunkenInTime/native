@@ -78,6 +78,8 @@ pub const textEditingInkColor = widget_render_style.textEditingInkColor;
 pub const staticTextSelectionFillColor = widget_render_style.staticTextSelectionFillColor;
 pub const colorWithAlpha = widget_render_style.colorWithAlpha;
 const colorFill = widget_render_style.colorFill;
+const emitWidgetRoundedBackground = widget_render_style.emitWidgetRoundedBackground;
+const widgetHasBackgroundGradient = widget_render_style.widgetHasBackgroundGradient;
 const widgetBackgroundFill = widget_render_style.widgetBackgroundFill;
 const widgetAccentFill = widget_render_style.widgetAccentFill;
 const widgetBorderFill = widget_render_style.widgetBorderFill;
@@ -222,11 +224,18 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack => if (paint_widget.immediate_commands.len > 0)
-            try emitImmediateCanvas(builder, paint_widget)
-        else
-            try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
-        .row, .column, .grid, .list, .breadcrumb, .pagination, .radio_group, .toggle_group, .split, .tree => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
+        .stack => {
+            try emitContainerGradient(builder, paint_widget);
+            if (widgetHasImmediateCanvasPaint(paint_widget))
+                try emitImmediateCanvas(builder, paint_widget)
+            else
+                try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
+        },
+        .row, .column => {
+            try emitContainerGradient(builder, paint_widget);
+            try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
+        },
+        .grid, .list, .breadcrumb, .pagination, .radio_group, .toggle_group, .split, .tree => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
         .button_group => try emitButtonGroupWidget(builder, paint_widget, tokens, depth),
         .table, .data_grid => {
             try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
@@ -503,11 +512,15 @@ fn emitWidgetLayoutNodeContent(
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack => if (paint_widget.immediate_commands.len > 0) {
-            try emitImmediateCanvas(builder, paint_widget);
-            return;
+        .stack => {
+            try emitContainerGradient(builder, paint_widget);
+            if (widgetHasImmediateCanvasPaint(paint_widget)) {
+                try emitImmediateCanvas(builder, paint_widget);
+                return;
+            }
         },
-        .row, .column, .breadcrumb, .button_group, .pagination, .radio_group, .toggle_group, .split, .tree => {},
+        .row, .column => try emitContainerGradient(builder, paint_widget),
+        .breadcrumb, .button_group, .pagination, .radio_group, .toggle_group, .split, .tree => {},
         .data_row => try emitDataRowWidgetWash(builder, paint_widget, tokens),
         .tabs => try widget_render_surfaces.emitTabsListWidgetChrome(builder, paint_widget, tokens),
         .table, .data_grid => {
@@ -704,6 +717,25 @@ fn emitImmediateCanvas(builder: *Builder, widget: Widget) Error!void {
         }
     }
     try builder.popClip();
+}
+
+fn emitContainerGradient(builder: *Builder, widget: Widget) Error!void {
+    if (!widgetHasBackgroundGradient(widget)) return;
+    try emitWidgetRoundedBackground(
+        builder,
+        widget,
+        transparentColor(),
+        widgetRadius(widget, 0),
+        widgetPartId(widget.id, 1),
+    );
+}
+
+fn widgetHasImmediateCanvasPaint(widget: Widget) bool {
+    for (widget.immediate_commands) |command| switch (command) {
+        .fill_rect, .fill_rounded_rect, .fill_circle, .line, .polyline, .box_shadow => return true,
+        .text_style, .text_shadow, .text_font, .icon_path, .background_gradient, .background_mesh_gradient, .hover_style, .pressed_style => {},
+    };
+    return false;
 }
 
 fn immediateCanvasCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {

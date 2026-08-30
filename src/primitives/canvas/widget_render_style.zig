@@ -278,6 +278,11 @@ pub fn emitWidgetRoundedBackground(builder: *Builder, widget: Widget, fallback: 
         return;
     }
 
+    try builder.pushClip(.{
+        .id = widgetBackgroundPresentationId(widget.id),
+        .rect = widget.frame,
+        .presentation_layer = .gpu_underlay,
+    });
     var layer_index: usize = 0;
     for (widget.immediate_commands) |command| switch (command) {
         .background_gradient => |gradient| {
@@ -300,6 +305,7 @@ pub fn emitWidgetRoundedBackground(builder: *Builder, widget: Widget, fallback: 
         },
         else => {},
     };
+    try builder.popClip();
 }
 
 pub fn emitWidgetRectBackground(builder: *Builder, widget: Widget, fallback: Color, base_id: ObjectId) Error!void {
@@ -308,6 +314,11 @@ pub fn emitWidgetRectBackground(builder: *Builder, widget: Widget, fallback: Col
         return;
     }
 
+    try builder.pushClip(.{
+        .id = widgetBackgroundPresentationId(widget.id),
+        .rect = widget.frame,
+        .presentation_layer = .gpu_underlay,
+    });
     var layer_index: usize = 0;
     for (widget.immediate_commands) |command| switch (command) {
         .background_gradient => |gradient| {
@@ -328,6 +339,7 @@ pub fn emitWidgetRectBackground(builder: *Builder, widget: Widget, fallback: Col
         },
         else => {},
     };
+    try builder.popClip();
 }
 
 fn widgetMeshGradientFill(builder: *Builder, widget: Widget, gradient: WidgetMeshGradient) Error!Fill {
@@ -344,6 +356,12 @@ fn widgetBackgroundLayerId(widget_id: ObjectId, layer_index: usize) ObjectId {
     hasher.update(std.mem.asBytes(&layer_index));
     const id = hasher.final();
     return if (id == 0 or id == widget_id) widget_id ^ 0x8000_0000_0000_0000 else id;
+}
+
+fn widgetBackgroundPresentationId(widget_id: ObjectId) ObjectId {
+    var hasher = std.hash.Wyhash.init(widget_id ^ 0x756e_6465_726c_6179); // "underlay"
+    const id = hasher.final();
+    return if (id == 0 or id == widget_id) widget_id ^ 0x4000_0000_0000_0000 else id;
 }
 
 fn widgetNormalizedPoint(widget: Widget, point: geometry.PointF) geometry.PointF {

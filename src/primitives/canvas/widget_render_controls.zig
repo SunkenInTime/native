@@ -79,7 +79,7 @@ const buttonControlRadius = widget_render_style.buttonControlRadius;
 const widgetSizedRadiusValue = widget_render_style.widgetSizedRadiusValue;
 const controlStrokeWidth = widget_render_style.controlStrokeWidth;
 const snapHairlineStrokeRect = widget_render_style.snapHairlineStrokeRect;
-const buttonFill = widget_render_style.buttonFill;
+const buttonFillColor = widget_render_style.buttonFillColor;
 const buttonTextColorForWidget = widget_render_style.buttonTextColorForWidget;
 const buttonBorderFill = widget_render_style.buttonBorderFill;
 const buttonControlVisualTokens = widget_render_style.buttonControlVisualTokens;
@@ -142,12 +142,7 @@ pub fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     const radius = buttonGroupSegmentRadius(widget, visual, tokens);
     const text_size = widgetButtonTextSize(widget, tokens);
     const text_inset = widgetButtonInset(widget, tokens);
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 1),
-        .rect = widget.frame,
-        .radius = radius,
-        .fill = buttonFill(widget, tokens),
-    });
+    try emitWidgetRoundedBackground(builder, widget, buttonFillColor(widget, tokens), radius, widgetPartId(widget.id, 1));
     try emitButtonBorder(builder, widget, tokens, radius);
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 3, widget.frame, radius);
     const content_color = buttonTextColorForWidget(widget, tokens);
@@ -226,12 +221,7 @@ pub fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
 pub fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = buttonControlVisualTokens(widget, tokens);
     const radius = buttonGroupSegmentRadius(widget, visual, tokens);
-    try builder.fillRoundedRect(.{
-        .id = widgetPartId(widget.id, 1),
-        .rect = widget.frame,
-        .radius = radius,
-        .fill = buttonFill(widget, tokens),
-    });
+    try emitWidgetRoundedBackground(builder, widget, buttonFillColor(widget, tokens), radius, widgetPartId(widget.id, 1));
     try emitButtonBorder(builder, widget, tokens, radius);
     if (widget.state.focused) try emitWidgetFocusRingForRect(builder, widget, tokens, 15, widget.frame, radius);
     // Real vector icons: `widget.icon` first (the explicit channel,

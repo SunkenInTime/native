@@ -279,7 +279,8 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
     double logical_width, double logical_height, double scale,
     const NativeSdkSharedRendererGeometry *geometry,
     uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a,
-    const uint8_t *packet, size_t packet_len, uint64_t retained_generation,
+    const uint8_t *packet, size_t packet_len, int retained_composite,
+    uint64_t retained_generation,
     size_t retained_width, size_t retained_height, const float *retained_dirty_rects,
     size_t retained_dirty_rect_count, const uint8_t *retained_rgba8,
     size_t retained_rgba8_len) {
@@ -289,7 +290,8 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
             logical_height, scale);
         return false;
     }
-    if (!packet || packet_len == 0 || packet_len > kWeaverRendererMaxPacket) {
+    if (!packet || packet_len == 0 || packet_len > kWeaverRendererMaxPacket ||
+        (retained_composite != 0 && retained_composite != 1)) {
         logSharedFailure(client, "invalid-packet", logical_width,
             logical_height, scale, geometry);
         return false;
@@ -328,6 +330,7 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
     frame.clear_g = clear_g;
     frame.clear_b = clear_b;
     frame.clear_a = clear_a;
+    frame.retained_above_packet = static_cast<uint32_t>(retained_composite);
     if (retained_generation != 0) {
         if (retained_width != geometry->source_texture_width_px ||
             retained_height != geometry->source_texture_height_px ||

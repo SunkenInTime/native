@@ -58,6 +58,7 @@ bool nativeSdkD3DSharedSurfacePresent(
     uint8_t clear_a,
     const uint8_t *packet,
     size_t packet_len,
+    bool retained_above_packet,
     uint64_t retained_generation,
     UINT retained_width,
     UINT retained_height,

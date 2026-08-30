@@ -2407,6 +2407,88 @@ test "surface widget chrome preserves retained linear and mesh gradients" {
     }
 }
 
+test "gradient button lowers its background below retained text" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(14, 165, 233) },
+        .{ .offset = 1, .color = Color.rgb8(168, 85, 247) },
+    };
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .linear = .{
+        .start = .{ .x = 0, .y = 0.5 },
+        .end = .{ .x = 1, .y = 0.5 },
+        .stops = &stops,
+    } } }};
+    const button = Widget{
+        .id = 76,
+        .kind = .button,
+        .frame = geometry.RectF.init(12, 20, 120, 40),
+        .text = "GPU gradient",
+        .immediate_commands = &effects,
+    };
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, button, .{});
+    var render_commands: [16]RenderCommand = undefined;
+    const plan = try builder.displayList().renderPlan(&render_commands);
+    var found_gradient_underlay = false;
+    var found_retained_text = false;
+    for (plan.commands) |command| switch (command.command) {
+        .fill_rounded_rect => |fill| switch (fill.fill) {
+            .linear_gradient => found_gradient_underlay = command.presentation_layer == .gpu_underlay,
+            else => {},
+        },
+        .draw_text => found_retained_text = command.presentation_layer == .retained,
+        else => {},
+    };
+    try std.testing.expect(found_gradient_underlay);
+    try std.testing.expect(found_retained_text);
+}
+
+test "gradient row column and stack keep retained children" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(14, 165, 233) },
+        .{ .offset = 1, .color = Color.rgb8(168, 85, 247) },
+    };
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .linear = .{
+        .start = .{ .x = 0, .y = 0.5 },
+        .end = .{ .x = 1, .y = 0.5 },
+        .stops = &stops,
+    } } }};
+    const child = Widget{
+        .id = 81,
+        .kind = .text,
+        .frame = geometry.RectF.init(20, 28, 100, 20),
+        .text = "Retained child",
+    };
+
+    for ([_]WidgetKind{ .row, .column, .stack }) |kind| {
+        const container = Widget{
+            .id = 80,
+            .kind = kind,
+            .frame = geometry.RectF.init(12, 20, 120, 40),
+            .immediate_commands = &effects,
+            .children = &.{child},
+        };
+        var commands: [16]CanvasCommand = undefined;
+        var builder = Builder.init(&commands);
+        try emitWidgetTree(&builder, container, .{});
+        var render_commands: [16]RenderCommand = undefined;
+        const plan = try builder.displayList().renderPlan(&render_commands);
+        var found_gradient_underlay = false;
+        var found_retained_text = false;
+        for (plan.commands) |command| switch (command.command) {
+            .fill_rounded_rect => |fill| switch (fill.fill) {
+                .linear_gradient => found_gradient_underlay = command.presentation_layer == .gpu_underlay,
+                else => {},
+            },
+            .draw_text => found_retained_text = command.presentation_layer == .retained,
+            else => {},
+        };
+        try std.testing.expect(found_gradient_underlay);
+        try std.testing.expect(found_retained_text);
+    }
+}
+
 test "built-in status bar renders flat app chrome and text semantics" {
     const status_bar = builtinStatusBarWidget(.{
         .id = 47,

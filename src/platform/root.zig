@@ -150,6 +150,7 @@ pub const ContextMenuItem = types.ContextMenuItem;
 pub const ContextMenuRequest = types.ContextMenuRequest;
 pub const ContextMenuActionEvent = types.ContextMenuActionEvent;
 pub const GpuSurfacePixels = types.GpuSurfacePixels;
+pub const GpuSurfaceRetainedComposite = types.GpuSurfaceRetainedComposite;
 pub const GpuSurfacePacket = types.GpuSurfacePacket;
 pub const GpuSurfaceImagePixels = types.GpuSurfaceImagePixels;
 pub const GpuSurfaceFontData = types.GpuSurfaceFontData;

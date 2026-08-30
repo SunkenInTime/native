@@ -997,7 +997,7 @@ test "panel chrome resolves a box-relative linear gradient after layout" {
         .frame = geometry.RectF.init(12, 20, 80, 40),
         .immediate_commands = &effects,
     };
-    var commands: [4]CanvasCommand = undefined;
+    var commands: [6]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, panel, .{});
 
@@ -1046,7 +1046,7 @@ test "panel chrome resolves box-relative radial and conic gradients after layout
             .frame = geometry.RectF.init(12, 20, 80, 40),
             .immediate_commands = panel_effects,
         };
-        var commands: [4]CanvasCommand = undefined;
+        var commands: [6]CanvasCommand = undefined;
         var builder = Builder.init(&commands);
         try emitWidgetTree(&builder, panel, .{});
         var found = false;
@@ -1105,9 +1105,18 @@ test "panel chrome emits repeated gradients in bottom-to-top painter order" {
         .frame = geometry.RectF.init(12, 20, 80, 40),
         .immediate_commands = &effects,
     };
-    var commands: [5]CanvasCommand = undefined;
+    var commands: [7]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, panel, .{});
+
+    var found_underlay_scope = false;
+    for (builder.displayList().commands) |command| switch (command) {
+        .push_clip => |clip| if (clip.presentation_layer == .gpu_underlay) {
+            found_underlay_scope = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(found_underlay_scope);
 
     var layers: [2]FillRoundedRect = undefined;
     var layer_count: usize = 0;
