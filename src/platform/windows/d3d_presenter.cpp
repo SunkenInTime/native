@@ -234,6 +234,11 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
         base.extra = { x2, y2, width, 1.0f };
         instances.push_back(base);
     } else if (shape_tag == 5) {
+        // The instance path is a sequence of stroked line quads. A fill_path
+        // (wire kind 8) needs interior tessellation, which this presenter does
+        // not implement. Refuse it so the caller uses the pixel fallback
+        // instead of silently rendering only the outline.
+        if (kind != 9) return false; // stroke_path
         uint32_t count = 0;
         if (!reader.u32(&count) || count > 4096) return false;
         float start_x = 0, start_y = 0, previous_x = 0, previous_y = 0;
@@ -299,7 +304,6 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
     out->instances = std::move(instances);
     out->gradient_stops = std::move(gradient_stops);
     out->mesh_patches = std::move(mesh_patches);
-    (void)kind;
     (void)clip;
     return true;
 }
@@ -1333,6 +1337,37 @@ extern "C" int native_sdk_d3d_presenter_tests() {
         expect(closeEnough(command.gradient_stops[0].color.x, 1.0f));
         expect(closeEnough(command.gradient_stops[0].color.w, 0.5f));
     }
+
+    const auto append_path_command = [&bytes](uint8_t kind) {
+        bytes.clear();
+        appendTestScalar(&bytes, kind);
+        appendTestScalar(&bytes, static_cast<uint8_t>(0x18)); // shape + paint
+        appendTestRect(&bytes, 10.0f, 20.0f, 80.0f, 40.0f);
+        appendTestScalar(&bytes, 1.0f); // opacity
+        appendTestScalar(&bytes, 2.0f); // stroke width
+        appendTestScalar(&bytes, static_cast<uint8_t>(0)); // butt cap
+        appendTestScalar(&bytes, static_cast<uint8_t>(5)); // path
+        appendTestScalar(&bytes, static_cast<uint32_t>(3));
+        appendTestScalar(&bytes, static_cast<uint8_t>(0)); // move_to
+        appendTestScalar(&bytes, 10.0f);
+        appendTestScalar(&bytes, 20.0f);
+        appendTestScalar(&bytes, static_cast<uint8_t>(1)); // line_to
+        appendTestScalar(&bytes, 90.0f);
+        appendTestScalar(&bytes, 60.0f);
+        appendTestScalar(&bytes, static_cast<uint8_t>(4)); // close
+        appendTestGradientPaint(&bytes, 2, 0, 0);
+    };
+
+    append_path_command(8); // fill_path: CPU/pixel fallback owns interiors
+    reader = { bytes.data(), bytes.data() + bytes.size() };
+    expect(!readCommand(reader, &command));
+
+    append_path_command(9); // stroke_path: line instances are exact
+    reader = { bytes.data(), bytes.data() + bytes.size() };
+    expect(readCommand(reader, &command));
+    expect(reader.cursor == reader.end);
+    expect(command.instances.size() == 2);
+    expect(command.gradient_stops.size() == 3);
 
     std::vector<GradientStopInstance> stops;
     std::vector<MeshPatchInstance> mesh_patches;
