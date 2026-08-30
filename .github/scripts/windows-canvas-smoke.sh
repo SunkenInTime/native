@@ -50,12 +50,16 @@ trap cleanup EXIT
 
 diagnostics() {
   echo "---- diagnostics ----"
+  echo "-- app process:"
+  if [ -n "$app_pid" ] && kill -0 "$app_pid" >/dev/null 2>&1; then echo "  alive (pid=$app_pid)"; else echo "  exited"; fi
   echo "-- X windows:"
   xdotool search --name "." 2>/dev/null | while read -r w; do
     echo "  $w: $(xdotool getwindowname "$w" 2>/dev/null)"
   done
   echo "-- snapshot ($snap):"
   if [ -f "$snap" ]; then tr '|' '\n' < "$snap" | sed 's/^/  /'; else echo "  (missing)"; fi
+  echo "-- automation artifacts under repository:"
+  find "$repo_root" -path '*/native-sdk-automation/*' -type f -print 2>/dev/null | sed 's/^/  /'
   echo "-- app log tail ($app_log):"
   tail -40 "$app_log" 2>/dev/null | sed 's/^/  /'
   echo "---------------------"
@@ -79,7 +83,7 @@ poll() {
 
 # ---- build ----------------------------------------------------------------
 (cd "$repo_root" && zig build) || fail "root zig build (CLI) failed"
-(cd "$app_dir" && zig build -Dtarget=x86_64-windows-gnu -Dplatform=windows -Dweb-engine=system -Dautomation=true) \
+(cd "$app_dir" && zig build -Dtarget=x86_64-windows-gnu -Dplatform=windows -Dweb-engine=system -Dautomation=true -Dtrace=all) \
   || fail "ui-inbox Windows cross-compile failed"
 
 # ---- wineprefix -----------------------------------------------------------
