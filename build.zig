@@ -1823,9 +1823,10 @@ pub fn build(b: *std.Build) void {
         \\  done
         \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=68'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard GPU canvas did not present the retained display list as a packet" >&2; exit 1 ;; esac
         \\  # The center lands on palette ink whose exact role changes with the
-        \\  # system appearance and the dashboard's live state. Both values are
-        \\  # authored retained colors; the clear surface contains neither.
-        \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xff171717'*|*'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xff0a0a0a'*) ;; *) echo "dashboard CAMetalDrawable did not contain a retained palette sample" >&2; exit 1 ;; esac
+        \\  # system appearance and the dashboard's live state. These are the
+        \\  # authored light background and dark background/surface colors; the
+        \\  # clear surface contains none of them.
+        \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xffffffff'*|*'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xff171717'*|*'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xff0a0a0a'*) ;; *) echo "dashboard CAMetalDrawable did not contain a retained palette sample" >&2; exit 1 ;; esac
         \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_commands=68'*'widget_semantics=48'*) ;; *) echo "dashboard GPU canvas was missing retained commands or widget semantics" >&2; exit 1 ;; esac
         \\  first_frame_latency="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/dashboard-canvas kind=gpu_surface.* gpu_first_frame_latency_ns=\([0-9][0-9]*\).*/\1/p')"
         \\  case "$first_frame_latency" in ''|*[!0-9]*) echo "dashboard GPU first frame latency was missing" >&2; exit 1 ;; esac
