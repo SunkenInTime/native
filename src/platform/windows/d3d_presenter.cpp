@@ -41,15 +41,29 @@ struct Instance {
     F4 color;
     F4 shape; // radius, kind (0 rounded rect / 1 line), x1, y1
     F4 extra; // x2, y2, thickness, unused
+    F4 gradient; // start x/y, end x/y
+    F4 paint; // kind (0 color / 1 linear gradient), stop offset/count, opacity
 };
+
+struct GradientStopInstance {
+    F4 color; // straight-alpha sRGB; the pixel shader matches the reference mix
+    F4 data; // offset, unused
+};
+
+static_assert(sizeof(Instance) == 96);
+static_assert(sizeof(GradientStopInstance) == 32);
 
 struct RetainedCommand {
     std::vector<Instance> instances;
+    std::vector<GradientStopInstance> gradient_stops;
 };
 
 // Must match serialization.zig `binary_packet_version`; the build-time
 // wire-format ratchet checks this independently of the macOS decoder.
 static constexpr uint8_t kBinaryPacketVersion = 7;
+// Matches canvas_limits.max_canvas_gradient_stops_per_view. Keep the decoder
+// bound even though the runtime already applies the same aggregate budget.
+static constexpr uint32_t kMaxGradientStopsPerSurface = 64;
 
 struct PacketReader {
     const uint8_t *cursor;
@@ -82,13 +96,36 @@ bool readColor(PacketReader &reader, F4 *color) {
     return true;
 }
 
-bool readPaint(PacketReader &reader, F4 *color) {
+bool readStraightColor(PacketReader &reader, F4 *color) {
+    return reader.f32(&color->x) && reader.f32(&color->y) &&
+        reader.f32(&color->z) && reader.f32(&color->w);
+}
+
+bool readPaint(PacketReader &reader, Instance *instance,
+    std::vector<GradientStopInstance> *gradient_stops) {
     uint8_t tag = 0;
     if (!reader.u8(&tag)) return false;
-    if (tag == 1) return readColor(reader, color);
-    // Gradients stay on the pixel fallback until the shader receives a
-    // second-stop instance channel; accepting them as a flat color would
-    // be a silent rendering lie.
+    if (tag == 1) {
+        instance->paint = {};
+        return readColor(reader, &instance->color);
+    }
+    if (tag == 2) {
+        if (!reader.f32(&instance->gradient.x) ||
+            !reader.f32(&instance->gradient.y) ||
+            !reader.f32(&instance->gradient.z) ||
+            !reader.f32(&instance->gradient.w)) return false;
+        uint32_t count = 0;
+        if (!reader.u32(&count) || count > kMaxGradientStopsPerSurface) return false;
+        gradient_stops->reserve(count);
+        for (uint32_t index = 0; index < count; ++index) {
+            GradientStopInstance stop = {};
+            if (!reader.f32(&stop.data.x) ||
+                !readStraightColor(reader, &stop.color)) return false;
+            gradient_stops->push_back(stop);
+        }
+        instance->paint = { 1.0f, 0.0f, static_cast<float>(count), 1.0f };
+        return true;
+    }
     return false;
 }
 
@@ -191,25 +228,77 @@ bool readCommand(PacketReader &reader, RetainedCommand *out) {
         return false;
     }
 
-    F4 color = {};
-    if (!readPaint(reader, &color)) return false;
-    color.x *= opacity; color.y *= opacity; color.z *= opacity; color.w *= opacity;
-    for (Instance &instance : instances) instance.color = color;
+    std::vector<GradientStopInstance> gradient_stops;
+    if (!readPaint(reader, &base, &gradient_stops)) return false;
+    if (base.paint.x < 0.5f) {
+        base.color.x *= opacity;
+        base.color.y *= opacity;
+        base.color.z *= opacity;
+        base.color.w *= opacity;
+    } else {
+        base.paint.w = opacity;
+    }
+    for (Instance &instance : instances) {
+        instance.color = base.color;
+        instance.gradient = base.gradient;
+        instance.paint = base.paint;
+    }
     out->instances = std::move(instances);
+    out->gradient_stops = std::move(gradient_stops);
     (void)kind;
     (void)clip;
     return true;
 }
 
 const char *shaderSource = R"(
-struct Instance { float4 rect; float4 color; float4 shape; float4 extra; };
+struct Instance { float4 rect; float4 color; float4 shape; float4 extra; float4 gradient; float4 paint; };
+struct GradientStopInstance { float4 color; float4 data; };
 StructuredBuffer<Instance> instances : register(t0);
-struct Out { float4 position:SV_POSITION; float2 pixel:TEXCOORD0; nointerpolation float4 rect:TEXCOORD1; nointerpolation float4 color:COLOR0; nointerpolation float4 shape:TEXCOORD2; nointerpolation float4 extra:TEXCOORD3; };
+StructuredBuffer<GradientStopInstance> gradientStops : register(t1);
+struct Out { float4 position:SV_POSITION; float2 pixel:TEXCOORD0; nointerpolation float4 rect:TEXCOORD1; nointerpolation float4 color:COLOR0; nointerpolation float4 shape:TEXCOORD2; nointerpolation float4 extra:TEXCOORD3; nointerpolation float4 gradient:TEXCOORD4; nointerpolation float4 paint:TEXCOORD5; };
 cbuffer Surface : register(b0) { float2 surface; float2 padding; };
 Out vsMain(uint vertex:SV_VertexID, uint instance:SV_InstanceID) {
   const float2 corners[6] = { float2(0,0),float2(1,0),float2(0,1),float2(0,1),float2(1,0),float2(1,1) };
   Instance i=instances[instance]; float2 p=i.rect.xy+corners[vertex]*i.rect.zw;
-  Out o; o.position=float4(p.x/surface.x*2-1,1-p.y/surface.y*2,0,1); o.pixel=p; o.rect=i.rect; o.color=i.color; o.shape=i.shape; o.extra=i.extra; return o;
+  Out o; o.position=float4(p.x/surface.x*2-1,1-p.y/surface.y*2,0,1); o.pixel=p; o.rect=i.rect; o.color=i.color; o.shape=i.shape; o.extra=i.extra; o.gradient=i.gradient; o.paint=i.paint; return o;
+}
+float srgbToLinear(float value) {
+  value=saturate(value);
+  return value <= 0.04045 ? value/12.92 : pow((value+0.055)/1.055,2.4);
+}
+float linearToSrgb(float value) {
+  value=saturate(value);
+  return value <= 0.0031308 ? value*12.92 : 1.055*pow(value,1.0/2.4)-0.055;
+}
+float4 premultiply(float4 color) {
+  return float4(color.rgb*color.a,color.a);
+}
+float4 mixGradientColors(float4 a,float4 b,float amount) {
+  float3 aLinear=float3(srgbToLinear(a.r),srgbToLinear(a.g),srgbToLinear(a.b));
+  float3 bLinear=float3(srgbToLinear(b.r),srgbToLinear(b.g),srgbToLinear(b.b));
+  float3 mixedLinear=lerp(aLinear,bLinear,amount);
+  float3 mixed=float3(linearToSrgb(mixedLinear.r),linearToSrgb(mixedLinear.g),linearToSrgb(mixedLinear.b));
+  float alpha=lerp(a.a,b.a,amount);
+  return float4(mixed*alpha,alpha);
+}
+float4 sampleLinearGradient(Out i) {
+  uint first=(uint)i.paint.y, count=(uint)i.paint.z;
+  if (count==0) return float4(0,0,0,0);
+  float2 start=i.gradient.xy, direction=i.gradient.zw-start;
+  float lengthSquared=dot(direction,direction);
+  float t=lengthSquared<=0.000001 ? 0 : dot(i.pixel-start,direction)/lengthSquared;
+  GradientStopInstance previous=gradientStops[first];
+  if (count==1 || t<=previous.data.x) return premultiply(previous.color)*i.paint.w;
+  [loop] for (uint index=1;index<count;++index) {
+    GradientStopInstance next=gradientStops[first+index];
+    if (t<=next.data.x) {
+      float span=next.data.x-previous.data.x;
+      float localAmount=abs(span)<=0.000001 ? 1 : saturate((t-previous.data.x)/span);
+      return mixGradientColors(previous.color,next.color,localAmount)*i.paint.w;
+    }
+    previous=next;
+  }
+  return premultiply(previous.color)*i.paint.w;
 }
 float4 psMain(Out i):SV_TARGET {
   float distance;
@@ -226,7 +315,9 @@ float4 psMain(Out i):SV_TARGET {
     float2 q=abs(i.pixel-center)-(i.rect.zw*0.5-radius);
     distance=length(max(q,0))+min(max(q.x,q.y),0)-radius;
   }
-  float coverage=saturate(0.5-distance); return i.color*coverage;
+  float coverage=saturate(0.5-distance);
+  float4 color=i.paint.x>0.5 ? sampleLinearGradient(i) : i.color;
+  return color*coverage;
 })";
 
 HRESULT compileShader(const char *entry, const char *target, ID3DBlob **blob) {
@@ -262,8 +353,11 @@ struct NsgpEngine {
     ComPtr<ID3D11Buffer> constant_buffer;
     ComPtr<ID3D11Buffer> instance_buffer;
     ComPtr<ID3D11ShaderResourceView> instance_srv;
+    ComPtr<ID3D11Buffer> gradient_stop_buffer;
+    ComPtr<ID3D11ShaderResourceView> gradient_stop_srv;
     ComPtr<ID3D11BlendState> blend;
     size_t instance_capacity = 0;
+    size_t gradient_stop_capacity = 0;
 };
 
 struct NativeSdkD3DPresenter {
@@ -383,6 +477,28 @@ static bool ensureInstances(NsgpEngine *engine, size_t count) {
     return SUCCEEDED(engine->device->CreateShaderResourceView(engine->instance_buffer.Get(), &srv, &engine->instance_srv));
 }
 
+static bool ensureGradientStops(NsgpEngine *engine, size_t count) {
+    if (count <= engine->gradient_stop_capacity) return true;
+    engine->gradient_stop_capacity = std::max<size_t>(kMaxGradientStopsPerSurface, count);
+    D3D11_BUFFER_DESC desc = {};
+    desc.ByteWidth = (UINT)(engine->gradient_stop_capacity * sizeof(GradientStopInstance));
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    desc.StructureByteStride = sizeof(GradientStopInstance);
+    engine->gradient_stop_srv.Reset();
+    engine->gradient_stop_buffer.Reset();
+    if (FAILED(engine->device->CreateBuffer(&desc, nullptr,
+        &engine->gradient_stop_buffer))) return false;
+    D3D11_SHADER_RESOURCE_VIEW_DESC srv = {};
+    srv.Format = DXGI_FORMAT_UNKNOWN;
+    srv.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+    srv.Buffer.NumElements = (UINT)engine->gradient_stop_capacity;
+    return SUCCEEDED(engine->device->CreateShaderResourceView(
+        engine->gradient_stop_buffer.Get(), &srv, &engine->gradient_stop_srv));
+}
+
 static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
     double logical_width,
     double logical_height, double scale, UINT physical_width_px,
@@ -433,17 +549,38 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
     if (r.cursor != r.end) return false;
 
     std::vector<Instance> instances;
+    std::vector<GradientStopInstance> gradient_stops;
     for (uint64_t key : next_order) {
         const auto found = next_retained.find(key);
         if (found == next_retained.end()) return false;
-        instances.insert(instances.end(), found->second.instances.begin(), found->second.instances.end());
+        if (gradient_stops.size() + found->second.gradient_stops.size() >
+            kMaxGradientStopsPerSurface) return false;
+        const float stop_offset = static_cast<float>(gradient_stops.size());
+        gradient_stops.insert(gradient_stops.end(),
+            found->second.gradient_stops.begin(), found->second.gradient_stops.end());
+        for (const Instance &retained_instance : found->second.instances) {
+            Instance instance = retained_instance;
+            if (instance.paint.x > 0.5f) {
+                instance.paint.y = stop_offset;
+                instance.paint.z = static_cast<float>(found->second.gradient_stops.size());
+            }
+            instances.push_back(instance);
+        }
     }
-    if (!ensureInstances(engine, instances.size())) return false;
+    if (!ensureInstances(engine, instances.size()) ||
+        !ensureGradientStops(engine, gradient_stops.size())) return false;
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     if (!instances.empty()) {
         if (FAILED(engine->context->Map(engine->instance_buffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
         memcpy(mapped.pData, instances.data(), instances.size() * sizeof(Instance));
         engine->context->Unmap(engine->instance_buffer.Get(), 0);
+    }
+    if (!gradient_stops.empty()) {
+        if (FAILED(engine->context->Map(engine->gradient_stop_buffer.Get(), 0,
+            D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+        memcpy(mapped.pData, gradient_stops.data(),
+            gradient_stops.size() * sizeof(GradientStopInstance));
+        engine->context->Unmap(engine->gradient_stop_buffer.Get(), 0);
     }
     if (FAILED(engine->context->Map(engine->constant_buffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
     float surface[4] = { (float)logical_width, (float)logical_height, 0, 0 };
@@ -470,9 +607,11 @@ static bool renderPacket(NsgpEngine *engine, NsgpSurfaceState *state,
     engine->context->VSSetConstantBuffers(0, 1, engine->constant_buffer.GetAddressOf());
     engine->context->VSSetShaderResources(0, 1, engine->instance_srv.GetAddressOf());
     engine->context->PSSetShader(engine->pixel_shader.Get(), nullptr, 0);
+    engine->context->PSSetShaderResources(1, 1, engine->gradient_stop_srv.GetAddressOf());
     if (!instances.empty()) engine->context->DrawInstanced(6, (UINT)instances.size(), 0, 0);
     ID3D11ShaderResourceView *null_srv = nullptr;
     engine->context->VSSetShaderResources(0, 1, &null_srv);
+    engine->context->PSSetShaderResources(1, 1, &null_srv);
     if (FAILED(state->swapchain->Present(present_interval, 0))) return false;
     state->retained = std::move(next_retained); state->order = std::move(next_order); state->generation = generation;
     return true;
@@ -664,3 +803,113 @@ bool nativeSdkD3DSharedSurfacePresent(NativeSdkD3DSharedSurface *surface,
     finish_turn();
     return rendered;
 }
+
+#if defined(WEAVER_D3D_PRESENTER_TESTS)
+namespace {
+
+template <typename T>
+void appendTestScalar(std::vector<uint8_t> *bytes, const T &value) {
+    const uint8_t *source = reinterpret_cast<const uint8_t *>(&value);
+    bytes->insert(bytes->end(), source, source + sizeof(T));
+}
+
+void appendTestColor(std::vector<uint8_t> *bytes, float red, float green,
+    float blue, float alpha) {
+    appendTestScalar(bytes, red);
+    appendTestScalar(bytes, green);
+    appendTestScalar(bytes, blue);
+    appendTestScalar(bytes, alpha);
+}
+
+void appendTestRect(std::vector<uint8_t> *bytes, float x, float y,
+    float width, float height) {
+    appendTestScalar(bytes, x);
+    appendTestScalar(bytes, y);
+    appendTestScalar(bytes, width);
+    appendTestScalar(bytes, height);
+}
+
+void appendTestGradientPaint(std::vector<uint8_t> *bytes) {
+    appendTestScalar(bytes, static_cast<uint8_t>(2));
+    appendTestScalar(bytes, 10.0f);
+    appendTestScalar(bytes, 20.0f);
+    appendTestScalar(bytes, 90.0f);
+    appendTestScalar(bytes, 60.0f);
+    appendTestScalar(bytes, static_cast<uint32_t>(3));
+    appendTestScalar(bytes, 0.0f);
+    appendTestColor(bytes, 1.0f, 0.0f, 0.0f, 0.5f);
+    appendTestScalar(bytes, 0.4f);
+    appendTestColor(bytes, 0.0f, 1.0f, 0.0f, 0.75f);
+    appendTestScalar(bytes, 1.0f);
+    appendTestColor(bytes, 0.0f, 0.0f, 1.0f, 1.0f);
+}
+
+bool closeEnough(float actual, float expected) {
+    return std::abs(actual - expected) <= 0.000001f;
+}
+
+} // namespace
+
+extern "C" int native_sdk_d3d_presenter_tests() {
+    int failures = 0;
+    const auto expect = [&failures](bool condition) {
+        if (!condition) ++failures;
+    };
+
+    std::vector<uint8_t> bytes;
+    appendTestScalar(&bytes, static_cast<uint8_t>(1)); // fill_rect_gradient
+    appendTestScalar(&bytes, static_cast<uint8_t>(0x18)); // shape + paint
+    appendTestRect(&bytes, 10.0f, 20.0f, 80.0f, 40.0f); // bounds
+    appendTestScalar(&bytes, 0.25f); // opacity
+    appendTestScalar(&bytes, 0.0f); // stroke width
+    appendTestScalar(&bytes, static_cast<uint8_t>(0)); // butt cap
+    appendTestScalar(&bytes, static_cast<uint8_t>(1)); // rect
+    appendTestRect(&bytes, 10.0f, 20.0f, 80.0f, 40.0f);
+    appendTestGradientPaint(&bytes);
+
+    PacketReader reader{ bytes.data(), bytes.data() + bytes.size() };
+    RetainedCommand command;
+    expect(readCommand(reader, &command));
+    expect(reader.cursor == reader.end);
+    expect(command.instances.size() == 1);
+    expect(command.gradient_stops.size() == 3);
+    if (command.instances.size() == 1) {
+        const Instance &instance = command.instances[0];
+        expect(closeEnough(instance.paint.x, 1.0f));
+        expect(closeEnough(instance.paint.w, 0.25f));
+        expect(closeEnough(instance.gradient.x, 10.0f));
+        expect(closeEnough(instance.gradient.y, 20.0f));
+        expect(closeEnough(instance.gradient.z, 90.0f));
+        expect(closeEnough(instance.gradient.w, 60.0f));
+    }
+    if (command.gradient_stops.size() == 3) {
+        expect(closeEnough(command.gradient_stops[0].data.x, 0.0f));
+        expect(closeEnough(command.gradient_stops[1].data.x, 0.4f));
+        expect(closeEnough(command.gradient_stops[2].data.x, 1.0f));
+        // Gradient colors remain straight-alpha until the shader finishes
+        // interpolation. Premultiplying this first stop here would make red
+        // 0.5 and diverge from the deterministic reference renderer.
+        expect(closeEnough(command.gradient_stops[0].color.x, 1.0f));
+        expect(closeEnough(command.gradient_stops[0].color.w, 0.5f));
+    }
+
+    bytes.clear();
+    appendTestScalar(&bytes, static_cast<uint8_t>(2));
+    appendTestScalar(&bytes, 0.0f);
+    appendTestScalar(&bytes, 0.0f);
+    appendTestScalar(&bytes, 1.0f);
+    appendTestScalar(&bytes, 1.0f);
+    appendTestScalar(&bytes, kMaxGradientStopsPerSurface + 1);
+    reader = { bytes.data(), bytes.data() + bytes.size() };
+    Instance instance = {};
+    std::vector<GradientStopInstance> stops;
+    stops.clear();
+    expect(!readPaint(reader, &instance, &stops));
+
+    ComPtr<ID3DBlob> vertex_shader;
+    ComPtr<ID3DBlob> pixel_shader;
+    expect(SUCCEEDED(compileShader("vsMain", "vs_5_0", &vertex_shader)));
+    expect(SUCCEEDED(compileShader("psMain", "ps_5_0", &pixel_shader)));
+    return failures;
+}
+#endif
