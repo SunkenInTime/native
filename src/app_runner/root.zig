@@ -51,6 +51,11 @@ pub const RunOptions = struct {
     /// placement store use this to keep one persistence authority.
     persist_window_state: bool = true,
     primary_display_anchor: ?native_sdk.PrimaryDisplayAnchor = null,
+    /// Runtime-owned startup policy for embedders whose manifest is loaded
+    /// after this runner module was compiled. Null preserves app.zon.
+    startup_window_layer: ?native_sdk.WindowLayer = null,
+    /// Optional so false can explicitly replace a compiled true value.
+    startup_click_through: ?bool = null,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     js_window_api: bool = false,
@@ -106,6 +111,14 @@ pub const RunOptions = struct {
             info.main_window.min_width = manifestShellStartupMinSize("min_width");
             info.main_window.min_height = manifestShellStartupMinSize("min_height");
         }
+        if (self.startup_window_layer) |layer| {
+            info.main_window.layer = layer;
+            if (windows.len > 0) buffers.restored_windows[0].layer = layer;
+        }
+        if (self.startup_click_through) |click_through| {
+            info.main_window.click_through = click_through;
+            if (windows.len > 0) buffers.restored_windows[0].click_through = click_through;
+        }
         info.main_window.primary_display_anchor = self.primary_display_anchor;
         if (windows.len > 0) buffers.restored_windows[0].primary_display_anchor = self.primary_display_anchor;
         return info;
@@ -115,6 +128,25 @@ pub const RunOptions = struct {
         return self.shortcuts orelse storage.fromManifest();
     }
 };
+
+test "runtime startup window policy overrides the compiled manifest" {
+    var buffers: StateBuffers = undefined;
+    const compiled = (RunOptions{
+        .app_name = "runner-test",
+        .bundle_id = "dev.native_sdk.runner-test",
+    }).appInfo(&buffers);
+    try std.testing.expectEqual(native_sdk.WindowLayer.bottom, compiled.main_window.layer);
+    try std.testing.expect(compiled.main_window.click_through);
+
+    const overridden = (RunOptions{
+        .app_name = "runner-test",
+        .bundle_id = "dev.native_sdk.runner-test",
+        .startup_window_layer = .topmost,
+        .startup_click_through = false,
+    }).appInfo(&buffers);
+    try std.testing.expectEqual(native_sdk.WindowLayer.topmost, overridden.main_window.layer);
+    try std.testing.expect(!overridden.main_window.click_through);
+}
 
 const ShortcutStorage = struct {
     shortcuts: [native_sdk.platform.max_shortcuts]native_sdk.Shortcut = undefined,
@@ -566,9 +598,10 @@ const CaptureDriver = struct {
         try self.null_platform.dispatchStartup(handler, handler_context);
         const startup_start_us = self.started_us;
         try self.driveInitialFrame(handler, handler_context);
+        try self.settleRequestedTurn(handler, handler_context);
         const startup_us = captureNowUs() -| startup_start_us;
         try self.applyActionFile(handler, handler_context);
-        if (self.app.captureFailed()) return error.CaptureWidgetFailed;
+        try self.app.validateCapture();
         try self.writeArtifacts(startup_us);
         try self.null_platform.dispatchShutdown(handler, handler_context);
     }
@@ -645,8 +678,19 @@ const CaptureDriver = struct {
         if (!std.mem.eql(u8, parsed.value.schema, "weaver.capture.actions.v1")) return error.CaptureActionSchemaUnsupported;
         for (parsed.value.actions) |action| {
             try self.applyAction(handler, handler_context, action);
-            _ = try self.drivePendingFrame(handler, handler_context);
+            try self.settleRequestedTurn(handler, handler_context);
         }
+    }
+
+    /// A provider acknowledgement wakes the app through the platform's
+    /// request-frame service, not the GPU-surface request lane. Consume the
+    /// requests that existed at this boundary, then present at most one
+    /// coalesced GPU frame. Requests created while handling that turn remain
+    /// visible in `pending` instead of letting an animated widget make capture
+    /// spin forever.
+    fn settleRequestedTurn(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque) !void {
+        try self.null_platform.dispatchPendingFrameRequestTurn(handler, handler_context);
+        _ = try self.drivePendingFrame(handler, handler_context);
     }
 
     fn applyAction(self: *CaptureDriver, handler: native_sdk.platform.EventHandler, handler_context: *anyopaque, action: CaptureAction) !void {
@@ -906,7 +950,7 @@ const CaptureDriver = struct {
                 .fetches = app_pending.fetches,
                 .images = app_pending.images,
                 .providers = app_pending.providers,
-                .frameRequests = self.null_platform.pendingGpuSurfaceFrameRequestCount(),
+                .frameRequests = self.null_platform.pendingFrameRequestCount(),
             },
             .timingUs = .{
                 .startup = startup_us,
@@ -1096,6 +1140,18 @@ fn captureErrorDetail(err: anyerror) struct { ask: []const u8, remedy: []const u
         .ask = "fix the widget runtime error produced while driving the capture",
         .remedy = "inspect the widget diagnostic, fix or fixture the rejected action side effect, and rerun capture",
     };
+    if (std.mem.eql(u8, name, "CaptureMediaCommandUnexpected")) return .{
+        .ask = "remove the unexpected media action or add its command expectation at the same position",
+        .remedy = "make the provider fixture commands array match the action file's media command order, then rerun capture",
+    };
+    if (std.mem.eql(u8, name, "CaptureMediaCommandMismatch")) return .{
+        .ask = "make the next expected media verb and seekMs match the command driven by the action",
+        .remedy = "fix that provider fixture command or the corresponding action handler, then rerun capture",
+    };
+    if (std.mem.eql(u8, name, "CaptureMediaCommandMissing")) return .{
+        .ask = "drive every media command declared by the provider fixture",
+        .remedy = "add the missing semantic action or remove the unused trailing command expectation, then rerun capture",
+    };
     if (std.mem.startsWith(u8, name, "SessionReplay")) return .{
         .ask = "provide a complete same-platform session journal whose verified replay matches",
         .remedy = "record the session again on this platform or fix the reported replay divergence",
@@ -1104,6 +1160,15 @@ fn captureErrorDetail(err: anyerror) struct { ask: []const u8, remedy: []const u
         .ask = "inspect the named capture failure and widget diagnostic",
         .remedy = "fix the named runtime or widget failure, then rerun the same capture command",
     };
+}
+
+test "capture media fixture errors distinguish unexpected mismatch and missing commands" {
+    const unexpected = captureErrorDetail(error.CaptureMediaCommandUnexpected);
+    try std.testing.expect(std.mem.indexOf(u8, unexpected.ask, "unexpected") != null);
+    const mismatch = captureErrorDetail(error.CaptureMediaCommandMismatch);
+    try std.testing.expect(std.mem.indexOf(u8, mismatch.ask, "seekMs") != null);
+    const missing = captureErrorDetail(error.CaptureMediaCommandMissing);
+    try std.testing.expect(std.mem.indexOf(u8, missing.ask, "every media command") != null);
 }
 
 fn runCaptureJournal(
@@ -1120,7 +1185,7 @@ fn runCaptureJournal(
     const report = try native_sdk.runtime.replaySession(runtime, app, journal_bytes, .{ .verify = true });
     if (!report.ok()) return error.SessionReplayMismatch;
     driver.frames_driven = @intCast(runtime.frameDiagnostics().frame_index);
-    if (driver.app.captureFailed()) return error.CaptureWidgetFailed;
+    try driver.app.validateCapture();
     try driver.writeArtifacts(captureNowUs() -| replay_start_us);
 }
 

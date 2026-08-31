@@ -1595,6 +1595,18 @@ pub const NullPlatform = struct {
         return self.frame_request_count.load(.acquire);
     }
 
+    /// Dispatch exactly the application requests present at the start of one
+    /// deterministic host turn. Requests queued re-entrantly by a handler stay
+    /// pending for the next turn, matching a live run loop without an
+    /// arbitrary drain limit.
+    pub fn dispatchPendingFrameRequestTurn(self: *NullPlatform, handler: EventHandler, handler_context: *anyopaque) anyerror!void {
+        const request_count = self.pendingFrameRequestCount();
+        for (0..request_count) |_| {
+            const event = self.takeFrameRequest() orelse return error.CaptureFrameRequestMissing;
+            try handler(handler_context, event);
+        }
+    }
+
     /// Test helper: synthesize the platform event a live timer would deliver.
     /// Returns null when the timer was never started or has been cancelled.
     /// A non-repeating timer deactivates after firing once, matching host

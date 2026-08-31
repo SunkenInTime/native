@@ -151,6 +151,18 @@ pub fn build(b: *std.Build) void {
     widget_profile_test_mod.addImport("native_sdk", desktop_mod);
     widget_profile_test_mod.addImport("native_sdk_options", native_sdk_options);
     const widget_profile_tests = testArtifact(b, widget_profile_test_mod);
+    const app_runner_test_options = b.addOptions();
+    app_runner_test_options.addOption([]const u8, "platform", "null");
+    app_runner_test_options.addOption([]const u8, "trace", "off");
+    app_runner_test_options.addOption([]const u8, "web_engine", "system");
+    app_runner_test_options.addOption(bool, "web_layer", false);
+    app_runner_test_options.addOption(bool, "debug_overlay", false);
+    app_runner_test_options.addOption(bool, "automation", false);
+    const app_runner_test_mod = module(b, target, optimize, "src/app_runner/root.zig");
+    app_runner_test_mod.addImport("native_sdk", desktop_mod);
+    app_runner_test_mod.addImport("build_options", app_runner_test_options.createModule());
+    app_runner_test_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("src/app_runner/test_app.zon") }));
+    const app_runner_tests = filteredTestArtifact(b, app_runner_test_mod, "test-app-runner", &.{"runtime startup window policy"});
     const windows_dpi_geometry_tests: ?*std.Build.Step.Compile = if (target.result.os.tag == .windows) tests: {
         const dpi_geometry_test_mod = module(b, target, optimize, "src/platform/windows/dpi_geometry_test_runner.zig");
         const artifact = testArtifact(b, dpi_geometry_test_mod);
@@ -433,6 +445,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     test_step.dependOn(&b.addRunArtifact(widget_profile_tests).step);
+    test_step.dependOn(&b.addRunArtifact(app_runner_tests).step);
     if (windows_dpi_geometry_tests) |tests| {
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
@@ -723,7 +736,7 @@ pub fn build(b: *std.Build) void {
         // are flagged so the runtime never stamps input latency from them.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkOccludedFrameHeartbeatNs = 1000000000ull" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (BOOL)occludedFramePacingActive" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "heartbeatPaced ? NativeSdkOccludedFrameHeartbeatNs" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "const uint64_t paceNs = NativeSdkOccludedFrameHeartbeatNs" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "self.frameEventEmissionGeneration += 1" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "occluded:[self occludedFramePacingActive]" },
         // Exempt producers (a real present's completion, an input's
@@ -761,6 +774,23 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (changed) {" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self requestRetainedCanvasFrame];" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "canvasTextureMatchesDrawable" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-display-clock", "Verify AppKit GPU surfaces follow the active screen's display clock", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "#import <CoreVideo/CoreVideo.h>" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CVDisplayLinkCreateWithActiveCGDisplays" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CVDisplayLinkSetOutputHandler" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CVDisplayLinkSetCurrentCGDisplay" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSWindowDidChangeScreenNotification" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)startDisplayClock" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)stopDisplayClock" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)displayClockFired" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!heartbeatPaced) {" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self startDisplayClock];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self pauseDisplayClock];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRetainedFrameIntervalSeconds(screen)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRetainedFrameIntervalSeconds(frameWindow.screen ?: NSScreen.mainScreen)" },
+        .{ .path = "build/app.zig", .pattern = "app_mod.linkFramework(\"CoreVideo\", .{})" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkFramework(\"CoreVideo\", .{})" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-production-metal-lifetime", "Verify AppKit ships the measured process-lifetime Metal architecture", &.{
         .{ .path = "build/app.zig", .pattern = "embeddedMetalLibrary(b, dep)" },
@@ -956,6 +986,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-json", "Run JSON primitive tests", json_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
     addTestStep(b, "test-widget-profile", "Verify stock and widget capacity profiles", widget_profile_tests);
+    addTestStep(b, "test-app-runner", "Run app runner tests", app_runner_tests);
     if (windows_dpi_geometry_tests) |tests| {
         addTestStep(b, "test-windows-dpi-geometry", "Run Windows DPI geometry and renderer protocol tests", tests);
     }

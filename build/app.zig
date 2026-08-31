@@ -583,6 +583,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkFramework("Security", .{});
         app_mod.linkFramework("Metal", .{});
         app_mod.linkFramework("QuartzCore", .{});
+        app_mod.linkFramework("CoreVideo", .{});
         // IOSurface presentation path (NATIVE_SDK_GPU_IOSURFACE_PRESENT):
         // the surface view can present through IOSurface-backed layer
         // contents — the shared-renderer widget contract.
