@@ -173,6 +173,8 @@ pub const Backend = types.Backend;
 
 pub const NullPlatform = null_backend.NullPlatform;
 pub const NullTimer = null_backend.NullTimer;
+pub const NullGpuSurfaceFrameRequest = null_backend.NullGpuSurfaceFrameRequest;
+pub const max_null_timers = null_backend.max_null_timers;
 
 pub const macos = @import("macos/root.zig");
 pub const linux = @import("linux/root.zig");

@@ -160,6 +160,7 @@ pub const Event = runtime_api.Event;
 pub const App = runtime_api.App(Runtime);
 pub const Options = runtime_api.Options;
 pub const ReplayControl = runtime_api.ReplayControl;
+pub const CapturePendingWork = runtime_api.CapturePendingWork;
 
 /// Bounded ring of degraded dispatch errors kept for snapshots and
 /// queries: handler/update errors are caught, recorded here, and
@@ -675,6 +676,7 @@ pub const Runtime = struct {
     pub const renderCanvasScreenshot = CanvasFrameMethods.renderCanvasScreenshot;
     pub const renderCanvasScreenshotWithMemo = CanvasFrameMethods.renderCanvasScreenshotWithMemo;
     pub const canvasScreenshotPixelSize = CanvasFrameMethods.canvasScreenshotPixelSize;
+    pub const canvasClearColorRgba8 = CanvasFrameMethods.canvasClearColorRgba8;
     const planCanvasFrameForView = CanvasFrameMethods.planCanvasFrameForView;
     pub const canvasFrameScratchStorage = CanvasFrameMethods.canvasFrameScratchStorage;
     pub const gpuSurfaceFrame = CanvasFrameMethods.gpuSurfaceFrame;

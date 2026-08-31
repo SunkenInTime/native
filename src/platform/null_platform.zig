@@ -169,6 +169,20 @@ pub const NullTimer = struct {
     active: bool = false,
 };
 
+/// One GPU frame request recorded by the null backend. Live hosts coalesce
+/// repeated requests per surface until that surface's next frame callback;
+/// the headless capture driver consumes these values and emits those exact
+/// callbacks instead of guessing a frame count.
+pub const NullGpuSurfaceFrameRequest = struct {
+    window_id: WindowId,
+    label_storage: [max_view_label_bytes]u8,
+    label_len: usize,
+
+    pub fn label(self: *const NullGpuSurfaceFrameRequest) []const u8 {
+        return self.label_storage[0..self.label_len];
+    }
+};
+
 /// Duration table entries for the fake audio player (see
 /// `setAudioDuration`): a loaded path whose tail matches `suffix` reports
 /// `duration_ms`. A table instead of real decoding keeps tests hermetic —
@@ -419,6 +433,8 @@ pub const NullPlatform = struct {
     /// How many of the recorded binary presents were incremental patches.
     gpu_surface_packet_present_binary_patch_count: usize = 0,
     gpu_surface_packet_present_count: usize = 0,
+    /// Last request receipt. Pending state lives on each `NullView`; these
+    /// fields remain the simple diagnostic for which surface asked last.
     gpu_surface_frame_request_window_id: WindowId = 0,
     gpu_surface_frame_request_label_storage: [max_view_label_bytes]u8 = undefined,
     gpu_surface_frame_request_label_len: usize = 0,
@@ -673,8 +689,10 @@ pub const NullPlatform = struct {
         return platform_info.detectHost(.{ .target = target });
     }
 
-    fn run(context: *anyopaque, handler: EventHandler, handler_context: *anyopaque) anyerror!void {
-        const self: *NullPlatform = @ptrCast(@alignCast(context));
+    /// Dispatch the startup prefix shared by the ordinary null loop and the
+    /// one-shot capture driver. Keeping the ordering here makes a capture and
+    /// a normal null run enter the app through the same lifecycle.
+    pub fn dispatchStartup(self: *NullPlatform, handler: EventHandler, handler_context: *anyopaque) anyerror!void {
         try handler(handler_context, .app_start);
         try handler(handler_context, .{ .appearance_changed = .{} });
         try handler(handler_context, .{ .surface_resized = self.surface_value });
@@ -692,11 +710,20 @@ pub const NullPlatform = struct {
                 .focused = index == 0,
             } });
         }
+    }
+
+    pub fn dispatchShutdown(_: *NullPlatform, handler: EventHandler, handler_context: *anyopaque) anyerror!void {
+        try handler(handler_context, .app_shutdown);
+    }
+
+    fn run(context: *anyopaque, handler: EventHandler, handler_context: *anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context));
+        try self.dispatchStartup(handler, handler_context);
         var frame: u32 = 0;
         while (frame < self.requested_frames) : (frame += 1) {
             try handler(handler_context, .frame_requested);
         }
-        try handler(handler_context, .app_shutdown);
+        try self.dispatchShutdown(handler, handler_context);
     }
 
     fn loadWebView(context: ?*anyopaque, source: WebViewSource) anyerror!void {
@@ -1593,6 +1620,16 @@ pub const NullPlatform = struct {
         return count;
     }
 
+    pub fn listActiveTimers(self: *const NullPlatform, output: []NullTimer) []const NullTimer {
+        var count: usize = 0;
+        for (self.timers[0..self.timer_count]) |timer| {
+            if (!timer.active or count == output.len) continue;
+            output[count] = timer;
+            count += 1;
+        }
+        return output[0..count];
+    }
+
     pub fn timerStartCount(self: *const NullPlatform) usize {
         return self.timer_start_count;
     }
@@ -1652,6 +1689,41 @@ pub const NullPlatform = struct {
         self.gpu_surface_frame_request_label_storage = undefined;
         self.gpu_surface_frame_request_label_len = (try copyInto(&self.gpu_surface_frame_request_label_storage, label)).len;
         self.gpu_surface_frame_request_count += 1;
+        self.views[view_index].gpu_frame_requested = true;
+    }
+
+    /// Consume the next per-surface GPU frame request a live host would
+    /// satisfy, in deterministic view-creation order. The returned value owns
+    /// its label so closing or updating the view cannot mutate the event that
+    /// the caller is about to dispatch.
+    pub fn takeGpuSurfaceFrameRequest(self: *NullPlatform) ?NullGpuSurfaceFrameRequest {
+        const view = for (self.views[0..self.view_count]) |*candidate| {
+            if (candidate.kind == .gpu_surface and candidate.gpu_frame_requested) break candidate;
+        } else return null;
+        view.gpu_frame_requested = false;
+        var request: NullGpuSurfaceFrameRequest = .{
+            .window_id = view.window_id,
+            .label_storage = undefined,
+            .label_len = view.label.len,
+        };
+        @memcpy(request.label_storage[0..request.label_len], view.label);
+        return request;
+    }
+
+    /// Schedule one host-owned initial surface frame through the same service
+    /// path used by runtime invalidation. Desktop presenters supply this first
+    /// completion from their display loop; deterministic hosts call this
+    /// explicitly, then consume it with `takeGpuSurfaceFrameRequest`.
+    pub fn scheduleGpuSurfaceFrame(self: *NullPlatform, window_id: WindowId, label: []const u8) !void {
+        try requestGpuSurfaceFrame(self, window_id, label);
+    }
+
+    pub fn pendingGpuSurfaceFrameRequestCount(self: *const NullPlatform) usize {
+        var count: usize = 0;
+        for (self.views[0..self.view_count]) |view| {
+            if (view.kind == .gpu_surface and view.gpu_frame_requested) count += 1;
+        }
+        return count;
     }
 
     fn presentGpuSurfacePacket(context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void {
@@ -1854,6 +1926,15 @@ pub const NullPlatform = struct {
                 .enabled = next.enabled,
                 .accessibility_label = next.accessibility_label,
                 .command = next.command,
+                .gpu_size = next.gpu_size,
+                .gpu_backend = next.gpu_backend,
+                .gpu_pixel_format = next.gpu_pixel_format,
+                .gpu_present_mode = next.gpu_present_mode,
+                .gpu_alpha_mode = next.gpu_alpha_mode,
+                .gpu_color_space = next.gpu_color_space,
+                .gpu_vsync = next.gpu_vsync,
+                .gpu_status = next.gpu_status,
+                .gpu_frame_requested = next.gpu_frame_requested,
                 .open = next.open,
             };
             self.copyViewStrings(cursor, next.label, next.parent, next.role, next.accessibility_label, next.text, next.command) catch unreachable;
@@ -2227,6 +2308,7 @@ pub const NullView = struct {
     gpu_color_space: GpuSurfaceColorSpace = .none,
     gpu_vsync: bool = false,
     gpu_status: GpuSurfaceStatus = .unavailable,
+    gpu_frame_requested: bool = false,
     open: bool = false,
     label_storage: [max_view_label_bytes]u8 = undefined,
     parent_storage: [max_view_label_bytes]u8 = undefined,

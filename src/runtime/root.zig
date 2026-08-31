@@ -115,6 +115,7 @@ pub const ReplayOptions = runtime_session_replay.ReplayOptions;
 pub const ReplayReport = runtime_session_replay.ReplayReport;
 pub const ReplayMismatch = runtime_session_replay.ReplayMismatch;
 pub const ReplayControl = core.ReplayControl;
+pub const CapturePendingWork = core.CapturePendingWork;
 pub const EffectResultRecord = runtime_effects.EffectResultRecord;
 pub const EffectResultKind = runtime_effects.EffectResultKind;
 pub const EffectJournal = runtime_effects.EffectJournal;

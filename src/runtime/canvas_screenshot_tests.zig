@@ -171,6 +171,44 @@ test "automation screenshot command publishes a parseable png artifact" {
     try std.testing.expectEqual(@as(usize, 280), scaled_decoded.height);
 }
 
+test "runtime screenshots preserve authoritative physical surface geometry" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-screenshot-physical-size", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    try installScreenshotWidgets(harness);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_resized = .{
+        .window_id = 1,
+        .label = "canvas",
+        .frame = geometry.RectF.init(0.4, 0, 7, 5),
+        .scale_factor = 1.5,
+        .physical_size = geometry.SizeU.init(10, 8),
+    } });
+
+    const native_size = try harness.runtime.canvasScreenshotPixelSize(1, "canvas", null);
+    try std.testing.expectEqual(@as(usize, 10), native_size.width);
+    try std.testing.expectEqual(@as(usize, 8), native_size.height);
+    const derived_size = try harness.runtime.canvasScreenshotPixelSize(1, "canvas", 1.5);
+    try std.testing.expectEqual(@as(usize, 11), derived_size.width);
+    try std.testing.expectEqual(@as(usize, 8), derived_size.height);
+
+    const pixels = try std.testing.allocator.alloc(u8, native_size.byte_len);
+    defer std.testing.allocator.free(pixels);
+    const scratch = try std.testing.allocator.alloc(u8, native_size.byte_len);
+    defer std.testing.allocator.free(scratch);
+    const screenshot = try harness.runtime.renderCanvasScreenshot(1, "canvas", null, pixels, scratch);
+    try std.testing.expectEqual(@as(usize, 10), screenshot.width);
+    try std.testing.expectEqual(@as(usize, 8), screenshot.height);
+}
+
 test "screenshots clear with live widget tokens without an intervening present" {
     const TestApp = struct {
         fn app(self: *@This()) App {

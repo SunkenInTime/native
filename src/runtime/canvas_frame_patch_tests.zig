@@ -482,6 +482,49 @@ test "patch presents carry only the change and the snapshot reports the mode" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot_writer.buffered(), "present_retained_commands=13") != null);
 }
 
+test "reference screenshots preserve the retained baseline for a later patch present" {
+    var app_state: PatchHarnessApp = .{};
+    const harness = try createPatchHarness(&app_state);
+    defer harness.destroy(std.testing.allocator);
+    var buffers = try PresentBuffers.init(std.testing.allocator);
+    defer buffers.deinit(std.testing.allocator);
+
+    var text_storage: [16][64]u8 = undefined;
+    var commands: [40]canvas.CanvasCommand = undefined;
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{
+        .commands = buildScriptScene(0, 6, 0, &text_storage, &commands),
+    });
+    const baseline = try presentFrame(harness, &buffers, 30);
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, baseline.mode);
+    const view = &harness.runtime.views[0];
+    try std.testing.expect(view.canvas_packet_baseline_valid);
+    const generation = view.canvas_packet_generation;
+    const baseline_count = view.canvas_packet_baseline_count;
+    var baseline_keys: [40]u64 = undefined;
+    var baseline_fingerprints: [40]u64 = undefined;
+    @memcpy(baseline_keys[0..baseline_count], view.canvas_packet_baseline_keys[0..baseline_count]);
+    @memcpy(baseline_fingerprints[0..baseline_count], view.canvas_packet_baseline_fingerprints[0..baseline_count]);
+    const present_count = harness.null_platform.gpu_surface_packet_present_binary_count;
+
+    const screenshot = try harness.runtime.renderCanvasScreenshot(1, "canvas", null, buffers.pixels, buffers.scratch);
+    try std.testing.expectEqual(@as(usize, @intFromFloat(patch_surface_width)), screenshot.width);
+    try std.testing.expectEqual(@as(usize, @intFromFloat(patch_surface_height)), screenshot.height);
+    try std.testing.expectEqual(present_count, harness.null_platform.gpu_surface_packet_present_binary_count);
+    try std.testing.expect(view.canvas_packet_baseline_valid);
+    try std.testing.expectEqual(generation, view.canvas_packet_generation);
+    try std.testing.expectEqual(baseline_count, view.canvas_packet_baseline_count);
+    try std.testing.expectEqualSlices(u64, baseline_keys[0..baseline_count], view.canvas_packet_baseline_keys[0..baseline_count]);
+    try std.testing.expectEqualSlices(u64, baseline_fingerprints[0..baseline_count], view.canvas_packet_baseline_fingerprints[0..baseline_count]);
+
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{
+        .commands = buildScriptScene(1, 6, 0, &text_storage, &commands),
+    });
+    const later = try presentFrame(harness, &buffers, 31);
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, later.mode);
+    try std.testing.expectEqual(canvas.binary_packet_load_action_patch, harness.null_platform.gpu_surface_packet_present_binary_load_action);
+    try std.testing.expectEqual(platform.GpuPresentPacketMode.patch, view.gpu_present_packet_mode);
+}
+
 test "rebuild dirty bounds derive from the patch edit script, not the window" {
     // A Msg-driven rebuild replaces the whole display list; the presented
     // summary cannot compare content, so historically the frame's dirty

@@ -76,6 +76,22 @@ pub fn canvasSurfacePixelSize(surface_size: geometry.SizeF, scale_factor: f32) !
     return .{ .width = width, .height = height, .byte_len = byte_len };
 }
 
+pub fn canvasPixelSize(surface_size: geometry.SizeF, scale_factor: f32, physical_size: geometry.SizeU) !CanvasPixelSize {
+    if (physical_size.width == 0 or physical_size.height == 0) {
+        return canvasSurfacePixelSize(surface_size, scale_factor);
+    }
+    if (physical_size.width > @as(u32, @intFromFloat(max_canvas_surface_extent_pixels)) or
+        physical_size.height > @as(u32, @intFromFloat(max_canvas_surface_extent_pixels)))
+    {
+        return error.InvalidGpuSurfacePixels;
+    }
+    const width: usize = @intCast(physical_size.width);
+    const height: usize = @intCast(physical_size.height);
+    const pixel_count = std.math.mul(usize, width, height) catch return error.InvalidGpuSurfacePixels;
+    const byte_len = std.math.mul(usize, pixel_count, 4) catch return error.InvalidGpuSurfacePixels;
+    return .{ .width = width, .height = height, .byte_len = byte_len };
+}
+
 pub fn normalizedCanvasPresentationScale(scale_factor: ?f32, fallback: f32) f32 {
     if (scale_factor) |scale| {
         if (std.math.isFinite(scale) and scale > 0) return scale;
@@ -85,19 +101,7 @@ pub fn normalizedCanvasPresentationScale(scale_factor: ?f32, fallback: f32) f32 
 }
 
 pub fn canvasFramePixelSize(frame: canvas.CanvasFrame) !CanvasPixelSize {
-    if (frame.physical_size.width != 0 and frame.physical_size.height != 0) {
-        if (frame.physical_size.width > @as(u32, @intFromFloat(max_canvas_surface_extent_pixels)) or
-            frame.physical_size.height > @as(u32, @intFromFloat(max_canvas_surface_extent_pixels)))
-        {
-            return error.InvalidGpuSurfacePixels;
-        }
-        const width: usize = @intCast(frame.physical_size.width);
-        const height: usize = @intCast(frame.physical_size.height);
-        const pixel_count = std.math.mul(usize, width, height) catch return error.InvalidGpuSurfacePixels;
-        const byte_len = std.math.mul(usize, pixel_count, 4) catch return error.InvalidGpuSurfacePixels;
-        return .{ .width = width, .height = height, .byte_len = byte_len };
-    }
-    return canvasSurfacePixelSize(frame.surface_size, frame.scale);
+    return canvasPixelSize(frame.surface_size, frame.scale, frame.physical_size);
 }
 
 pub fn canvasColorToRgba8(color: canvas.Color) [4]u8 {

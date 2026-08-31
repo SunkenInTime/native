@@ -188,6 +188,17 @@ pub const AppArtifacts = struct {
     tests: *std.Build.Step.Compile,
     install: *std.Build.Step.InstallArtifact,
     run: *std.Build.Step.Run,
+    /// Resolved desktop backend after `-Dplatform=auto` has been mapped to
+    /// the executable target. Embedders use this for backend-specific source
+    /// and symbol gates; the target OS alone is not sufficient.
+    backend: DesktopBackend,
+};
+
+pub const DesktopBackend = enum {
+    null,
+    macos,
+    linux,
+    windows,
 };
 
 pub fn addApp(b: *std.Build, dep: *std.Build.Dependency, app_options: AppOptions) void {
@@ -368,7 +379,19 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         package_step.dependOn(&package_run.step);
     }
 
-    return .{ .exe = exe, .tests = tests, .install = install, .run = run };
+    return .{
+        .exe = exe,
+        .tests = tests,
+        .install = install,
+        .run = run,
+        .backend = switch (selected_platform) {
+            .auto => unreachable,
+            .null => .null,
+            .macos => .macos,
+            .linux => .linux,
+            .windows => .windows,
+        },
+    };
 }
 
 /// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C calling
