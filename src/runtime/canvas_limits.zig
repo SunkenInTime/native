@@ -1,4 +1,5 @@
 const native_sdk_options = @import("native_sdk_options");
+const canvas = @import("canvas");
 
 // Per-view canvas budgets. Fixed, documented, loud: capacities are compile
 // time constants sized for a dense desktop view, overflow errors name the
@@ -28,6 +29,12 @@ const native_sdk_options = @import("native_sdk_options");
 // view slots); pages are only touched as views use their capacity.
 pub const max_canvas_commands_per_view: usize = 2048;
 pub const max_canvas_gradient_stops_per_view: usize = 64;
+// Meshes are UI background resources, not arbitrary modeling surfaces. A
+// 4x4 patch grid (16 bicubic patches) already carries 256 control points and
+// is enough to reproduce the dense showcase fixtures; bounding the count also
+// bounds the D3D fragment shader's patch search. One patch is 16 points + four
+// colors (192 B), so both retained copies cost 6 KiB per active view.
+pub const max_canvas_mesh_patches_per_view: usize = canvas.max_builder_mesh_patches;
 // Raised 128 -> 2048 with icon-in-button and the 41-icon registry: vector
 // icons are path commands, and a curated stroke icon lowers to ~10-25
 // elements (folder 10, sun 21, settings 25). A realistic dense view — a
@@ -66,7 +73,10 @@ pub const max_canvas_render_animations_per_view: usize = max_canvas_commands_per
 // themselves — this registry just keeps the fast path covering them.)
 pub const max_canvas_render_animation_dirty_bounds_per_view: usize = 72;
 pub const max_canvas_render_overrides_per_view: usize = max_canvas_commands_per_view;
-pub const max_canvas_pipelines_per_view: usize = 8;
+// One slot for every distinct pipeline kind, including the four gradient
+// families. Keeping this below the enum count turns valid mixed scenes into a
+// cache-capacity failure, so this count moves in lockstep with RenderPipelineKind.
+pub const max_canvas_pipelines_per_view: usize = 10;
 pub const max_canvas_pipeline_cache_actions_per_view: usize = max_canvas_pipelines_per_view * 2;
 pub const max_canvas_path_geometries_per_view: usize = max_canvas_commands_per_view;
 pub const max_canvas_path_geometry_cache_actions_per_view: usize = max_canvas_path_geometries_per_view * 2;

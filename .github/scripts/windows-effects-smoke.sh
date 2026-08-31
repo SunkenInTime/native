@@ -59,8 +59,12 @@ trap cleanup EXIT
 
 diagnostics() {
   echo "---- diagnostics ----"
+  echo "-- app process:"
+  if [ -n "$app_pid" ] && kill -0 "$app_pid" >/dev/null 2>&1; then echo "  alive (pid=$app_pid)"; else echo "  exited"; fi
   echo "-- snapshot ($snap):"
   if [ -f "$snap" ]; then tr '|' '\n' < "$snap" | sed 's/^/  /'; else echo "  (missing)"; fi
+  echo "-- automation artifacts under repository:"
+  find "$repo_root" -path '*/native-sdk-automation/*' -type f -print 2>/dev/null | sed 's/^/  /'
   echo "-- app log tail ($app_log):"
   tail -40 "$app_log" 2>/dev/null | sed 's/^/  /'
   echo "---------------------"
@@ -98,7 +102,7 @@ widget_id() {
 # effects-probe is a zero-config app (app.zon + src, no build.zig): the CLI
 # synthesizes its build graph. -Doptimize=Debug keeps the smoke binary at
 # the debug shape (`native build` alone would inject ReleaseFast).
-"$cli" build "$app_dir" -Dtarget=x86_64-windows-gnu -Dplatform=windows -Dweb-engine=system -Dautomation=true -Doptimize=Debug \
+"$cli" build "$app_dir" -Dtarget=x86_64-windows-gnu -Dplatform=windows -Dweb-engine=system -Dautomation=true -Dtrace=all -Doptimize=Debug \
   || fail "effects-probe Windows cross-compile failed"
 
 # ---- wineprefix -----------------------------------------------------------

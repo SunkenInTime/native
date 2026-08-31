@@ -1759,6 +1759,14 @@ pub const GpuSurfaceFontData = struct {
     ttf: []const u8,
 };
 
+/// Composition order for the optional CPU-retained texture paired with a
+/// binary GPU packet. The default preserves the immediate-canvas contract;
+/// `above_packet` lets a host keep text/images/effects over a GPU gradient.
+pub const GpuSurfaceRetainedComposite = enum(c_int) {
+    below_packet = 0,
+    above_packet = 1,
+};
+
 pub const GpuSurfacePacket = struct {
     window_id: WindowId = 1,
     label: []const u8,
@@ -1783,9 +1791,10 @@ pub const GpuSurfacePacket = struct {
     /// encoding on text-heavy frames because field names, decimal
     /// formatting, and the host-unused glyph arrays never ride it.
     binary: []const u8 = "",
-    /// Optional CPU-retained layer accompanying an immediate-only packet.
+    /// Optional CPU-retained layer accompanying a layer-filtered packet.
     /// Bytes are straight RGBA here; the Windows transport premultiplies into
     /// its shared BGRA section before the renderer uploads the dirty rects.
+    retained_composite: GpuSurfaceRetainedComposite = .below_packet,
     retained_width: usize = 0,
     retained_height: usize = 0,
     retained_generation: u64 = 0,
@@ -2152,8 +2161,10 @@ pub const PlatformServices = struct {
     /// compatibility and wire-level debugging.
     present_gpu_surface_packet_binary_fn: ?*const fn (context: ?*anyopaque, packet: GpuSurfacePacket) anyerror!void = null,
     /// The binary presenter can composite `GpuSurfacePacket.retained_rgba8`
-    /// beneath its packet commands. Kept separate from function presence so
-    /// Metal and other complete packet renderers retain their normal path.
+    /// beneath or above its packet commands according to
+    /// `GpuSurfacePacket.retained_composite`. Kept separate from function
+    /// presence so Metal and other complete packet renderers retain their
+    /// normal path.
     gpu_surface_hybrid_layers: bool = false,
     /// Binary side-channel for gpu-surface image pixels: create or
     /// replace the host texture for `image.id` out-of-band, so packets
@@ -2642,6 +2653,7 @@ pub const PlatformServices = struct {
             if (!self.gpu_surface_hybrid_layers or packet.retained_rgba8.len != bytes or
                 packet.retained_generation == 0 or packet.retained_dirty_rects.len > 8) return error.InvalidGpuSurfacePacket;
         }
+        if (packet.retained_composite == .above_packet and !self.gpu_surface_hybrid_layers) return error.InvalidGpuSurfacePacket;
         const present_fn = self.present_gpu_surface_packet_binary_fn orelse return error.UnsupportedService;
         return present_fn(self.context, packet);
     }

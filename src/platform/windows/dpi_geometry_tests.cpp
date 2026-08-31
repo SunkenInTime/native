@@ -1,5 +1,6 @@
 #include "dpi_geometry.h"
 #include "renderer_protocol.h"
+#include "shared_renderer_policy.h"
 
 #include <array>
 #include <cmath>
@@ -115,7 +116,8 @@ extern "C" int native_sdk_dpi_geometry_tests() {
     expect(!weaverSurfaceExtentChanged(300, 138, 300, 138));
     expect(weaverSurfaceExtentChanged(300, 138, 301, 138));
 
-    // Protocol v3 names and validates both geometries. Retained dimensions
+    // Protocol v4 names and validates both geometries plus retained ordering.
+    // Retained dimensions
     // must agree with the exact shared texture, and version skew is rejected
     // at the pre-frame handshake.
     WeaverRendererFrame frame = validFrame();
@@ -131,6 +133,10 @@ extern "C" int native_sdk_dpi_geometry_tests() {
     frame.retained_height = frame.source_texture_height_px;
     frame.retained_section_name_len = 4;
     expect(weaverRendererFrameValid(frame));
+    frame.retained_above_packet = 2;
+    expect(!weaverRendererFrameValid(frame));
+    frame.retained_above_packet = 1;
+    expect(weaverRendererFrameValid(frame));
     frame.retained_width -= 1;
     expect(!weaverRendererFrameValid(frame));
 
@@ -141,6 +147,16 @@ extern "C" int native_sdk_dpi_geometry_tests() {
     expect(weaverRendererHelloValid(hello));
     hello.version -= 1;
     expect(!weaverRendererHelloValid(hello));
+
+    // GPU bootstrap gets one process-start allowance. After a renderer crash,
+    // probes stay short and a presented software fallback retains a slow
+    // recovery pump until the shared pipe reconnects.
+    expect(weaverSharedRendererConnectTimeoutMs(false) == 2000);
+    expect(weaverSharedRendererConnectTimeoutMs(true) == 100);
+    expect(!weaverSharedRendererRecoveryPumpNeeded(false, false, true));
+    expect(!weaverSharedRendererRecoveryPumpNeeded(true, false, false));
+    expect(!weaverSharedRendererRecoveryPumpNeeded(true, true, true));
+    expect(weaverSharedRendererRecoveryPumpNeeded(true, false, true));
 
     // Software pixels, retained pixels, and shared GPU textures all consume
     // this same physical edge extent; no path re-derives it from width alone.

@@ -175,6 +175,39 @@ pub fn build(b: *std.Build) void {
         artifact.root_module.linkSystemLibrary("c", .{});
         break :tests artifact;
     } else null;
+    const windows_d3d_presenter_tests: ?*std.Build.Step.Compile = if (target.result.os.tag == .windows) tests: {
+        const d3d_presenter_test_mod = module(b, target, optimize, "src/platform/windows/d3d_presenter_test_runner.zig");
+        const artifact = testArtifact(b, d3d_presenter_test_mod);
+        artifact.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/windows/d3d_presenter.cpp"),
+            .flags = &.{ "-std=c++17", "-DWEAVER_D3D_PRESENTER_TESTS" },
+        });
+        artifact.root_module.addIncludePath(b.path("src/platform/windows"));
+        artifact.root_module.linkSystemLibrary("d3d11", .{});
+        artifact.root_module.linkSystemLibrary("dcomp", .{});
+        artifact.root_module.linkSystemLibrary("dxgi", .{});
+        artifact.root_module.linkSystemLibrary("c++", .{});
+        artifact.root_module.linkSystemLibrary("c", .{});
+        break :tests artifact;
+    } else null;
+    const windows_d3d_gradient_benchmark: ?*std.Build.Step.Compile = if (target.result.os.tag == .windows) benchmark: {
+        const benchmark_mod = module(b, target, optimize, "src/platform/windows/d3d_presenter_benchmark_runner.zig");
+        const artifact = b.addExecutable(.{
+            .name = "native-sdk-d3d-gradient-benchmark",
+            .root_module = benchmark_mod,
+        });
+        artifact.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/windows/d3d_presenter.cpp"),
+            .flags = &.{ "-std=c++17", "-DWEAVER_D3D_PRESENTER_TESTS" },
+        });
+        artifact.root_module.addIncludePath(b.path("src/platform/windows"));
+        artifact.root_module.linkSystemLibrary("d3d11", .{});
+        artifact.root_module.linkSystemLibrary("dcomp", .{});
+        artifact.root_module.linkSystemLibrary("dxgi", .{});
+        artifact.root_module.linkSystemLibrary("c++", .{});
+        artifact.root_module.linkSystemLibrary("c", .{});
+        break :benchmark artifact;
+    } else null;
     const windows_image_decoder_tests: ?*std.Build.Step.Compile = if (target.result.os.tag == .windows) tests: {
         const image_decoder_test_mod = module(b, target, optimize, "src/platform/windows/image_decoder_test_runner.zig");
         image_decoder_test_mod.addImport("native_sdk_test_assets", native_sdk_test_assets);
@@ -340,6 +373,22 @@ pub fn build(b: *std.Build) void {
     const docs_previews_step = b.step("docs-component-previews", "Render built-in component previews and vocab JSON into docs/");
     docs_previews_step.dependOn(&run_docs_previews.step);
 
+    // Gradient correctness lever, stage one: deterministic CPU reference
+    // receipts. These are intentionally labeled non-normative; independent
+    // spec fixtures and live GPU captures compare against the same catalog.
+    const gradient_reference_mod = module(b, target, optimize, "tools/gradient_reference_catalog.zig");
+    gradient_reference_mod.addImport("native_sdk", desktop_mod);
+    const gradient_reference_exe = b.addExecutable(.{
+        .name = "gradient-reference",
+        .root_module = gradient_reference_mod,
+    });
+    const run_gradient_reference = b.addRunArtifact(gradient_reference_exe);
+    run_gradient_reference.setCwd(b.path("."));
+    run_gradient_reference.has_side_effects = true;
+    if (b.args) |gradient_args| run_gradient_reference.addArgs(gradient_args);
+    const gradient_reference_step = b.step("gradient-reference", "Render the deterministic gradient reference catalog (optional output directory after --)");
+    gradient_reference_step.dependOn(&run_gradient_reference.step);
+
     // Render macro-benchmark: deterministic scenarios through the REAL
     // engine pipeline (UiApp + Runtime + null-platform binary packet
     // presents), reporting end-to-end and per-stage p50/p90 per
@@ -447,6 +496,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(widget_profile_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_runner_tests).step);
     if (windows_dpi_geometry_tests) |tests| {
+        test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+    if (windows_d3d_presenter_tests) |tests| {
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
     if (windows_image_decoder_tests) |tests| {
@@ -790,8 +842,51 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRetainedFrameIntervalSeconds(screen)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRetainedFrameIntervalSeconds(frameWindow.screen ?: NSScreen.mainScreen)" },
         .{ .path = "build/app.zig", .pattern = "app_mod.linkFramework(\"CoreVideo\", .{})" },
+        .{ .path = "build/app.zig", .pattern = "app_mod.linkFramework(\"IOSurface\", .{})" },
         .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkFramework(\"CoreVideo\", .{})" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkFramework(\"IOSurface\", .{})" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-shared-renderer-build-links", "Verify generated apps link the Windows shared renderer client", &.{
+        .{ .path = "build/app.zig", .pattern = "src/platform/windows/shared_renderer_client.cpp" },
+        .{ .path = "build/app.zig", .pattern = "app_mod.linkSystemLibrary(\"dcomp\", .{})" },
+        .{ .path = "build/app.zig", .pattern = "app_mod.linkSystemLibrary(\"dwmapi\", .{})" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "src/platform/windows/shared_renderer_client.cpp" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkSystemLibrary(\"dcomp\", .{})" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "app_mod.linkSystemLibrary(\"dwmapi\", .{})" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-shared-renderer-recovery", "Verify Windows handshakes before advertising D3D11 and keeps bounded recovery", &.{
+        .{ .path = "src/platform/windows/shared_renderer_client.h", .pattern = "nativeSdkSharedRendererClientEnsureConnected" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "nativeSdkSharedRendererClientEnsureConnected(view.gpu_presenter) ? 2 : 3" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "kWeaverSharedRendererRecoveryIntervalMs" },
+        .{ .path = "src/platform/windows/dpi_geometry_tests.cpp", .pattern = "weaverSharedRendererRecoveryPumpNeeded(true, false, true)" },
+    });
+    const owned_windows_example_builds = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "browser", .path = "examples/browser/build.zig" },
+        .{ .name = "capabilities", .path = "examples/capabilities/build.zig" },
+        .{ .name = "command-app", .path = "examples/command-app/build.zig" },
+        .{ .name = "hello", .path = "examples/hello/build.zig" },
+        .{ .name = "native-panels", .path = "examples/native-panels/build.zig" },
+        .{ .name = "native-shell", .path = "examples/native-shell/build.zig" },
+        .{ .name = "next", .path = "examples/next/build.zig" },
+        .{ .name = "react", .path = "examples/react/build.zig" },
+        .{ .name = "svelte", .path = "examples/svelte/build.zig" },
+        .{ .name = "vue", .path = "examples/vue/build.zig" },
+        .{ .name = "webview", .path = "examples/webview/build.zig" },
+    };
+    for (owned_windows_example_builds) |example| {
+        addFileContainsCheckStep(
+            b,
+            file_contains_checker,
+            test_step,
+            b.fmt("test-owned-{s}-windows-renderer-links", .{example.name}),
+            b.fmt("Verify the {s} example links the Windows shared renderer client", .{example.name}),
+            &.{
+                .{ .path = example.path, .pattern = "src/platform/windows/shared_renderer_client.cpp" },
+                .{ .path = example.path, .pattern = "app_mod.linkSystemLibrary(\"dcomp\", .{})" },
+                .{ .path = example.path, .pattern = "app_mod.linkSystemLibrary(\"dwmapi\", .{})" },
+            },
+        );
+    }
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-production-metal-lifetime", "Verify AppKit ships the measured process-lifetime Metal architecture", &.{
         .{ .path = "build/app.zig", .pattern = "embeddedMetalLibrary(b, dep)" },
         .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "native_sdk_composite_fragment" },
@@ -847,10 +942,10 @@ pub fn build(b: *std.Build) void {
     // this step until the encoder comment, the host decoder comment, and
     // the patterns below move with it.
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-wire-format-version-prose", "Verify wire-format version prose matches the packet version constant", &.{
-        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "pub const binary_packet_version: u8 = 7;" },
-        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "Compact binary gpu-surface packet encoding (wire format v7)." },
-        .{ .path = "src/platform/windows/d3d_presenter.cpp", .pattern = "static constexpr uint8_t kBinaryPacketVersion = 7;" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Compact binary gpu-surface packet decoding (wire format v7)." },
+        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "pub const binary_packet_version: u8 = 9;" },
+        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "Compact binary gpu-surface packet encoding (wire format v9)." },
+        .{ .path = "src/platform/windows/d3d_presenter.cpp", .pattern = "static constexpr uint8_t kBinaryPacketVersion = 9;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Compact binary gpu-surface packet decoding (wire format v9)." },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-blur-effects", "Verify AppKit GPU packet presenter applies blur effects", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketApplyBlur" },
@@ -989,6 +1084,19 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-app-runner", "Run app runner tests", app_runner_tests);
     if (windows_dpi_geometry_tests) |tests| {
         addTestStep(b, "test-windows-dpi-geometry", "Run Windows DPI geometry and renderer protocol tests", tests);
+    }
+    if (windows_d3d_presenter_tests) |tests| {
+        addTestStep(b, "test-windows-d3d-presenter", "Compile and run D3D gradient decoder and shader tests", tests);
+        const compile_step = b.step("build-windows-d3d-presenter-tests", "Cross-compile the D3D gradient test executable without running it");
+        compile_step.dependOn(&tests.step);
+    }
+    if (windows_d3d_gradient_benchmark) |benchmark| {
+        const run = b.addRunArtifact(benchmark);
+        run.has_side_effects = true;
+        const benchmark_step = b.step("bench-windows-d3d-gradient", "Measure the 16-patch Oklab mesh on a hardware D3D11 adapter");
+        benchmark_step.dependOn(&run.step);
+        const compile_step = b.step("build-windows-d3d-gradient-benchmark", "Cross-compile the hardware D3D gradient benchmark without running it");
+        compile_step.dependOn(&benchmark.step);
     }
     if (windows_image_decoder_tests) |tests| {
         addTestStep(b, "test-windows-image-decoder", "Decode real Windows image fixtures at framework budgets", tests);
@@ -1746,7 +1854,11 @@ pub fn build(b: *std.Build) void {
         \\    sleep 0.1
         \\  done
         \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_commands=68'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "dashboard GPU canvas did not present the retained display list as a packet" >&2; exit 1 ;; esac
-        \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xff171717'*) ;; *) echo "dashboard CAMetalDrawable did not contain the retained canvas sample" >&2; exit 1 ;; esac
+        \\  # The center lands on palette ink whose exact role changes with the
+        \\  # system appearance and the dashboard's live state. These are the
+        \\  # authored light background and dark background/surface colors; the
+        \\  # clear surface contains none of them.
+        \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xffffffff'*|*'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xff171717'*|*'view @w1/dashboard-canvas kind=gpu_surface'*'gpu_sample=0xff0a0a0a'*) ;; *) echo "dashboard CAMetalDrawable did not contain a retained palette sample" >&2; exit 1 ;; esac
         \\  case "$snapshot" in *'view @w1/dashboard-canvas kind=gpu_surface'*'canvas_commands=68'*'widget_semantics=48'*) ;; *) echo "dashboard GPU canvas was missing retained commands or widget semantics" >&2; exit 1 ;; esac
         \\  first_frame_latency="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/dashboard-canvas kind=gpu_surface.* gpu_first_frame_latency_ns=\([0-9][0-9]*\).*/\1/p')"
         \\  case "$first_frame_latency" in ''|*[!0-9]*) echo "dashboard GPU first frame latency was missing" >&2; exit 1 ;; esac

@@ -6,6 +6,12 @@
 
 struct NativeSdkSharedRendererClient;
 
+// The value is the composition-surface HANDLE duplicated into the widget
+// process. Diagnostic tools can duplicate it into their own process and
+// compose the exact surface that the production child HWND presents.
+inline constexpr wchar_t kWeaverSharedCompositionSurfaceProperty[] =
+    L"Weaver.SharedCompositionSurfaceHandle.v1";
+
 struct NativeSdkSharedRendererGeometry {
     double destination_x_dip;
     double destination_y_dip;
@@ -21,10 +27,11 @@ struct NativeSdkSharedRendererGeometry {
 };
 
 /// Creates only the device-less DirectComposition side of a shared surface.
-/// Pipe connection is lazy so widgets launch safely while weaverd is still
-/// bringing the renderer up, and reconnect after a renderer crash.
+/// Pipe connection remains explicit so the Windows host can complete the
+/// handshake before it advertises D3D11 to the runtime.
 NativeSdkSharedRendererClient *nativeSdkSharedRendererClientCreate(HWND window);
 void nativeSdkSharedRendererClientDestroy(NativeSdkSharedRendererClient *client);
+bool nativeSdkSharedRendererClientEnsureConnected(NativeSdkSharedRendererClient *client);
 bool nativeSdkSharedRendererClientPresent(
     NativeSdkSharedRendererClient *client,
     double logical_width,
@@ -37,6 +44,7 @@ bool nativeSdkSharedRendererClientPresent(
     uint8_t clear_a,
     const uint8_t *packet,
     size_t packet_len,
+    int retained_composite,
     uint64_t retained_generation,
     size_t retained_width,
     size_t retained_height,

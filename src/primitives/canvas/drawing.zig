@@ -4,10 +4,13 @@ const ObjectId = u64;
 const ImageId = u64;
 
 /// Presentation ownership survives display-list lowering so a platform can
-/// composite CPU-retained chrome below an immediate GPU island without
+/// composite CPU-retained chrome on either side of a GPU island without
 /// teaching either renderer about the widget tree that produced it.
 pub const PresentationLayer = enum {
     retained,
+    /// GPU-authored widget chrome that must remain below retained text,
+    /// images, and effects when a host splits a mixed display list.
+    gpu_underlay,
     immediate,
 };
 
@@ -119,15 +122,82 @@ pub const GradientStop = struct {
     color: Color,
 };
 
+/// What happens outside the authored stop interval. CSS repeating gradients
+/// are `repeat` applied to a linear/radial/conic geometry, not separate paint
+/// shapes. `reflect` is kept at this low-level seam because both GPU APIs and
+/// image paint systems expose it cheaply even though Weaver's CSS-compatible
+/// authoring does not need to surface it initially.
+pub const GradientSpread = enum {
+    pad,
+    repeat,
+    reflect,
+};
+
+/// Interpolation spaces supported by the current sRGB `Color` storage. Every
+/// mode interpolates premultiplied components and then unpremultiplies, matching
+/// CSS Color 4's alpha rule. Wider-gamut source colors require a future Color
+/// model rather than pretending four sRGB floats carry Display-P3.
+pub const GradientInterpolation = enum {
+    srgb,
+    srgb_linear,
+    oklab,
+};
+
 pub const LinearGradient = struct {
     start: geometry.PointF,
     end: geometry.PointF,
     stops: []const GradientStop = &.{},
+    spread: GradientSpread = .pad,
+    interpolation: GradientInterpolation = .srgb_linear,
+};
+
+/// Elliptical radial gradient: `center` is t=0 and `radii` is the t=1
+/// ellipse. This represents CSS radial-gradient geometry after the author-side
+/// size/position keywords have resolved against the final box. Retained views
+/// require both radii to be greater than zero; CSS zero-radius degenerates are
+/// outside the contract until every backend renders them identically.
+pub const RadialGradient = struct {
+    center: geometry.PointF,
+    radii: geometry.SizeF,
+    stops: []const GradientStop = &.{},
+    spread: GradientSpread = .pad,
+    interpolation: GradientInterpolation = .srgb_linear,
+};
+
+/// Conic gradient in the canvas' y-down coordinates. Zero radians points
+/// along +x and positive angles turn clockwise. CSS's zero-at-top convention
+/// is an authoring conversion (`css_angle - pi/2`), not a renderer branch.
+pub const ConicGradient = struct {
+    center: geometry.PointF,
+    start_angle_radians: f32 = 0,
+    stops: []const GradientStop = &.{},
+    spread: GradientSpread = .pad,
+    interpolation: GradientInterpolation = .srgb_linear,
+};
+
+/// One tensor-product bicubic mesh patch. Control points are row-major from
+/// top-left (`points[0]`) to bottom-right (`points[15]`); colors name the four
+/// corners in clockwise order. Adjacent patches should share their edge
+/// control points and corner colors for a seamless mesh.
+pub const MeshPatch = struct {
+    points: [16]geometry.PointF,
+    colors: [4]Color,
+};
+
+/// A two-dimensional gradient made from authored bicubic patches. Patch order
+/// is deterministic: later patches win where malformed input overlaps. Unlike
+/// linear/radial/conic gradients, a mesh has no one-dimensional spread axis.
+pub const MeshGradient = struct {
+    patches: []const MeshPatch = &.{},
+    interpolation: GradientInterpolation = .srgb_linear,
 };
 
 pub const Fill = union(enum) {
     color: Color,
     linear_gradient: LinearGradient,
+    radial_gradient: RadialGradient,
+    conic_gradient: ConicGradient,
+    mesh_gradient: MeshGradient,
 };
 
 pub const Stroke = struct {

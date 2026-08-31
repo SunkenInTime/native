@@ -11,7 +11,7 @@
 /// request receives exactly one reply, which is also the frame-completion
 /// signal used by the widget's existing scheduler.
 static constexpr uint32_t kWeaverRendererMagic = 0x31525257; // WRR1
-static constexpr uint32_t kWeaverRendererVersion = 3;
+static constexpr uint32_t kWeaverRendererVersion = 4;
 static constexpr uint32_t kWeaverRendererMaxPacket = 8 * 1024 * 1024;
 static constexpr uint32_t kWeaverRendererMaxDirtyRects = 8;
 static constexpr uint32_t kWeaverRendererSectionNameChars = 96;
@@ -66,7 +66,7 @@ struct WeaverRendererFrame {
     uint8_t clear_g;
     uint8_t clear_b;
     uint8_t clear_a;
-    uint32_t reserved1;
+    uint32_t retained_above_packet;
     uint64_t retained_generation;
     uint32_t retained_width;
     uint32_t retained_height;
@@ -105,6 +105,7 @@ inline bool weaverRendererFrameValid(const WeaverRendererFrame &frame) {
             frame.destination_height_dip }, false) ||
         !weaverValidSurfaceExtent(frame.source_texture_width_px,
             frame.source_texture_height_px) ||
+        frame.retained_above_packet > 1 ||
         frame.retained_dirty_rect_count > kWeaverRendererMaxDirtyRects ||
         frame.retained_section_name_len >= kWeaverRendererSectionNameChars) return false;
     const WeaverPhysicalRectI destination = {

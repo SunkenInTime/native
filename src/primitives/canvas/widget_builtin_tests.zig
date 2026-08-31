@@ -305,6 +305,7 @@ const sampleCanvasRenderAnimations = support.sampleCanvasRenderAnimations;
 const emitWidgetLayout = support.emitWidgetLayout;
 
 test "stack clip content emits its authored asymmetric rounded mask" {
+    const stack_radii = [_]canvas.ImmediateCanvasCommand{.{ .corner_radii = .{ .bottom_left = 2 } }};
     const child = Widget{
         .id = 2,
         .kind = .panel,
@@ -316,7 +317,8 @@ test "stack clip content emits its authored asymmetric rounded mask" {
         .kind = .stack,
         .frame = geometry.RectF.init(0, 0, 100, 60),
         .layout = .{ .flags = .{ .clip_content = true } },
-        .style = .{ .radius = 10, .radius_bottom_left = 2 },
+        .style = .{ .radius = 10 },
+        .immediate_commands = &stack_radii,
         .children = &.{child},
     };
     var commands: [8]CanvasCommand = undefined;
@@ -335,6 +337,7 @@ test "stack clip content emits its authored asymmetric rounded mask" {
 }
 
 test "image widget emits fit tile and asymmetric radius on the draw" {
+    const image_radii = [_]canvas.ImmediateCanvasCommand{.{ .corner_radii = .{ .bottom_left = 3 } }};
     const widget = Widget{
         .id = 4,
         .kind = .image,
@@ -343,7 +346,8 @@ test "image widget emits fit tile and asymmetric radius on the draw" {
         .image_fit = .contain,
         .image_sampling = .nearest,
         .image_tile = true,
-        .style = .{ .radius = 11, .radius_bottom_left = 3 },
+        .style = .{ .radius = 11 },
+        .immediate_commands = &image_radii,
     };
     var commands: [2]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
@@ -2315,6 +2319,177 @@ test "built-in card renders house surface chrome and title" {
             try std.testing.expectEqualDeep(Color.rgb8(238, 242, 246), text.color);
         },
         else => return error.TestUnexpectedResult,
+    }
+}
+
+test "surface widget chrome preserves retained linear and mesh gradients" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },
+        .{ .offset = 1, .color = Color.rgb8(217, 70, 239) },
+    };
+    var points: [16]geometry.PointF = undefined;
+    for (0..4) |row| {
+        for (0..4) |column| {
+            points[row * 4 + column] = geometry.PointF.init(
+                @as(f32, @floatFromInt(column)) / 3,
+                @as(f32, @floatFromInt(row)) / 3,
+            );
+        }
+    }
+    const patches = [_]canvas.WidgetMeshPatch{.{
+        .points = points,
+        .colors = .{
+            Color.rgb8(255, 0, 0),
+            Color.rgb8(0, 255, 0),
+            Color.rgb8(0, 0, 255),
+            Color.rgb8(255, 255, 255),
+        },
+    }};
+    const linear_effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .linear = .{
+        .start = .{ .x = 0, .y = 0.5 },
+        .end = .{ .x = 1, .y = 0.5 },
+        .stops = &stops,
+    } } }};
+    const mesh_effects = [_]canvas.ImmediateCanvasCommand{.{ .background_mesh_gradient = .{
+        .patches = &patches,
+        .interpolation = .oklab,
+    } }};
+    const paints = [_][]const canvas.ImmediateCanvasCommand{ &linear_effects, &mesh_effects };
+    const SurfaceCase = struct {
+        kind: WidgetKind,
+        id: ObjectId,
+        fill_slot: ObjectId,
+        underline_tabs: bool = false,
+    };
+    const surface_cases = [_]SurfaceCase{
+        .{ .kind = .alert, .id = 70, .fill_slot = 1 },
+        .{ .kind = .card, .id = 71, .fill_slot = 1 },
+        .{ .kind = .bubble, .id = 72, .fill_slot = 2 },
+        .{ .kind = .tabs, .id = 73, .fill_slot = 1 },
+        .{ .kind = .tabs, .id = 74, .fill_slot = 1, .underline_tabs = true },
+        .{ .kind = .accordion, .id = 75, .fill_slot = 1 },
+    };
+
+    for (surface_cases) |surface_case| {
+        for (paints, 0..) |effects, paint_index| {
+            var tokens = DesignTokens{};
+            if (surface_case.underline_tabs) tokens.controls.tabs_indicator = .underline;
+            var widget = Widget{
+                .id = surface_case.id,
+                .kind = surface_case.kind,
+                .frame = geometry.RectF.init(12, 20, 80, 40),
+                .immediate_commands = effects,
+            };
+            // A solid ghost bubble and an underline tab strip have no
+            // background command. Authored gradient metadata still wins.
+            if (surface_case.kind == .bubble) widget.variant = .ghost;
+
+            var commands: [16]CanvasCommand = undefined;
+            var builder = Builder.init(&commands);
+            try emitWidgetTree(&builder, widget, tokens);
+            const rounded = switch (builder.displayList().findCommandById(widgetPartId(surface_case.id, surface_case.fill_slot)).?.command) {
+                .fill_rounded_rect => |fill| fill,
+                else => return error.TestUnexpectedResult,
+            };
+            if (paint_index == 0) switch (rounded.fill) {
+                .linear_gradient => |gradient| {
+                    try std.testing.expectEqualDeep(geometry.PointF.init(12, 40), gradient.start);
+                    try std.testing.expectEqualDeep(geometry.PointF.init(92, 40), gradient.end);
+                    try std.testing.expectEqualSlices(GradientStop, &stops, gradient.stops);
+                },
+                else => return error.TestUnexpectedResult,
+            } else switch (rounded.fill) {
+                .mesh_gradient => |gradient| {
+                    try std.testing.expectEqual(@as(usize, 1), gradient.patches.len);
+                    try std.testing.expectEqualDeep(geometry.PointF.init(12, 20), gradient.patches[0].points[0]);
+                    try std.testing.expectEqualDeep(geometry.PointF.init(92, 60), gradient.patches[0].points[15]);
+                    try std.testing.expectEqual(drawing_model.GradientInterpolation.oklab, gradient.interpolation);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        }
+    }
+}
+
+test "gradient button lowers its background below retained text" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(14, 165, 233) },
+        .{ .offset = 1, .color = Color.rgb8(168, 85, 247) },
+    };
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .linear = .{
+        .start = .{ .x = 0, .y = 0.5 },
+        .end = .{ .x = 1, .y = 0.5 },
+        .stops = &stops,
+    } } }};
+    const button = Widget{
+        .id = 76,
+        .kind = .button,
+        .frame = geometry.RectF.init(12, 20, 120, 40),
+        .text = "GPU gradient",
+        .immediate_commands = &effects,
+    };
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, button, .{});
+    var render_commands: [16]RenderCommand = undefined;
+    const plan = try builder.displayList().renderPlan(&render_commands);
+    var found_gradient_underlay = false;
+    var found_retained_text = false;
+    for (plan.commands) |command| switch (command.command) {
+        .fill_rounded_rect => |fill| switch (fill.fill) {
+            .linear_gradient => found_gradient_underlay = command.presentation_layer == .gpu_underlay,
+            else => {},
+        },
+        .draw_text => found_retained_text = command.presentation_layer == .retained,
+        else => {},
+    };
+    try std.testing.expect(found_gradient_underlay);
+    try std.testing.expect(found_retained_text);
+}
+
+test "gradient row column and stack keep retained children" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(14, 165, 233) },
+        .{ .offset = 1, .color = Color.rgb8(168, 85, 247) },
+    };
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .linear = .{
+        .start = .{ .x = 0, .y = 0.5 },
+        .end = .{ .x = 1, .y = 0.5 },
+        .stops = &stops,
+    } } }};
+    const child = Widget{
+        .id = 81,
+        .kind = .text,
+        .frame = geometry.RectF.init(20, 28, 100, 20),
+        .text = "Retained child",
+    };
+
+    for ([_]WidgetKind{ .row, .column, .stack }) |kind| {
+        const container = Widget{
+            .id = 80,
+            .kind = kind,
+            .frame = geometry.RectF.init(12, 20, 120, 40),
+            .immediate_commands = &effects,
+            .children = &.{child},
+        };
+        var commands: [16]CanvasCommand = undefined;
+        var builder = Builder.init(&commands);
+        try emitWidgetTree(&builder, container, .{});
+        var render_commands: [16]RenderCommand = undefined;
+        const plan = try builder.displayList().renderPlan(&render_commands);
+        var found_gradient_underlay = false;
+        var found_retained_text = false;
+        for (plan.commands) |command| switch (command.command) {
+            .fill_rounded_rect => |fill| switch (fill.fill) {
+                .linear_gradient => found_gradient_underlay = command.presentation_layer == .gpu_underlay,
+                else => {},
+            },
+            .draw_text => found_retained_text = command.presentation_layer == .retained,
+            else => {},
+        };
+        try std.testing.expect(found_gradient_underlay);
+        try std.testing.expect(found_retained_text);
     }
 }
 

@@ -78,6 +78,8 @@ pub const textEditingInkColor = widget_render_style.textEditingInkColor;
 pub const staticTextSelectionFillColor = widget_render_style.staticTextSelectionFillColor;
 pub const colorWithAlpha = widget_render_style.colorWithAlpha;
 const colorFill = widget_render_style.colorFill;
+const emitWidgetRoundedBackground = widget_render_style.emitWidgetRoundedBackground;
+const widgetHasBackgroundGradient = widget_render_style.widgetHasBackgroundGradient;
 const widgetBackgroundFill = widget_render_style.widgetBackgroundFill;
 const widgetAccentFill = widget_render_style.widgetAccentFill;
 const widgetBorderFill = widget_render_style.widgetBorderFill;
@@ -128,21 +130,31 @@ const max_widget_depth = widget_limits.max_widget_depth;
 /// per-view storage within the same emit call stack, so one threadlocal
 /// buffer per frame is sound — reset at each emit entry point. Overflow
 /// fails loudly by budget name.
-threadlocal var frame_label_bytes: [chart_model.max_chart_label_bytes_per_frame]u8 = undefined;
-threadlocal var frame_label_len: usize = 0;
+// Lazily heap-allocated per thread (the label pool plus the chart
+// polyline scratch below): init on first emit/chart use of a thread —
+// the emitting thread by construction — so threads that never emit
+// widgets never allocate it. The arrays carry no default and stay
+// uninitialized, exactly like the `= undefined` statics they replace.
+const WidgetRenderScratch = struct {
+    frame_label_bytes: [chart_model.max_chart_label_bytes_per_frame]u8,
+    frame_label_len: usize = 0,
+    chart_polyline_points: [chart_model.max_chart_points_per_series]geometry.PointF,
+};
+const widget_render_scratch = @import("lazy_tls.zig").LazyTls(WidgetRenderScratch);
 
 fn resetFrameLabelScratch() void {
-    frame_label_len = 0;
+    widget_render_scratch.get().frame_label_len = 0;
 }
 
 /// Persist a formatted label into the frame scratch so the emitted
 /// command outlives the local formatting buffer.
 fn allocFrameLabelBytes(text: []const u8) Error![]const u8 {
-    if (frame_label_len + text.len > frame_label_bytes.len) return error.ChartLabelBytesFull;
-    const start = frame_label_len;
-    frame_label_len += text.len;
-    @memcpy(frame_label_bytes[start..frame_label_len], text);
-    return frame_label_bytes[start..frame_label_len];
+    const scratch = widget_render_scratch.get();
+    if (scratch.frame_label_len + text.len > scratch.frame_label_bytes.len) return error.ChartLabelBytesFull;
+    const start = scratch.frame_label_len;
+    scratch.frame_label_len += text.len;
+    @memcpy(scratch.frame_label_bytes[start..scratch.frame_label_len], text);
+    return scratch.frame_label_bytes[start..scratch.frame_label_len];
 }
 
 /// Frame-lifetime scratch (same single-threaded emit contract as the
@@ -222,11 +234,18 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack => if (paint_widget.immediate_commands.len > 0)
-            try emitImmediateCanvas(builder, paint_widget)
-        else
-            try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
-        .row, .column, .grid, .list, .breadcrumb, .pagination, .radio_group, .toggle_group, .split, .tree => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
+        .stack => {
+            try emitContainerGradient(builder, paint_widget);
+            if (widgetHasImmediateCanvasPaint(paint_widget))
+                try emitImmediateCanvas(builder, paint_widget)
+            else
+                try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
+        },
+        .row, .column => {
+            try emitContainerGradient(builder, paint_widget);
+            try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
+        },
+        .grid, .list, .breadcrumb, .pagination, .radio_group, .toggle_group, .split, .tree => try emitWidgetClippedChildren(builder, paint_widget, tokens, depth),
         .button_group => try emitButtonGroupWidget(builder, paint_widget, tokens, depth),
         .table, .data_grid => {
             try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
@@ -503,11 +522,15 @@ fn emitWidgetLayoutNodeContent(
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
-        .stack => if (paint_widget.immediate_commands.len > 0) {
-            try emitImmediateCanvas(builder, paint_widget);
-            return;
+        .stack => {
+            try emitContainerGradient(builder, paint_widget);
+            if (widgetHasImmediateCanvasPaint(paint_widget)) {
+                try emitImmediateCanvas(builder, paint_widget);
+                return;
+            }
         },
-        .row, .column, .breadcrumb, .button_group, .pagination, .radio_group, .toggle_group, .split, .tree => {},
+        .row, .column => try emitContainerGradient(builder, paint_widget),
+        .breadcrumb, .button_group, .pagination, .radio_group, .toggle_group, .split, .tree => {},
         .data_row => try emitDataRowWidgetWash(builder, paint_widget, tokens),
         .tabs => try widget_render_surfaces.emitTabsListWidgetChrome(builder, paint_widget, tokens),
         .table, .data_grid => {
@@ -652,7 +675,7 @@ fn emitImmediateCanvas(builder: *Builder, widget: Widget) Error!void {
                 .color = value.color,
                 .inset = value.inset,
             }),
-            .text_shadow, .text_font, .icon_path, .hover_style, .pressed_style => continue,
+            .text_shadow, .text_font, .icon_path, .background_gradient, .background_mesh_gradient, .corner_radii, .hover_style, .pressed_style => continue,
             .fill_rect => |value| try builder.fillRect(.{
                 .id = id,
                 .rect = value.rect.translate(.{ .dx = widget.frame.x, .dy = widget.frame.y }),
@@ -704,6 +727,25 @@ fn emitImmediateCanvas(builder: *Builder, widget: Widget) Error!void {
         }
     }
     try builder.popClip();
+}
+
+fn emitContainerGradient(builder: *Builder, widget: Widget) Error!void {
+    if (!widgetHasBackgroundGradient(widget)) return;
+    try emitWidgetRoundedBackground(
+        builder,
+        widget,
+        transparentColor(),
+        widgetRadius(widget, 0),
+        widgetPartId(widget.id, 1),
+    );
+}
+
+fn widgetHasImmediateCanvasPaint(widget: Widget) bool {
+    for (widget.immediate_commands) |command| switch (command) {
+        .fill_rect, .fill_rounded_rect, .fill_circle, .line, .polyline, .box_shadow => return true,
+        .text_style, .text_shadow, .text_font, .icon_path, .background_gradient, .background_mesh_gradient, .corner_radii, .hover_style, .pressed_style => {},
+    };
+    return false;
 }
 
 fn immediateCanvasCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {
@@ -2214,27 +2256,27 @@ fn emitChartBand(
 }
 
 /// Map a series into plot-space points, skipping non-finite values.
-/// Returned points live in a threadlocal scratch valid until the next
-/// series maps (each emitter consumes them before returning).
-threadlocal var chart_polyline_points: [chart_model.max_chart_points_per_series]geometry.PointF = undefined;
-
+/// Returned points live in per-thread scratch (`WidgetRenderScratch`)
+/// valid until the next series maps (each emitter consumes them before
+/// returning).
 fn chartPolylinePoints(
     values: []const f32,
     domain: chart_model.ChartDomain,
     plot: geometry.RectF,
     inset: f32,
 ) Error![]const geometry.PointF {
-    const count = @min(values.len, chart_polyline_points.len);
+    const points = &widget_render_scratch.get().chart_polyline_points;
+    const count = @min(values.len, points.len);
     var len: usize = 0;
     for (values[0..count], 0..) |value, index| {
         if (!std.math.isFinite(value)) continue;
-        chart_polyline_points[len] = geometry.PointF.init(
+        points[len] = geometry.PointF.init(
             chartMapX(index, count, plot, inset),
             chartMapY(value, domain, plot, inset),
         );
         len += 1;
     }
-    return chart_polyline_points[0..len];
+    return points[0..len];
 }
 
 const chart_grid_seed: u64 = 0x5eed_c4a8_0000_0001;

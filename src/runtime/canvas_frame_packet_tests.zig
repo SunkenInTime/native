@@ -1083,6 +1083,234 @@ test "runtime prefers the compact binary packet encoding when the platform decod
     try std.testing.expectEqual(platform.GpuPresentFallbackReason.none, harness.runtime.views[0].info().gpu_present_fallback_reason);
 }
 
+test "hybrid packet keeps a GPU gradient below retained effects" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-gradient-underlay", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_packet_binary = true;
+    harness.null_platform.gpu_surface_hybrid_layers = true;
+    harness.runtime.options.platform.services.gpu_surface_hybrid_layers = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 96, 48),
+    });
+
+    const stops = [_]canvas.GradientStop{
+        .{ .offset = 0, .color = canvas.Color.rgb8(14, 165, 233) },
+        .{ .offset = 1, .color = canvas.Color.rgb8(168, 85, 247) },
+    };
+    const commands = [_]canvas.CanvasCommand{
+        .{ .shadow = .{
+            .id = 3,
+            .rect = geometry.RectF.init(0, 0, 96, 48),
+            .radius = canvas.Radius.all(12),
+            .blur = 2,
+            .color = canvas.Color.rgba8(0, 0, 0, 41),
+        } },
+        .{ .fill_rounded_rect = .{
+            .id = 4,
+            .rect = geometry.RectF.init(0, 0, 96, 48),
+            .radius = canvas.Radius.all(12),
+            .fill = .{ .color = canvas.Color.rgb8(20, 24, 32) },
+        } },
+        .{ .shadow = .{
+            .id = 5,
+            .rect = geometry.RectF.init(0, 0, 96, 48),
+            .radius = canvas.Radius.all(12),
+            .blur = 4,
+            .color = canvas.Color.rgba8(0, 0, 0, 96),
+        } },
+        .{ .push_clip = .{
+            .id = 1,
+            .rect = geometry.RectF.init(0, 0, 96, 48),
+            .presentation_layer = .gpu_underlay,
+        } },
+        .{ .fill_rounded_rect = .{
+            .id = 2,
+            .rect = geometry.RectF.init(0, 0, 96, 48),
+            .radius = canvas.Radius.all(12),
+            .fill = .{ .linear_gradient = .{
+                .start = geometry.PointF.init(0, 24),
+                .end = geometry.PointF.init(96, 24),
+                .stops = &stops,
+            } },
+        } },
+        .pop_clip,
+        .{ .shadow = .{
+            .id = 6,
+            .rect = geometry.RectF.init(12, 12, 72, 24),
+            .blur = 4,
+            .color = canvas.Color.rgba8(0, 0, 0, 96),
+        } },
+    };
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+    try std.testing.expect(harness.runtime.canvasViewHasHybridLayers(1, "canvas"));
+
+    var gpu_commands: [max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined;
+    var packet_buffer: [16 * 1024]u8 = undefined;
+    var pixels: [96 * 48 * 4]u8 = undefined;
+    var scratch: [96 * 48 * 4]u8 = undefined;
+    const packet = (try harness.runtime.presentNextCanvasHybridPacket(
+        1,
+        "canvas",
+        .{
+            .frame_index = 41,
+            .timestamp_ns = 121_000,
+            .surface_size = geometry.SizeF.init(96, 48),
+            .scale = 1,
+            .full_repaint = true,
+        },
+        canvasFrameScratchStorage(&harness.runtime),
+        canvas.Color.rgba8(0, 0, 0, 0),
+        &gpu_commands,
+        &packet_buffer,
+        &pixels,
+        &scratch,
+    )).?;
+
+    try std.testing.expectEqual(@as(usize, 4), packet.commandCount());
+    try std.testing.expectEqual(@as(usize, 0), packet.unsupported_command_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_binary_count);
+    try std.testing.expectEqual(
+        platform.GpuSurfaceRetainedComposite.above_packet,
+        harness.null_platform.gpu_surface_packet_present_retained_composite,
+    );
+    try std.testing.expect(harness.runtime.views[0].hybrid_retained_valid);
+    try std.testing.expectEqual(@as(u64, 1), harness.runtime.views[0].hybrid_retained_generation);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, pixels[0..4]);
+}
+
+test "hybrid packet refreshes its below-packet retained surface when the clear color changes" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-gradient-overlay", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_packet_binary = true;
+    harness.null_platform.gpu_surface_hybrid_layers = true;
+    harness.runtime.options.platform.services.gpu_surface_hybrid_layers = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 32, 16),
+    });
+
+    const stops = [_]canvas.GradientStop{
+        .{ .offset = 0, .color = canvas.Color.rgb8(14, 165, 233) },
+        .{ .offset = 1, .color = canvas.Color.rgb8(168, 85, 247) },
+    };
+    const commands = [_]canvas.CanvasCommand{
+        .{ .fill_rect = .{
+            .id = 1,
+            .rect = geometry.RectF.init(16, 8, 8, 4),
+            .fill = .{ .color = canvas.Color.rgb8(255, 255, 255) },
+        } },
+        .{ .push_clip = .{
+            .id = 2,
+            .rect = geometry.RectF.init(0, 0, 32, 16),
+            .presentation_layer = .immediate,
+        } },
+        .{ .fill_rect = .{
+            .id = 3,
+            .rect = geometry.RectF.init(0, 0, 32, 16),
+            .fill = .{ .linear_gradient = .{
+                .start = geometry.PointF.init(0, 8),
+                .end = geometry.PointF.init(32, 8),
+                .stops = &stops,
+            } },
+        } },
+        .pop_clip,
+    };
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+    try std.testing.expect(harness.runtime.canvasViewHasHybridLayers(1, "canvas"));
+
+    var gpu_commands: [max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined;
+    var packet_buffer: [16 * 1024]u8 = undefined;
+    var pixels: [32 * 16 * 4]u8 = undefined;
+    var scratch: [32 * 16 * 4]u8 = undefined;
+    const red = canvas.Color.rgb8(192, 24, 32);
+    const green = canvas.Color.rgb8(20, 160, 48);
+
+    _ = (try harness.runtime.presentNextCanvasHybridPacket(
+        1,
+        "canvas",
+        .{
+            .frame_index = 1,
+            .surface_size = geometry.SizeF.init(32, 16),
+            .scale = 1,
+            .full_repaint = true,
+        },
+        canvasFrameScratchStorage(&harness.runtime),
+        red,
+        &gpu_commands,
+        &packet_buffer,
+        &pixels,
+        &scratch,
+    )).?;
+    try std.testing.expectEqual(platform.GpuSurfaceRetainedComposite.below_packet, harness.null_platform.gpu_surface_packet_present_retained_composite);
+    try std.testing.expectEqual(@as(u64, 1), harness.runtime.views[0].hybrid_retained_generation);
+    try std.testing.expectEqualSlices(u8, &.{ 192, 24, 32, 255 }, pixels[0..4]);
+
+    _ = (try harness.runtime.presentNextCanvasHybridPacket(
+        1,
+        "canvas",
+        .{
+            .frame_index = 2,
+            .surface_size = geometry.SizeF.init(32, 16),
+            .scale = 1,
+            .full_repaint = true,
+        },
+        canvasFrameScratchStorage(&harness.runtime),
+        green,
+        &gpu_commands,
+        &packet_buffer,
+        &pixels,
+        &scratch,
+    )).?;
+    try std.testing.expectEqual(@as(u64, 2), harness.runtime.views[0].hybrid_retained_generation);
+    try std.testing.expectEqualSlices(u8, &.{ 20, 160, 48, 255 }, pixels[0..4]);
+
+    @memset(&pixels, 0xAA);
+    _ = (try harness.runtime.presentNextCanvasHybridPacket(
+        1,
+        "canvas",
+        .{
+            .frame_index = 3,
+            .surface_size = geometry.SizeF.init(32, 16),
+            .scale = 1,
+            .full_repaint = true,
+        },
+        canvasFrameScratchStorage(&harness.runtime),
+        green,
+        &gpu_commands,
+        &packet_buffer,
+        &pixels,
+        &scratch,
+    )).?;
+    try std.testing.expectEqual(@as(u64, 2), harness.runtime.views[0].hybrid_retained_generation);
+    try std.testing.expectEqualSlices(u8, &.{ 0xAA, 0xAA, 0xAA, 0xAA }, pixels[0..4]);
+    try std.testing.expectEqualSlices(u8, &.{ 20, 160, 48, 255 }, harness.runtime.views[0].hybrid_retained_clear_color_rgba8[0..]);
+}
+
 test "chat-transcript-shaped heavy frame stays on the packet path through the binary encoding" {
     // The transcript fixture is intentionally desktop-sized (400 commands);
     // widget-profile packet coverage lives in the bounded fixtures above.

@@ -9,9 +9,14 @@ const Color = drawing_model.Color;
 const Fill = drawing_model.Fill;
 const Radius = drawing_model.Radius;
 const StrokeRect = drawing_model.StrokeRect;
+const Error = canvas.Error;
+const ObjectId = canvas.ObjectId;
+const Builder = canvas.Builder;
 const DesignTokens = token_model.DesignTokens;
 const ControlVisualTokens = token_model.ControlVisualTokens;
 const Widget = widget_model.Widget;
+const WidgetGradient = widget_model.WidgetGradient;
+const WidgetMeshGradient = widget_model.WidgetMeshGradient;
 
 pub const WidgetBoxShadowResolution = union(enum) {
     inherit,
@@ -204,8 +209,197 @@ pub fn colorFill(color: Color) Fill {
     return .{ .color = color };
 }
 
+fn interactionBackground(widget: Widget) ?Color {
+    if (widget.state.disabled) return null;
+    var hovered: ?Color = null;
+    for (widget.immediate_commands) |command| switch (command) {
+        .pressed_style => |style| if (widget.state.pressed) return style.background,
+        .hover_style => |style| {
+            if (widget.state.hovered) hovered = style.background;
+        },
+        else => {},
+    };
+    return hovered;
+}
+
 pub fn widgetBackgroundFill(widget: Widget, fallback: Color) Fill {
+    if (interactionBackground(widget)) |background| return colorFill(background);
+    for (widget.immediate_commands) |command| switch (command) {
+        .background_gradient => |gradient| return widgetGradientFill(widget, gradient),
+        else => {},
+    };
     return colorFill(widget.style.background orelse fallback);
+}
+
+pub fn widgetGradientFill(widget: Widget, gradient: WidgetGradient) Fill {
+    return switch (gradient) {
+        .linear => |linear| .{ .linear_gradient = .{
+            .start = widgetNormalizedPoint(widget, linear.start),
+            .end = widgetNormalizedPoint(widget, linear.end),
+            .stops = linear.stops,
+            .spread = linear.spread,
+            .interpolation = linear.interpolation,
+        } },
+        .radial => |radial| .{ .radial_gradient = .{
+            .center = widgetNormalizedPoint(widget, radial.center),
+            .radii = .{
+                .width = widget.frame.width * radial.radii.width,
+                .height = widget.frame.height * radial.radii.height,
+            },
+            .stops = radial.stops,
+            .spread = radial.spread,
+            .interpolation = radial.interpolation,
+        } },
+        .conic => |conic| .{ .conic_gradient = .{
+            .center = widgetNormalizedPoint(widget, conic.center),
+            .start_angle_radians = conic.start_angle_radians,
+            .stops = conic.stops,
+            .spread = conic.spread,
+            .interpolation = conic.interpolation,
+        } },
+    };
+}
+
+pub fn widgetHasBackgroundGradient(widget: Widget) bool {
+    for (widget.immediate_commands) |command| switch (command) {
+        .background_gradient, .background_mesh_gradient => return true,
+        else => {},
+    };
+    return false;
+}
+
+/// Emit repeated background-gradient metadata in painter's order: the first
+/// authored gradient is the bottom layer and the last is the top layer. A
+/// single gradient keeps the historical one-command shape and id; extra
+/// layers get deterministic ids so retained diffing can isolate them.
+pub fn emitWidgetRoundedBackground(builder: *Builder, widget: Widget, fallback: Color, radius: Radius, base_id: ObjectId) Error!void {
+    if (interactionBackground(widget) != null or !widgetHasBackgroundGradient(widget)) {
+        try builder.fillRoundedRect(.{ .id = base_id, .rect = widget.frame, .radius = radius, .fill = widgetBackgroundFill(widget, fallback) });
+        return;
+    }
+
+    try builder.pushClip(.{
+        .id = widgetBackgroundPresentationId(widget.id),
+        .rect = widget.frame,
+        .presentation_layer = .gpu_underlay,
+    });
+    var layer_index: usize = 0;
+    for (widget.immediate_commands) |command| switch (command) {
+        .background_gradient => |gradient| {
+            try builder.fillRoundedRect(.{
+                .id = if (layer_index == 0) base_id else widgetBackgroundLayerId(widget.id, layer_index),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = widgetGradientFill(widget, gradient),
+            });
+            layer_index += 1;
+        },
+        .background_mesh_gradient => |gradient| {
+            try builder.fillRoundedRect(.{
+                .id = if (layer_index == 0) base_id else widgetBackgroundLayerId(widget.id, layer_index),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = try widgetMeshGradientFill(builder, widget, gradient),
+            });
+            layer_index += 1;
+        },
+        else => {},
+    };
+    try builder.popClip();
+}
+
+pub fn emitWidgetRectBackground(builder: *Builder, widget: Widget, fallback: Color, base_id: ObjectId) Error!void {
+    if (interactionBackground(widget) != null or !widgetHasBackgroundGradient(widget)) {
+        try builder.fillRect(.{ .id = base_id, .rect = widget.frame, .fill = widgetBackgroundFill(widget, fallback) });
+        return;
+    }
+
+    try builder.pushClip(.{
+        .id = widgetBackgroundPresentationId(widget.id),
+        .rect = widget.frame,
+        .presentation_layer = .gpu_underlay,
+    });
+    var layer_index: usize = 0;
+    for (widget.immediate_commands) |command| switch (command) {
+        .background_gradient => |gradient| {
+            try builder.fillRect(.{
+                .id = if (layer_index == 0) base_id else widgetBackgroundLayerId(widget.id, layer_index),
+                .rect = widget.frame,
+                .fill = widgetGradientFill(widget, gradient),
+            });
+            layer_index += 1;
+        },
+        .background_mesh_gradient => |gradient| {
+            try builder.fillRect(.{
+                .id = if (layer_index == 0) base_id else widgetBackgroundLayerId(widget.id, layer_index),
+                .rect = widget.frame,
+                .fill = try widgetMeshGradientFill(builder, widget, gradient),
+            });
+            layer_index += 1;
+        },
+        else => {},
+    };
+    try builder.popClip();
+}
+
+fn widgetMeshGradientFill(builder: *Builder, widget: Widget, gradient: WidgetMeshGradient) Error!Fill {
+    const patches = try builder.allocMeshPatches(gradient.patches.len);
+    for (gradient.patches, patches) |source, *destination| {
+        destination.colors = source.colors;
+        for (source.points, 0..) |point, index| destination.points[index] = widgetNormalizedPoint(widget, point);
+    }
+    return .{ .mesh_gradient = .{ .patches = patches, .interpolation = gradient.interpolation } };
+}
+
+fn widgetBackgroundLayerId(widget_id: ObjectId, layer_index: usize) ObjectId {
+    var hasher = std.hash.Wyhash.init(widget_id ^ 0x6772_6164_6965_6e74); // "gradient"
+    hasher.update(std.mem.asBytes(&layer_index));
+    const id = hasher.final();
+    return if (id == 0 or id == widget_id) widget_id ^ 0x8000_0000_0000_0000 else id;
+}
+
+fn widgetBackgroundPresentationId(widget_id: ObjectId) ObjectId {
+    var hasher = std.hash.Wyhash.init(widget_id ^ 0x756e_6465_726c_6179); // "underlay"
+    const id = hasher.final();
+    return if (id == 0 or id == widget_id) widget_id ^ 0x4000_0000_0000_0000 else id;
+}
+
+fn widgetNormalizedPoint(widget: Widget, point: geometry.PointF) geometry.PointF {
+    return .{
+        .x = widget.frame.x + widget.frame.width * point.x,
+        .y = widget.frame.y + widget.frame.height * point.y,
+    };
+}
+
+pub fn widgetBackgroundIsOpaque(widget: Widget, fallback: Color) bool {
+    if (interactionBackground(widget)) |background| return background.a >= 1;
+    var found_gradient = false;
+    for (widget.immediate_commands) |command| switch (command) {
+        .background_gradient => |gradient| {
+            found_gradient = true;
+            const stops = switch (gradient) {
+                .linear => |value| value.stops,
+                .radial => |value| value.stops,
+                .conic => |value| value.stops,
+            };
+            if (stops.len == 0) continue;
+            var fully_opaque = true;
+            for (stops) |stop| if (stop.color.a < 1) {
+                fully_opaque = false;
+                break;
+            };
+            // Once an opaque layer is present, transparent layers composited
+            // above it cannot make the final surface transparent again.
+            if (fully_opaque) return true;
+        },
+        // Opaque corner colors cannot prove the authored bicubic patch covers
+        // the whole widget box, so mesh backgrounds conservatively keep the
+        // surface translucent for shadow/occlusion decisions.
+        .background_mesh_gradient => found_gradient = true,
+        else => {},
+    };
+    if (found_gradient) return false;
+    return (widget.style.background orelse fallback).a >= 1;
 }
 
 pub fn widgetAccentFill(widget: Widget, fallback: Color) Fill {
@@ -251,17 +445,13 @@ pub fn controlRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32)
 }
 
 pub fn styleRadius(widget: Widget, base: Radius) Radius {
+    const corners = widget.cornerRadii();
     return .{
-        .top_left = cornerRadius(widget.style.radius_top_left, base.top_left),
-        .top_right = cornerRadius(widget.style.radius_top_right, base.top_right),
-        .bottom_right = cornerRadius(widget.style.radius_bottom_right, base.bottom_right),
-        .bottom_left = cornerRadius(widget.style.radius_bottom_left, base.bottom_left),
+        .top_left = nonNegative(corners.top_left orelse base.top_left),
+        .top_right = nonNegative(corners.top_right orelse base.top_right),
+        .bottom_right = nonNegative(corners.bottom_right orelse base.bottom_right),
+        .bottom_left = nonNegative(corners.bottom_left orelse base.bottom_left),
     };
-}
-
-fn cornerRadius(authored: f32, fallback: f32) f32 {
-    if (authored == widget_model.unset_widget_corner_radius) return nonNegative(fallback);
-    return nonNegative(authored);
 }
 
 /// Button corners: 10 (the lg radius token) at the default and lg

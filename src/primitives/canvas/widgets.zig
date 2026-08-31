@@ -392,13 +392,6 @@ pub const WidgetLayoutStyle = struct {
     aspect_ratio: f32 = 0,
 };
 
-/// Per-corner radii are hot-path style data on every retained node. Keep an
-/// unset corner in-band so four rare overrides cost four floats, not four
-/// optional-float payload/tag pairs. Negative infinity cannot collide with an
-/// authored radius: every finite negative author value remains an explicit
-/// override and resolves through the existing non-negative clamp.
-pub const unset_widget_corner_radius = -std.math.inf(f32);
-
 /// Optional visual overrides for one pointer-interaction state. A null
 /// channel inherits the base `WidgetStyle` channel, so authors can change one
 /// property without restating the others. Pressed wins over hovered when
@@ -428,6 +421,21 @@ pub const WidgetInteractionStyle = struct {
     shadow: WidgetInteractionShadow = .inherit,
 };
 
+/// Rare per-corner radius overrides. Uniform radius remains in WidgetStyle;
+/// asymmetric corners ride the retained metadata slice so every ordinary
+/// widget does not grow four hot-path floats.
+pub const WidgetCornerRadii = struct {
+    top_left: ?f32 = null,
+    top_right: ?f32 = null,
+    bottom_right: ?f32 = null,
+    bottom_left: ?f32 = null,
+
+    pub fn isDefault(self: WidgetCornerRadii) bool {
+        return self.top_left == null and self.top_right == null and
+            self.bottom_right == null and self.bottom_left == null;
+    }
+};
+
 pub const WidgetStyle = struct {
     background: ?Color = null,
     foreground: ?Color = null,
@@ -436,10 +444,6 @@ pub const WidgetStyle = struct {
     border: ?Color = null,
     focus_ring: ?Color = null,
     radius: ?f32 = null,
-    radius_top_left: f32 = unset_widget_corner_radius,
-    radius_top_right: f32 = unset_widget_corner_radius,
-    radius_bottom_right: f32 = unset_widget_corner_radius,
-    radius_bottom_left: f32 = unset_widget_corner_radius,
     stroke_width: ?f32 = null,
     /// The quiet-surface knob: `true` removes this widget's HOVER wash —
     /// the pointer resting on it paints no fill. For image-forward
@@ -802,6 +806,52 @@ pub const WidgetIconPath = struct {
     stroke_width: f32 = 0,
 };
 
+/// Box-relative linear-gradient geometry for a retained widget background.
+/// Start and end coordinates are normalized to the laid-out widget frame, so
+/// the same retained value follows resizing without author-side recomputation.
+pub const WidgetLinearGradient = struct {
+    start: geometry.PointF,
+    end: geometry.PointF,
+    stops: []const canvas.GradientStop,
+    spread: canvas.GradientSpread = .pad,
+    interpolation: canvas.GradientInterpolation = .srgb_linear,
+};
+
+pub const WidgetRadialGradient = struct {
+    center: geometry.PointF,
+    radii: geometry.SizeF,
+    stops: []const canvas.GradientStop,
+    spread: canvas.GradientSpread = .pad,
+    interpolation: canvas.GradientInterpolation = .srgb_linear,
+};
+
+pub const WidgetConicGradient = struct {
+    center: geometry.PointF,
+    start_angle_radians: f32 = 0,
+    stops: []const canvas.GradientStop,
+    spread: canvas.GradientSpread = .pad,
+    interpolation: canvas.GradientInterpolation = .srgb_linear,
+};
+
+pub const WidgetGradient = union(enum) {
+    linear: WidgetLinearGradient,
+    radial: WidgetRadialGradient,
+    conic: WidgetConicGradient,
+};
+
+/// A mesh patch authored in normalized widget-box coordinates. The renderer
+/// resolves all sixteen points only after layout, matching the other retained
+/// gradient geometries without inflating the common Widget shape.
+pub const WidgetMeshPatch = struct {
+    points: [16]geometry.PointF,
+    colors: [4]Color,
+};
+
+pub const WidgetMeshGradient = struct {
+    patches: []const WidgetMeshPatch,
+    interpolation: canvas.GradientInterpolation = .srgb_linear,
+};
+
 /// One local-space immediate drawing command attached to a retained widget,
 /// or rare metadata sharing the same retained side channel. The renderer
 /// translates drawing coordinates into the laid-out frame and skips metadata.
@@ -820,6 +870,15 @@ pub const ImmediateCanvasCommand = union(enum) {
     text_font: FontId,
     /// Retained vector geometry for a path-authored icon. Metadata only.
     icon_path: WidgetIconPath,
+    /// Rare retained background paint. The renderer resolves normalized
+    /// geometry after layout and lowers it into the canvas gradient primitive.
+    background_gradient: WidgetGradient,
+    /// Two-dimensional retained background paint. Patches stay normalized in
+    /// metadata and are materialized into builder-owned absolute geometry.
+    background_mesh_gradient: WidgetMeshGradient,
+    /// Asymmetric retained corner geometry. Uniform radius stays in the
+    /// compact WidgetStyle; only widgets with an override carry this entry.
+    corner_radii: WidgetCornerRadii,
     /// Rare retained visual metadata rides the existing command slice rather
     /// than enlarging every Widget. Emitters consume these entries as style;
     /// immediate canvases never draw them.
@@ -1013,6 +1072,14 @@ pub const Widget = struct {
             else => {},
         };
         return null;
+    }
+
+    pub fn cornerRadii(self: Widget) WidgetCornerRadii {
+        for (self.immediate_commands) |command| switch (command) {
+            .corner_radii => |radii| return radii,
+            else => {},
+        };
+        return .{};
     }
 };
 

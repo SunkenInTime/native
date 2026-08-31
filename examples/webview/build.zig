@@ -233,6 +233,8 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         app_mod.linkFramework("Security", .{});
         app_mod.linkFramework("Metal", .{});
         app_mod.linkFramework("QuartzCore", .{});
+        app_mod.linkFramework("CoreVideo", .{});
+        app_mod.linkFramework("IOSurface", .{});
         app_mod.linkSystemLibrary("c", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("c++", .{});
     } else if (platform == .linux) {
@@ -269,6 +271,7 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 // fails the compile by design if it cannot be found.
                 app_mod.addIncludePath(nativeSdkPath(b, native_sdk_path, "third_party/webview2/include"));
                 app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{"-std=c++17"} });
+                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/shared_renderer_client.cpp"), .flags = &.{"-std=c++17"} });
                 // WebView2Loader.dll rides next to the installed app
                 // executable: the host loads it at runtime to discover
                 // the machine's WebView2 runtime. Canvas apps never
@@ -304,6 +307,8 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         app_mod.linkSystemLibrary("mf", .{});
         app_mod.linkSystemLibrary("mfplat", .{});
         app_mod.linkSystemLibrary("winhttp", .{});
+        app_mod.linkSystemLibrary("dcomp", .{});
+        app_mod.linkSystemLibrary("dwmapi", .{});
         if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
     }
 }

@@ -1,4 +1,5 @@
 #include "shared_renderer_client.h"
+#include "shared_renderer_policy.h"
 #include "renderer_protocol.h"
 
 #include <dcomp.h>
@@ -30,6 +31,7 @@ struct NativeSdkSharedRendererClient {
     uint64_t visual_geometry_generation = 0;
     uint32_t visual_width_px = 0;
     uint32_t visual_height_px = 0;
+    bool connect_attempted = false;
     std::string last_failure;
 };
 
@@ -124,6 +126,9 @@ static void disconnectRenderer(NativeSdkSharedRendererClient *client) {
     client->visual.Reset();
     client->target.Reset();
     client->composition.Reset();
+    if (client->window) {
+        RemovePropW(client->window, kWeaverSharedCompositionSurfaceProperty);
+    }
     if (client->surface_handle) CloseHandle(client->surface_handle);
     client->surface_handle = nullptr;
     client->visual_geometry_generation = 0;
@@ -159,8 +164,12 @@ static bool connectRenderer(NativeSdkSharedRendererClient *client) {
     // widget. Creating the process and publishing its first pipe instance is
     // asynchronous, so the first surface establishment gets one bounded
     // lifecycle wait. Connected frames never take this path, and later
-    // recovery attempts use the same bound without introducing frame churn.
-    const uint64_t deadline = GetTickCount64() + 2000;
+    // recovery attempts use a short bound and arrive only from the host's
+    // low-frequency recovery pump.
+    const uint32_t timeout_ms = weaverSharedRendererConnectTimeoutMs(
+        client->connect_attempted);
+    client->connect_attempted = true;
+    const uint64_t deadline = GetTickCount64() + timeout_ms;
     bool pipe_ready = false;
     do {
         pipe_ready = WaitNamedPipeW(client->pipe_name.c_str(), 100) != FALSE;
@@ -216,6 +225,11 @@ NativeSdkSharedRendererClient *nativeSdkSharedRendererClientCreate(HWND window) 
     client->window = window;
     client->pipe_name.assign(pipe_name, length);
     return client;
+}
+
+bool nativeSdkSharedRendererClientEnsureConnected(
+    NativeSdkSharedRendererClient *client) {
+    return client && connectRenderer(client);
 }
 
 void nativeSdkSharedRendererClientDestroy(NativeSdkSharedRendererClient *client) {
@@ -279,7 +293,8 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
     double logical_width, double logical_height, double scale,
     const NativeSdkSharedRendererGeometry *geometry,
     uint8_t clear_r, uint8_t clear_g, uint8_t clear_b, uint8_t clear_a,
-    const uint8_t *packet, size_t packet_len, uint64_t retained_generation,
+    const uint8_t *packet, size_t packet_len, int retained_composite,
+    uint64_t retained_generation,
     size_t retained_width, size_t retained_height, const float *retained_dirty_rects,
     size_t retained_dirty_rect_count, const uint8_t *retained_rgba8,
     size_t retained_rgba8_len) {
@@ -289,7 +304,8 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
             logical_height, scale);
         return false;
     }
-    if (!packet || packet_len == 0 || packet_len > kWeaverRendererMaxPacket) {
+    if (!packet || packet_len == 0 || packet_len > kWeaverRendererMaxPacket ||
+        (retained_composite != 0 && retained_composite != 1)) {
         logSharedFailure(client, "invalid-packet", logical_width,
             logical_height, scale, geometry);
         return false;
@@ -328,6 +344,7 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
     frame.clear_g = clear_g;
     frame.clear_b = clear_b;
     frame.clear_a = clear_a;
+    frame.retained_above_packet = static_cast<uint32_t>(retained_composite);
     if (retained_generation != 0) {
         if (retained_width != geometry->source_texture_width_px ||
             retained_height != geometry->source_texture_height_px ||
@@ -392,6 +409,11 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
             return false;
         }
         client->surface = surface;
+        if (!SetPropW(client->window,
+                kWeaverSharedCompositionSurfaceProperty, replacement)) {
+            logSharedFailure(client, "publish-composition-handle",
+                logical_width, logical_height, scale, geometry);
+        }
         if (client->surface_handle) CloseHandle(client->surface_handle);
         client->surface_handle = replacement;
         const char *action = client->visual_geometry_generation == 0 ? "created-rebound" : "resized-rebound";

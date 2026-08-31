@@ -5,6 +5,7 @@ pub const launch_timing = @import("launch_timing.zig");
 
 pub const max_canvas_commands_per_view = core.max_canvas_commands_per_view;
 pub const max_canvas_gradient_stops_per_view = core.max_canvas_gradient_stops_per_view;
+pub const max_canvas_mesh_patches_per_view = core.max_canvas_mesh_patches_per_view;
 pub const max_canvas_path_elements_per_view = core.max_canvas_path_elements_per_view;
 pub const max_canvas_glyphs_per_view = core.max_canvas_glyphs_per_view;
 pub const max_canvas_text_bytes_per_view = core.max_canvas_text_bytes_per_view;

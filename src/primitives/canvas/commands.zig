@@ -33,6 +33,11 @@ const TextLine = text_model.TextLine;
 const TextLayoutPlan = text_model.TextLayoutPlan;
 const TextLayoutPlanSet = text_model.TextLayoutPlanSet;
 const TextLayoutPlanner = text_model.TextLayoutPlanner;
+
+/// A retained widget background may materialize the full bounded mesh into a
+/// builder before the runtime copies it into view-owned storage. Keep this in
+/// lockstep with the runtime's per-view mesh-patch budget.
+pub const max_builder_mesh_patches: usize = 16;
 const RenderCommand = render_model.RenderCommand;
 const RenderPlan = render_model.RenderPlan;
 const RenderPlanner = render_model.RenderPlanner;
@@ -349,8 +354,14 @@ pub const DisplayList = struct {
 /// half-full bound; small or oversized lists keep the linear scans.
 const diff_id_index_slots = 4096;
 const DiffIdIndex = plan_key_index.HashSlots(diff_id_index_slots);
-threadlocal var diff_previous_id_index: DiffIdIndex = .{};
-threadlocal var diff_next_id_index: DiffIdIndex = .{};
+// Lazily heap-allocated per thread (32 KiB of probe tables): reset per
+// diff, so first-use init on the diffing thread is the only contract —
+// threads that never diff never allocate it.
+const DiffIdScratch = struct {
+    previous: DiffIdIndex = .{},
+    next: DiffIdIndex = .{},
+};
+const diff_id_scratch = @import("lazy_tls.zig").LazyTls(DiffIdScratch);
 
 /// Fill `table` with the keyed commands' id->index mapping, erroring on
 /// the duplicate ids `validateUniqueObjectIds` rejects — one pass does
@@ -387,9 +398,10 @@ fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChan
         next.commands.len >= plan_key_index.min_entries_for_index) and
         plan_key_index.fitsHashSlots(diff_id_index_slots, previous.commands.len) and
         plan_key_index.fitsHashSlots(diff_id_index_slots, next.commands.len);
-    if (use_index) {
-        try buildDiffIdIndex(previous, &diff_previous_id_index);
-        try buildDiffIdIndex(next, &diff_next_id_index);
+    const id_scratch: ?*DiffIdScratch = if (use_index) diff_id_scratch.get() else null;
+    if (id_scratch) |scratch| {
+        try buildDiffIdIndex(previous, &scratch.previous);
+        try buildDiffIdIndex(next, &scratch.next);
     } else {
         try validateUniqueObjectIds(previous);
         try validateUniqueObjectIds(next);
@@ -418,7 +430,7 @@ fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChan
 
     for (previous.commands, 0..) |previous_command, previous_index| {
         const id = previous_command.objectId() orelse continue;
-        const next_lookup = if (use_index) findCommandByIdIndexed(next, &diff_next_id_index, id) else next.findCommandById(id);
+        const next_lookup = if (id_scratch) |scratch| findCommandByIdIndexed(next, &scratch.next, id) else next.findCommandById(id);
         const next_ref = next_lookup orelse {
             try appendDiffChange(output, &len, .{
                 .kind = .removed,
@@ -442,7 +454,7 @@ fn diffDisplayLists(previous: DisplayList, next: DisplayList, output: []DiffChan
 
     for (next.commands, 0..) |next_command, next_index| {
         const id = next_command.objectId() orelse continue;
-        const previous_lookup = if (use_index) findCommandByIdIndexed(previous, &diff_previous_id_index, id) else previous.findCommandById(id);
+        const previous_lookup = if (id_scratch) |scratch| findCommandByIdIndexed(previous, &scratch.previous, id) else previous.findCommandById(id);
         if (previous_lookup == null) {
             try appendDiffChange(output, &len, .{
                 .kind = .added,
@@ -538,6 +550,8 @@ pub const Builder = struct {
     /// anyway.
     path_elements: [chart_model.max_chart_path_elements_per_frame]drawing_model.PathElement = undefined,
     path_element_len: usize = 0,
+    mesh_patches: [max_builder_mesh_patches]drawing_model.MeshPatch = undefined,
+    mesh_patch_len: usize = 0,
 
     pub fn init(commands: []CanvasCommand) Builder {
         return .{ .commands = commands };
@@ -546,6 +560,7 @@ pub const Builder = struct {
     pub fn reset(self: *Builder) void {
         self.len = 0;
         self.path_element_len = 0;
+        self.mesh_patch_len = 0;
     }
 
     /// Reserve `count` path elements in the builder-owned store. The
@@ -557,6 +572,13 @@ pub const Builder = struct {
         const start = self.path_element_len;
         self.path_element_len += count;
         return self.path_elements[start..self.path_element_len];
+    }
+
+    pub fn allocMeshPatches(self: *Builder, count: usize) error{MeshPatchListFull}![]drawing_model.MeshPatch {
+        if (self.mesh_patch_len + count > self.mesh_patches.len) return error.MeshPatchListFull;
+        const start = self.mesh_patch_len;
+        self.mesh_patch_len += count;
+        return self.mesh_patches[start..self.mesh_patch_len];
     }
 
     pub fn displayList(self: *const Builder) DisplayList {

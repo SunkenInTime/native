@@ -358,9 +358,21 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 // refused; the next one starts clean. The TestHarness's
                 // `.propagate` policy still returns the error so tests
                 // fail loud instead of leaving silent stale frames.
-                .gpu_surface_frame => |frame_event| GpuSurfaceEventMethods().dispatchGpuSurfaceFrame(self, app, frame_event) catch |err| {
-                    recordDispatchError(self, "gpu_surface_frame", err);
-                    if (self.dispatch_error_policy == .propagate) return err;
+                .gpu_surface_frame => |frame_event| {
+                    GpuSurfaceEventMethods().dispatchGpuSurfaceFrame(self, app, frame_event) catch |err| {
+                        recordDispatchError(self, "gpu_surface_frame", err);
+                        if (self.dispatch_error_policy == .propagate) return err;
+                    };
+                    // A gpu_surface completion is the presentation boundary
+                    // automation needs to observe. Publish here without
+                    // synthesizing a general lifecycle frame: doing that in
+                    // the Windows host fed UiApp's frame callback back into
+                    // the surface scheduler and turned an idle view into an
+                    // unbounded frame loop.
+                    publishAutomation(self) catch |err| {
+                        recordDispatchError(self, "automation.gpu_surface_frame", err);
+                        if (self.dispatch_error_policy == .propagate) return err;
+                    };
                 },
                 .gpu_surface_resized => |resize_event| {
                     GpuSurfaceEventMethods().dispatchGpuSurfaceResized(self, app, resize_event) catch |err| {

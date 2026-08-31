@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const canvas_frame_helpers = @import("canvas_frame.zig");
@@ -6,6 +7,7 @@ const platform = @import("../platform/root.zig");
 
 const max_canvas_commands_per_view = canvas_limits.max_canvas_commands_per_view;
 const max_canvas_gradient_stops_per_view = canvas_limits.max_canvas_gradient_stops_per_view;
+const max_canvas_mesh_patches_per_view = canvas_limits.max_canvas_mesh_patches_per_view;
 const max_canvas_path_elements_per_view = canvas_limits.max_canvas_path_elements_per_view;
 const max_canvas_glyphs_per_view = canvas_limits.max_canvas_glyphs_per_view;
 const max_canvas_text_bytes_per_view = canvas_limits.max_canvas_text_bytes_per_view;
@@ -17,6 +19,67 @@ const canvasRenderOverrideNoop = canvas_frame_helpers.canvasRenderOverrideNoop;
 const canvasRenderAnimationFinalOverrideNoop = canvas_frame_helpers.canvasRenderAnimationFinalOverrideNoop;
 const canvasRenderAnimationActive = canvas_frame_helpers.canvasRenderAnimationActive;
 const platformCanvasFrameProfileRisk = canvas_frame_helpers.platformCanvasFrameProfileRisk;
+
+fn canvasColorIsFinite(color: canvas.Color) bool {
+    return std.math.isFinite(color.r) and
+        std.math.isFinite(color.g) and
+        std.math.isFinite(color.b) and
+        std.math.isFinite(color.a);
+}
+
+fn canvasPointIsFinite(point: geometry.PointF) bool {
+    return std.math.isFinite(point.x) and std.math.isFinite(point.y);
+}
+
+fn validateCanvasGradientStops(stops: []const canvas.GradientStop) error{InvalidCanvasGradient}!void {
+    for (stops) |stop| {
+        if (!std.math.isFinite(stop.offset) or !canvasColorIsFinite(stop.color)) {
+            return error.InvalidCanvasGradient;
+        }
+    }
+}
+
+pub fn validateCanvasFill(fill: canvas.Fill) error{InvalidCanvasGradient}!void {
+    switch (fill) {
+        .color => {},
+        .linear_gradient => |gradient| {
+            if (!canvasPointIsFinite(gradient.start) or !canvasPointIsFinite(gradient.end)) {
+                return error.InvalidCanvasGradient;
+            }
+            try validateCanvasGradientStops(gradient.stops);
+        },
+        .radial_gradient => |gradient| {
+            // The retained contract is deliberately stricter than CSS's
+            // zero-radius degenerate cases: every backend must agree on the
+            // pixels before those cases can be admitted.
+            if (!canvasPointIsFinite(gradient.center) or
+                !std.math.isFinite(gradient.radii.width) or
+                !std.math.isFinite(gradient.radii.height) or
+                gradient.radii.width <= 0 or
+                gradient.radii.height <= 0)
+            {
+                return error.InvalidCanvasGradient;
+            }
+            try validateCanvasGradientStops(gradient.stops);
+        },
+        .conic_gradient => |gradient| {
+            if (!canvasPointIsFinite(gradient.center) or !std.math.isFinite(gradient.start_angle_radians)) {
+                return error.InvalidCanvasGradient;
+            }
+            try validateCanvasGradientStops(gradient.stops);
+        },
+        .mesh_gradient => |gradient| {
+            for (gradient.patches) |patch| {
+                for (patch.points) |point| {
+                    if (!canvasPointIsFinite(point)) return error.InvalidCanvasGradient;
+                }
+                for (patch.colors) |color| {
+                    if (!canvasColorIsFinite(color)) return error.InvalidCanvasGradient;
+                }
+            }
+        },
+    }
+}
 
 pub const CanvasWidgetDisplayListChrome = struct {
     prefix_command_count: usize = 0,
@@ -32,6 +95,7 @@ pub const CanvasRenderAnimationDirtyBounds = struct {
 pub const CanvasResourceCounts = struct {
     command_count: usize = 0,
     gradient_stop_count: usize = 0,
+    mesh_patch_count: usize = 0,
     path_element_count: usize = 0,
     glyph_count: usize = 0,
     text_byte_count: usize = 0,
@@ -73,9 +137,13 @@ pub const CanvasResourceCounts = struct {
     }
 
     pub fn addFill(self: *CanvasResourceCounts, fill: canvas.Fill) anyerror!void {
+        try validateCanvasFill(fill);
         switch (fill) {
             .color => {},
             .linear_gradient => |gradient| try addCanvasCount(&self.gradient_stop_count, gradient.stops.len, max_canvas_gradient_stops_per_view, error.CanvasGradientStopLimitReached),
+            .radial_gradient => |gradient| try addCanvasCount(&self.gradient_stop_count, gradient.stops.len, max_canvas_gradient_stops_per_view, error.CanvasGradientStopLimitReached),
+            .conic_gradient => |gradient| try addCanvasCount(&self.gradient_stop_count, gradient.stops.len, max_canvas_gradient_stops_per_view, error.CanvasGradientStopLimitReached),
+            .mesh_gradient => |gradient| try addCanvasCount(&self.mesh_patch_count, gradient.patches.len, max_canvas_mesh_patches_per_view, error.CanvasMeshPatchLimitReached),
         }
     }
 };
@@ -83,6 +151,8 @@ pub const CanvasResourceCounts = struct {
 pub const CanvasDisplayListScratch = struct {
     gradient_stops: [max_canvas_gradient_stops_per_view]canvas.GradientStop = undefined,
     gradient_stop_count: usize = 0,
+    mesh_patches: [max_canvas_mesh_patches_per_view]canvas.MeshPatch = undefined,
+    mesh_patch_count: usize = 0,
     path_elements: [max_canvas_path_elements_per_view]canvas.PathElement = undefined,
     path_element_count: usize = 0,
     glyphs: [max_canvas_glyphs_per_view]canvas.Glyph = undefined,
@@ -152,12 +222,33 @@ pub const CanvasDisplayListScratch = struct {
     }
 
     pub fn copyCanvasFill(self: *CanvasDisplayListScratch, fill: canvas.Fill) anyerror!canvas.Fill {
+        try validateCanvasFill(fill);
         return switch (fill) {
             .color => |color| .{ .color = color },
             .linear_gradient => |gradient| .{ .linear_gradient = .{
                 .start = gradient.start,
                 .end = gradient.end,
                 .stops = try self.copyCanvasGradientStops(gradient.stops),
+                .spread = gradient.spread,
+                .interpolation = gradient.interpolation,
+            } },
+            .radial_gradient => |gradient| .{ .radial_gradient = .{
+                .center = gradient.center,
+                .radii = gradient.radii,
+                .stops = try self.copyCanvasGradientStops(gradient.stops),
+                .spread = gradient.spread,
+                .interpolation = gradient.interpolation,
+            } },
+            .conic_gradient => |gradient| .{ .conic_gradient = .{
+                .center = gradient.center,
+                .start_angle_radians = gradient.start_angle_radians,
+                .stops = try self.copyCanvasGradientStops(gradient.stops),
+                .spread = gradient.spread,
+                .interpolation = gradient.interpolation,
+            } },
+            .mesh_gradient => |gradient| .{ .mesh_gradient = .{
+                .patches = try self.copyCanvasMeshPatches(gradient.patches),
+                .interpolation = gradient.interpolation,
             } },
         };
     }
@@ -169,6 +260,15 @@ pub const CanvasDisplayListScratch = struct {
         @memcpy(self.gradient_stops[start..end], stops);
         self.gradient_stop_count = end;
         return self.gradient_stops[start..end];
+    }
+
+    pub fn copyCanvasMeshPatches(self: *CanvasDisplayListScratch, patches: []const canvas.MeshPatch) anyerror![]const canvas.MeshPatch {
+        const end = self.mesh_patch_count + patches.len;
+        if (end > self.mesh_patches.len) return error.CanvasMeshPatchLimitReached;
+        const start = self.mesh_patch_count;
+        @memcpy(self.mesh_patches[start..end], patches);
+        self.mesh_patch_count = end;
+        return self.mesh_patches[start..end];
     }
 
     pub fn copyCanvasPathElements(self: *CanvasDisplayListScratch, elements: []const canvas.PathElement) anyerror![]const canvas.PathElement {
@@ -209,8 +309,14 @@ fn addCanvasCount(value: *usize, amount: usize, max_value: usize, comptime failu
 /// the half-full bound; small lists keep the linear scans.
 const summary_id_index_slots = 4096;
 const SummaryIdIndex = canvas.plan_key_index.HashSlots(summary_id_index_slots);
-threadlocal var summary_current_id_index: SummaryIdIndex = .{};
-threadlocal var summary_presented_id_index: SummaryIdIndex = .{};
+// Lazily heap-allocated per thread (32 KiB of probe tables): reset per
+// diff, so first-use init on the diffing thread is the only contract —
+// threads that never diff summaries never allocate it.
+const SummaryIdScratch = struct {
+    current: SummaryIdIndex = .{},
+    presented: SummaryIdIndex = .{},
+};
+const summary_id_scratch = canvas.lazy_tls.LazyTls(SummaryIdScratch);
 
 pub const PresentedCanvasCommand = struct {
     id: ?canvas.ObjectId = null,
@@ -308,6 +414,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
 
             self.canvas_command_count = 0;
             self.canvas_gradient_stop_count = 0;
+            self.canvas_mesh_patch_count = 0;
             self.canvas_path_element_count = 0;
             self.canvas_glyph_count = 0;
             self.canvas_text_len = 0;
@@ -680,28 +787,29 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
                 presented.len >= canvas.plan_key_index.min_entries_for_index) and
                 canvas.plan_key_index.fitsHashSlots(summary_id_index_slots, current_commands.len) and
                 canvas.plan_key_index.fitsHashSlots(summary_id_index_slots, presented.len);
-            if (use_index) {
-                summary_current_id_index.reset();
+            const id_scratch: ?*SummaryIdScratch = if (use_index) summary_id_scratch.get() else null;
+            if (id_scratch) |scratch| {
+                scratch.current.reset();
                 for (current_commands, 0..) |command, index| {
                     const id = command.objectId() orelse continue;
                     var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
-                    while (summary_current_id_index.next(&p)) |_| {}
-                    summary_current_id_index.insert(p, @intCast(index));
+                    while (scratch.current.next(&p)) |_| {}
+                    scratch.current.insert(p, @intCast(index));
                 }
-                summary_presented_id_index.reset();
+                scratch.presented.reset();
                 for (presented, 0..) |command, index| {
                     const id = command.id orelse continue;
                     var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
-                    while (summary_presented_id_index.next(&p)) |_| {}
-                    summary_presented_id_index.insert(p, @intCast(index));
+                    while (scratch.presented.next(&p)) |_| {}
+                    scratch.presented.insert(p, @intCast(index));
                 }
             }
 
             var len: usize = 0;
             for (presented) |previous| {
                 const id = previous.id orelse continue;
-                const current_ref = if (use_index)
-                    currentCanvasCommandByIdIndexed(current_commands, id)
+                const current_ref = if (id_scratch) |scratch|
+                    currentCanvasCommandByIdIndexed(&scratch.current, current_commands, id)
                 else
                     self.currentCanvasCommandById(id);
                 if (current_ref == null) {
@@ -716,8 +824,8 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             for (current_commands, 0..) |command, index| {
                 const id = command.objectId() orelse continue;
                 const bounds = command.bounds();
-                const previous_ref = if (use_index)
-                    presentedCanvasCommandByIdIndexed(presented, id)
+                const previous_ref = if (id_scratch) |scratch|
+                    presentedCanvasCommandByIdIndexed(&scratch.presented, presented, id)
                 else
                     self.presentedCanvasCommandById(id);
                 if (previous_ref) |previous| {
@@ -741,17 +849,17 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             return output[0..len];
         }
 
-        fn currentCanvasCommandByIdIndexed(commands: []const canvas.CanvasCommand, id: canvas.ObjectId) ?canvas.CommandRef {
+        fn currentCanvasCommandByIdIndexed(current_index: *const SummaryIdIndex, commands: []const canvas.CanvasCommand, id: canvas.ObjectId) ?canvas.CommandRef {
             var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
-            while (summary_current_id_index.next(&p)) |candidate| {
+            while (current_index.next(&p)) |candidate| {
                 if (commands[candidate].objectId() == id) return .{ .index = candidate, .command = commands[candidate] };
             }
             return null;
         }
 
-        fn presentedCanvasCommandByIdIndexed(presented: []const PresentedCanvasCommand, id: canvas.ObjectId) ?PresentedCanvasCommandRef {
+        fn presentedCanvasCommandByIdIndexed(presented_index: *const SummaryIdIndex, presented: []const PresentedCanvasCommand, id: canvas.ObjectId) ?PresentedCanvasCommandRef {
             var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
-            while (summary_presented_id_index.next(&p)) |candidate| {
+            while (presented_index.next(&p)) |candidate| {
                 if (presented[candidate].id == id) return .{ .index = candidate, .command = presented[candidate] };
             }
             return null;
@@ -834,12 +942,33 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn copyCanvasFill(self: *RuntimeView, fill: canvas.Fill) anyerror!canvas.Fill {
+            try validateCanvasFill(fill);
             return switch (fill) {
                 .color => |color| .{ .color = color },
                 .linear_gradient => |gradient| .{ .linear_gradient = .{
                     .start = gradient.start,
                     .end = gradient.end,
                     .stops = try self.copyCanvasGradientStops(gradient.stops),
+                    .spread = gradient.spread,
+                    .interpolation = gradient.interpolation,
+                } },
+                .radial_gradient => |gradient| .{ .radial_gradient = .{
+                    .center = gradient.center,
+                    .radii = gradient.radii,
+                    .stops = try self.copyCanvasGradientStops(gradient.stops),
+                    .spread = gradient.spread,
+                    .interpolation = gradient.interpolation,
+                } },
+                .conic_gradient => |gradient| .{ .conic_gradient = .{
+                    .center = gradient.center,
+                    .start_angle_radians = gradient.start_angle_radians,
+                    .stops = try self.copyCanvasGradientStops(gradient.stops),
+                    .spread = gradient.spread,
+                    .interpolation = gradient.interpolation,
+                } },
+                .mesh_gradient => |gradient| .{ .mesh_gradient = .{
+                    .patches = try self.copyCanvasMeshPatches(gradient.patches),
+                    .interpolation = gradient.interpolation,
                 } },
             };
         }
@@ -851,6 +980,15 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             @memcpy(self.canvas_gradient_stops[start..end], stops);
             self.canvas_gradient_stop_count = end;
             return self.canvas_gradient_stops[start..end];
+        }
+
+        pub fn copyCanvasMeshPatches(self: *RuntimeView, patches: []const canvas.MeshPatch) anyerror![]const canvas.MeshPatch {
+            const end = self.canvas_mesh_patch_count + patches.len;
+            if (end > self.canvas_mesh_patches.len) return error.CanvasMeshPatchLimitReached;
+            const start = self.canvas_mesh_patch_count;
+            @memcpy(self.canvas_mesh_patches[start..end], patches);
+            self.canvas_mesh_patch_count = end;
+            return self.canvas_mesh_patches[start..end];
         }
 
         pub fn copyCanvasPathElements(self: *RuntimeView, elements: []const canvas.PathElement) anyerror![]const canvas.PathElement {

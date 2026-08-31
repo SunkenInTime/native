@@ -44,6 +44,7 @@ const security = @import("../security/root.zig");
 const max_async_bridge_responses = runtime_async_bridge.max_async_bridge_responses;
 pub const max_canvas_commands_per_view = canvas_limits.max_canvas_commands_per_view;
 pub const max_canvas_gradient_stops_per_view = canvas_limits.max_canvas_gradient_stops_per_view;
+pub const max_canvas_mesh_patches_per_view = canvas_limits.max_canvas_mesh_patches_per_view;
 pub const max_canvas_path_elements_per_view = canvas_limits.max_canvas_path_elements_per_view;
 pub const max_canvas_glyphs_per_view = canvas_limits.max_canvas_glyphs_per_view;
 pub const max_canvas_text_bytes_per_view = canvas_limits.max_canvas_text_bytes_per_view;

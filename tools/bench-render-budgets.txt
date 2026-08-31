@@ -15,7 +15,9 @@
 # same change, with the reasoning in the commit.
 #
 # Calibration (healthy p50, median of 3): first-frame 4016, keystroke
-# 2064, toggle 6640, scroll 3418, chart-tick 43, doc-edit 1039.
+# 2064, toggle 6640, scroll 3418, chart-tick 43. Markdown was recalibrated
+# at 1583 after retained text styling made the fixture exercise its complete
+# production path; the previous 1039 sample predated that work.
 #
 # first-frame: noisiest scenario (12 iterations, cold caches by design);
 # observed 3971-5010 across healthy runs, so the budget carries extra
@@ -35,9 +37,27 @@ scroll-transcript 5000
 # the floor regressing toward O(view-size) cost (any planner/emit
 # regression lands it at several hundred us).
 chart-tick 200
+# gradient-grid-update: 16 retained linear gradients with four stops each
+# (the view-wide 64-stop ceiling), toggled through rebuild, emit, plan,
+# patch, binary encode, and present. Healthy p50 was 123-218us across full and
+# isolated ReleaseFast calibration (one isolated pass reached 296us); 500us
+# absorbs cold-process variance while still catching stop-count-linear work
+# leaking into a quadratic packet path. Host shader time is measured by the
+# live GPU lane.
+gradient-grid-update 500
+# mesh-grid-update: the complete 16-patch per-view ceiling (256 bicubic
+# control points and 64 corner colors), toggled through retained rebuild,
+# post-layout materialization, diff, binary encode, and packet present.
+# Warm isolated p50 was 116us; a cold compile/process pass reached 260us.
+# 500us keeps that startup variance green while catching an accidental
+# per-pixel/reference-render path or patch-count quadratic in the engine.
+# Windows shader time is a separate D3D timestamp lane.
+mesh-grid-update 500
 # markdown-doc-edit: guards markdown re-render + plan cost on a
-# README-sized doc; the pre-fix number was ~2400.
-markdown-doc-edit 1500
+# README-sized doc; healthy retained-text styling is 1583us and the old
+# full-plan regression was ~2400. The 2100us ratchet preserves that signal
+# while carrying the same ~1.3x noise headroom as the other scenarios.
+markdown-doc-edit 2100
 # keystroke-measured-text: guards the batched measure seam and its
 # retained caches on the provider path (a counting synthetic provider
 # stands in for CoreText). Healthy p50 ~540-660 across calibration runs.

@@ -1143,6 +1143,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        app_mod.linkFramework("Metal", .{});
         \\        app_mod.linkFramework("QuartzCore", .{});
         \\        app_mod.linkFramework("CoreVideo", .{});
+        \\        app_mod.linkFramework("IOSurface", .{});
         \\        app_mod.linkSystemLibrary("c", .{});
         \\        if (web_engine == .chromium) app_mod.linkSystemLibrary("c++", .{});
         \\    } else if (platform == .linux) {
@@ -1239,6 +1240,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        app_mod.linkSystemLibrary("mfplat", .{});
         \\        app_mod.linkSystemLibrary("winhttp", .{});
         \\        app_mod.linkSystemLibrary("dcomp", .{});
+        \\        app_mod.linkSystemLibrary("dwmapi", .{});
         \\        if (web_engine == .chromium) app_mod.linkSystemLibrary("libcef", .{});
         \\    }
         \\}

@@ -2183,12 +2183,13 @@ test "widget emitter applies surface control tokens" {
 }
 
 test "per-corner radius overrides stay compact without changing unset or negative semantics" {
-    try std.testing.expect(@sizeOf(WidgetStyle) <= 156);
+    try std.testing.expect(@sizeOf(WidgetStyle) <= 140);
     const base = Radius{ .top_left = 1, .top_right = 2, .bottom_right = 3, .bottom_left = 4 };
     try std.testing.expectEqualDeep(base, widget_render_style.styleRadius(.{ .kind = .panel }, base));
+    const radii = [_]canvas.ImmediateCanvasCommand{.{ .corner_radii = .{ .top_left = 7, .bottom_right = -2 } }};
     try std.testing.expectEqualDeep(
         Radius{ .top_left = 7, .top_right = 2, .bottom_right = 0, .bottom_left = 4 },
-        widget_render_style.styleRadius(.{ .kind = .panel, .style = .{ .radius_top_left = 7, .radius_bottom_right = -2 } }, base),
+        widget_render_style.styleRadius(.{ .kind = .panel, .immediate_commands = &radii }, base),
     );
 }
 
@@ -2220,16 +2221,15 @@ test "widget emitter applies control radius and stroke tokens" {
 
     var commands: [12]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
+    const panel_radii = [_]canvas.ImmediateCanvasCommand{.{ .corner_radii = .{ .top_left = 14, .bottom_right = 2 } }};
     try emitWidgetTree(&builder, .{ .id = 80, .kind = .button, .variant = .primary, .frame = geometry.RectF.init(0, 0, 120, 32), .text = "Save" }, tokens);
     try emitWidgetTree(&builder, .{ .id = 81, .kind = .text_field, .frame = geometry.RectF.init(0, 40, 160, 34), .text = "Name" }, tokens);
     try emitWidgetTree(&builder, .{ .id = 82, .kind = .checkbox, .frame = geometry.RectF.init(0, 86, 40, 24) }, tokens);
     try emitWidgetTree(&builder, .{ .id = 83, .kind = .panel, .frame = geometry.RectF.init(0, 120, 180, 90), .style = .{
         .radius = 6,
-        .radius_top_left = 14,
-        .radius_bottom_right = 2,
         .border = Color.rgb8(1, 2, 3),
         .stroke_width = 1,
-    } }, tokens);
+    }, .immediate_commands = &panel_radii }, tokens);
 
     // Buttons are flat, so the button's chrome sits at [0]/[1].
     const display_list = builder.displayList();

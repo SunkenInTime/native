@@ -145,13 +145,14 @@ test "ui stack exposes bounded rounded content clipping" {
         .width = 80,
         .height = 40,
         .clip_content = true,
-        .style = .{ .radius = 12, .radius_bottom_left = 3 },
+        .style = .{ .radius = 12 },
+        .corner_radii = .{ .bottom_left = 3 },
     }, .{ui.panel(.{ .width_percent = 100, .height_percent = 100 }, .{})}));
 
     try testing.expectEqual(canvas.WidgetKind.stack, tree.root.kind);
     try testing.expect(tree.root.layout.flags.clip_content);
     try testing.expectEqual(@as(?f32, 12), tree.root.style.radius);
-    try testing.expectEqual(@as(?f32, 3), tree.root.style.radius_bottom_left);
+    try testing.expectEqual(@as(?f32, 3), tree.root.cornerRadii().bottom_left);
     try testing.expectEqual(@as(usize, 1), tree.root.children.len);
 }
 
@@ -457,7 +458,8 @@ test "avatar and image sugar carry registered image ids" {
             .image_fit = .contain,
             .image_sampling = .nearest,
             .image_tile = true,
-            .style = .{ .radius = 9, .radius_bottom_left = 2 },
+            .style = .{ .radius = 9 },
+            .corner_radii = .{ .bottom_left = 2 },
             .semantics = .{ .label = "Chart" },
         }),
     }));
@@ -481,7 +483,7 @@ test "avatar and image sugar carry registered image ids" {
     try testing.expectEqual(canvas.ImageSampling.nearest, image_leaf.image_sampling);
     try testing.expect(image_leaf.image_tile);
     try testing.expectEqual(@as(?f32, 9), image_leaf.style.radius);
-    try testing.expectEqual(@as(?f32, 2), image_leaf.style.radius_bottom_left);
+    try testing.expectEqual(@as(?f32, 2), image_leaf.cornerRadii().bottom_left);
 }
 
 test "payload-carrying handlers build messages from edits and values" {

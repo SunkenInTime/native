@@ -945,10 +945,10 @@ test "widget text alignment emits local text layout options" {
     }
 }
 
-test "text-only styling does not grow the common retained Widget" {
-    // N3's compact common shape: future text-only metadata belongs in the
-    // existing rare-command side channel, not on every retained widget.
-    try std.testing.expectEqual(@as(usize, 728), @sizeOf(Widget));
+test "rare styling metadata does not grow the common retained Widget" {
+    // Text-only and asymmetric-corner metadata belong in the existing rare
+    // command side channel, not on every retained widget.
+    try std.testing.expectEqual(@as(usize, 712), @sizeOf(Widget));
 }
 
 test "panel chrome projects author inset shadow after its fill" {
@@ -979,6 +979,254 @@ test "panel chrome projects author inset shadow after its fill" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expect(builder.displayList().commands[2] == .stroke_rect);
+}
+
+test "panel chrome resolves a box-relative linear gradient after layout" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },
+        .{ .offset = 1, .color = Color.rgb8(217, 70, 239) },
+    };
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .linear = .{
+        .start = .{ .x = 0, .y = 0.5 },
+        .end = .{ .x = 1, .y = 0.5 },
+        .stops = &stops,
+    } } }};
+    const panel = Widget{
+        .id = 10,
+        .kind = .panel,
+        .frame = geometry.RectF.init(12, 20, 80, 40),
+        .immediate_commands = &effects,
+    };
+    var commands: [6]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, panel, .{});
+
+    for (builder.displayList().commands) |command| switch (command) {
+        .fill_rounded_rect => |fill| switch (fill.fill) {
+            .linear_gradient => |gradient| {
+                try std.testing.expectEqual(@as(f32, 12), gradient.start.x);
+                try std.testing.expectEqual(@as(f32, 40), gradient.start.y);
+                try std.testing.expectEqual(@as(f32, 92), gradient.end.x);
+                try std.testing.expectEqual(@as(f32, 40), gradient.end.y);
+                try std.testing.expectEqualSlices(GradientStop, &stops, gradient.stops);
+                return;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "panel chrome resolves box-relative radial and conic gradients after layout" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },
+        .{ .offset = 1, .color = Color.rgb8(217, 70, 239) },
+    };
+    const radial_effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .radial = .{
+        .center = .{ .x = 0.25, .y = 0.5 },
+        .radii = .{ .width = 0.5, .height = 0.25 },
+        .stops = &stops,
+        .spread = .repeat,
+        .interpolation = .oklab,
+    } } }};
+    const conic_effects = [_]canvas.ImmediateCanvasCommand{.{ .background_gradient = .{ .conic = .{
+        .center = .{ .x = 0.75, .y = 0.5 },
+        .start_angle_radians = 0.75,
+        .stops = &stops,
+        .spread = .reflect,
+        .interpolation = .srgb,
+    } } }};
+    const effects = [_][]const canvas.ImmediateCanvasCommand{ &radial_effects, &conic_effects };
+
+    for (effects, 0..) |panel_effects, index| {
+        const panel = Widget{
+            .id = 20 + index,
+            .kind = .panel,
+            .frame = geometry.RectF.init(12, 20, 80, 40),
+            .immediate_commands = panel_effects,
+        };
+        var commands: [6]CanvasCommand = undefined;
+        var builder = Builder.init(&commands);
+        try emitWidgetTree(&builder, panel, .{});
+        var found = false;
+        for (builder.displayList().commands) |command| switch (command) {
+            .fill_rounded_rect => |rounded| {
+                if (index == 0) switch (rounded.fill) {
+                    .radial_gradient => |gradient| {
+                        try std.testing.expectEqualDeep(geometry.PointF.init(32, 40), gradient.center);
+                        try std.testing.expectEqualDeep(geometry.SizeF.init(40, 10), gradient.radii);
+                        try std.testing.expectEqual(drawing_model.GradientSpread.repeat, gradient.spread);
+                        try std.testing.expectEqual(drawing_model.GradientInterpolation.oklab, gradient.interpolation);
+                        found = true;
+                    },
+                    else => {},
+                } else switch (rounded.fill) {
+                    .conic_gradient => |gradient| {
+                        try std.testing.expectEqualDeep(geometry.PointF.init(72, 40), gradient.center);
+                        try std.testing.expectEqual(@as(f32, 0.75), gradient.start_angle_radians);
+                        try std.testing.expectEqual(drawing_model.GradientSpread.reflect, gradient.spread);
+                        try std.testing.expectEqual(drawing_model.GradientInterpolation.srgb, gradient.interpolation);
+                        found = true;
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        };
+        try std.testing.expect(found);
+    }
+}
+
+test "panel chrome emits repeated gradients in bottom-to-top painter order" {
+    const bottom_stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(15, 23, 42) },
+        .{ .offset = 1, .color = Color.rgb8(30, 41, 59) },
+    };
+    const top_stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgba8(56, 189, 248, 192) },
+        .{ .offset = 1, .color = Color.rgba8(168, 85, 247, 0) },
+    };
+    const effects = [_]canvas.ImmediateCanvasCommand{
+        .{ .background_gradient = .{ .linear = .{
+            .start = .{ .x = 0, .y = 0.5 },
+            .end = .{ .x = 1, .y = 0.5 },
+            .stops = &bottom_stops,
+        } } },
+        .{ .background_gradient = .{ .radial = .{
+            .center = .{ .x = 0.25, .y = 0.5 },
+            .radii = .{ .width = 0.75, .height = 1 },
+            .stops = &top_stops,
+        } } },
+    };
+    const panel = Widget{
+        .id = 31,
+        .kind = .panel,
+        .frame = geometry.RectF.init(12, 20, 80, 40),
+        .immediate_commands = &effects,
+    };
+    var commands: [7]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, panel, .{});
+
+    var found_underlay_scope = false;
+    for (builder.displayList().commands) |command| switch (command) {
+        .push_clip => |clip| if (clip.presentation_layer == .gpu_underlay) {
+            found_underlay_scope = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(found_underlay_scope);
+
+    var layers: [2]FillRoundedRect = undefined;
+    var layer_count: usize = 0;
+    for (builder.displayList().commands) |command| switch (command) {
+        .fill_rounded_rect => |rounded| {
+            if (layer_count >= layers.len) return error.TestUnexpectedResult;
+            layers[layer_count] = rounded;
+            layer_count += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), layer_count);
+    try std.testing.expect(layers[0].id != layers[1].id);
+    try std.testing.expectEqualDeep(panel.frame, layers[0].rect);
+    try std.testing.expectEqualDeep(panel.frame, layers[1].rect);
+    switch (layers[0].fill) {
+        .linear_gradient => |gradient| try std.testing.expectEqualSlices(GradientStop, &bottom_stops, gradient.stops),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (layers[1].fill) {
+        .radial_gradient => |gradient| try std.testing.expectEqualSlices(GradientStop, &top_stops, gradient.stops),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "panel chrome resolves normalized mesh control points after layout" {
+    var points: [16]geometry.PointF = undefined;
+    for (0..4) |row| {
+        for (0..4) |column| {
+            points[row * 4 + column] = geometry.PointF.init(
+                @as(f32, @floatFromInt(column)) / 3,
+                @as(f32, @floatFromInt(row)) / 3,
+            );
+        }
+    }
+    const patches = [_]canvas.WidgetMeshPatch{.{
+        .points = points,
+        .colors = .{
+            Color.rgb8(255, 0, 0),
+            Color.rgb8(0, 255, 0),
+            Color.rgb8(0, 0, 255),
+            Color.rgb8(255, 255, 255),
+        },
+    }};
+    const effects = [_]canvas.ImmediateCanvasCommand{.{ .background_mesh_gradient = .{
+        .patches = &patches,
+        .interpolation = .oklab,
+    } }};
+    const panel = Widget{
+        .id = 32,
+        .kind = .panel,
+        .frame = geometry.RectF.init(12, 20, 80, 40),
+        .immediate_commands = &effects,
+    };
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, panel, .{});
+
+    for (builder.displayList().commands) |command| switch (command) {
+        .fill_rounded_rect => |rounded| switch (rounded.fill) {
+            .mesh_gradient => |gradient| {
+                try std.testing.expectEqual(@as(usize, 1), gradient.patches.len);
+                try std.testing.expectEqualDeep(geometry.PointF.init(12, 20), gradient.patches[0].points[0]);
+                try std.testing.expectEqualDeep(geometry.PointF.init(92, 60), gradient.patches[0].points[15]);
+                try std.testing.expectEqual(drawing_model.GradientInterpolation.oklab, gradient.interpolation);
+                return;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "pressed solid background overrides a retained widget gradient" {
+    const stops = [_]GradientStop{
+        .{ .offset = 0, .color = Color.rgb8(8, 145, 178) },
+        .{ .offset = 1, .color = Color.rgb8(217, 70, 239) },
+    };
+    const pressed = Color.rgb8(30, 41, 59);
+    const effects = [_]canvas.ImmediateCanvasCommand{
+        .{ .background_gradient = .{ .linear = .{
+            .start = .{ .x = 0, .y = 0.5 },
+            .end = .{ .x = 1, .y = 0.5 },
+            .stops = &stops,
+        } } },
+        .{ .pressed_style = .{ .background = pressed } },
+    };
+    const panel = Widget{
+        .id = 11,
+        .kind = .panel,
+        .frame = geometry.RectF.init(12, 20, 80, 40),
+        .state = .{ .pressed = true },
+        .immediate_commands = &effects,
+    };
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, panel, .{});
+
+    for (builder.displayList().commands) |command| switch (command) {
+        .fill_rounded_rect => |fill| switch (fill.fill) {
+            .color => |color| {
+                try std.testing.expectEqual(pressed, color);
+                return;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    return error.TestUnexpectedResult;
 }
 
 test "widget opacity wraps subtree display list commands" {

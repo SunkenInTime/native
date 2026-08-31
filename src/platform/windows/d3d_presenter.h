@@ -19,7 +19,7 @@ bool nativeSdkD3DHardwareAvailable();
 NativeSdkD3DPresenter *nativeSdkD3DPresenterCreate(HWND window);
 void nativeSdkD3DPresenterDestroy(NativeSdkD3DPresenter *presenter);
 
-/// Decodes and applies one NSGP v4 full/patch packet, emits all supported
+/// Decodes and applies one NSGP v9 full/patch packet, emits all supported
 /// shape commands with one instanced draw, and performs one vsynced present.
 /// False is a loud refusal: the SDK immediately uses its pixel fallback.
 bool nativeSdkD3DPresenterPresent(
@@ -58,6 +58,7 @@ bool nativeSdkD3DSharedSurfacePresent(
     uint8_t clear_a,
     const uint8_t *packet,
     size_t packet_len,
+    bool retained_above_packet,
     uint64_t retained_generation,
     UINT retained_width,
     UINT retained_height,

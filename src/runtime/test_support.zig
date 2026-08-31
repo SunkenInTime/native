@@ -41,6 +41,8 @@ pub const CanvasWidgetDragEvent = runtime_module.CanvasWidgetDragEvent;
 pub const InvalidationReason = runtime_module.InvalidationReason;
 pub const TestHarness = runtime_module.TestHarness;
 pub const max_canvas_commands_per_view = runtime_module.max_canvas_commands_per_view;
+pub const max_canvas_gradient_stops_per_view = runtime_module.max_canvas_gradient_stops_per_view;
+pub const max_canvas_mesh_patches_per_view = runtime_module.max_canvas_mesh_patches_per_view;
 pub const max_canvas_widget_nodes_per_view = runtime_module.max_canvas_widget_nodes_per_view;
 
 pub const jsonStringField = bridge_payload.jsonStringField;

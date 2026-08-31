@@ -45,12 +45,163 @@ const max_canvas_render_animations_per_view = canvas_limits.max_canvas_render_an
 const max_canvas_text_layouts_per_view = canvas_limits.max_canvas_text_layouts_per_view;
 const max_canvas_text_layout_lines_per_view = canvas_limits.max_canvas_text_layout_lines_per_view;
 const max_canvas_retained_packet_commands_per_view = canvas_limits.max_canvas_retained_packet_commands_per_view;
-threadlocal var canvas_frame_text_layout_plans_scratch: [max_canvas_text_layouts_per_view]canvas.TextLayoutPlan = undefined;
-threadlocal var canvas_frame_text_layout_lines_scratch: [max_canvas_text_layout_lines_per_view]canvas.TextLine = undefined;
-threadlocal var canvas_frame_text_layout_cache_entries_scratch: [max_canvas_text_layouts_per_view]canvas.TextLayoutCacheEntry = undefined;
-threadlocal var canvas_frame_text_layout_cache_actions_scratch: [max_canvas_text_layouts_per_view * 2]canvas.TextLayoutCacheAction = undefined;
-threadlocal var canvas_frame_immediate_commands_scratch: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
-threadlocal var canvas_frame_retained_commands_scratch: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
+// The frame planner's per-thread scratch behind one lazily
+// heap-allocated pointer (~1.8 MiB that would otherwise sit in the
+// static TLS template every OS thread's loader clones): the text-layout
+// planning arrays plus the packet patch-derivation arrays declared with
+// their contract below. Init happens on a thread's first frame plan —
+// the runtime loop thread by construction — so window-host, COM,
+// accessibility, and worker threads never allocate it. Every field is
+// per-use scratch (no cross-frame state), so first-use init cannot
+// change planner output; the arrays carry no default and stay
+// uninitialized, exactly like the `= undefined` statics they replace.
+const CanvasFrameScratch = struct {
+    text_layout_plans: [max_canvas_text_layouts_per_view]canvas.TextLayoutPlan,
+    text_layout_lines: [max_canvas_text_layout_lines_per_view]canvas.TextLine,
+    text_layout_cache_entries: [max_canvas_text_layouts_per_view]canvas.TextLayoutCacheEntry,
+    text_layout_cache_actions: [max_canvas_text_layouts_per_view * 2]canvas.TextLayoutCacheAction,
+    immediate_commands: [max_canvas_commands_per_view]canvas.CanvasCommand,
+    underlay_commands: [max_canvas_commands_per_view]canvas.CanvasCommand,
+    retained_commands: [max_canvas_commands_per_view]canvas.CanvasCommand,
+    packet_current: [max_canvas_retained_packet_commands_per_view]CanvasPacketCurrentCommand,
+    packet_current_sort: [max_canvas_retained_packet_commands_per_view]u32,
+    packet_baseline_sort: [max_canvas_retained_packet_commands_per_view]u32,
+    packet_baseline_matched: [max_canvas_retained_packet_commands_per_view]bool,
+    packet_baseline_stable: [max_canvas_retained_packet_commands_per_view]bool,
+    packet_upsert: [max_canvas_retained_packet_commands_per_view]bool,
+};
+const canvas_frame_scratch = canvas.lazy_tls.LazyTls(CanvasFrameScratch);
+
+fn hybridGpuUnderlayDisplayList(
+    display_list: canvas.DisplayList,
+    surface_size: geometry.SizeF,
+) !canvas.DisplayList {
+    const output = &canvas_frame_scratch.get().underlay_commands;
+    const surface = geometry.RectF.init(0, 0, surface_size.width, surface_size.height).normalized();
+    var layer: canvas.PresentationLayer = .retained;
+    var stack: [32]canvas.PresentationLayer = undefined;
+    var depth: usize = 0;
+    var output_len: usize = 0;
+    var moved_surface_shadow = false;
+    var moved_surface_background = false;
+    for (display_list.commands, 0..) |command, command_index| {
+        const include = switch (command) {
+            .push_clip => |clip| include: {
+                if (depth >= stack.len) return error.RenderStackOverflow;
+                stack[depth] = layer;
+                depth += 1;
+                layer = clip.presentation_layer;
+                break :include true;
+            },
+            .pop_clip => include: {
+                if (depth == 0) return error.RenderStackUnderflow;
+                depth -= 1;
+                layer = stack[depth];
+                break :include true;
+            },
+            .push_opacity, .pop_opacity, .transform => true,
+            else => include: {
+                if (layer == .gpu_underlay) break :include true;
+                if (layer == .retained and
+                    hybridCommandIsGpuUnderlayShadow(display_list.commands, command_index))
+                {
+                    break :include true;
+                }
+                if (!moved_surface_shadow and !moved_surface_background and layer == .retained and
+                    hybridCommandIsSurfaceShadow(command, surface))
+                {
+                    moved_surface_shadow = true;
+                    break :include true;
+                }
+                if (!moved_surface_background and layer == .retained and
+                    hybridCommandIsSurfaceBackground(command, surface))
+                {
+                    moved_surface_background = true;
+                    break :include true;
+                }
+                break :include false;
+            },
+        };
+        if (!include) continue;
+        if (output_len >= output.len) return error.DisplayListFull;
+        output[output_len] = command;
+        output_len += 1;
+    }
+    if (depth != 0) return error.RenderStackUnderflow;
+    return .{ .commands = output[0..output_len] };
+}
+
+fn hybridRetainedOverlayDisplayList(
+    display_list: canvas.DisplayList,
+    surface_size: geometry.SizeF,
+) !canvas.DisplayList {
+    const output = &canvas_frame_scratch.get().retained_commands;
+    const retained = try display_list.copyPresentationLayer(.retained, output);
+    const surface = geometry.RectF.init(0, 0, surface_size.width, surface_size.height).normalized();
+    var output_len: usize = 0;
+    var moved_surface_shadow = false;
+    var moved_surface_background = false;
+    for (retained.commands, 0..) |command, command_index| {
+        if (hybridCommandIsGpuUnderlayShadow(retained.commands, command_index)) continue;
+        if (!moved_surface_shadow and !moved_surface_background and
+            hybridCommandIsSurfaceShadow(command, surface))
+        {
+            moved_surface_shadow = true;
+            continue;
+        }
+        if (!moved_surface_background and
+            hybridCommandIsSurfaceBackground(command, surface))
+        {
+            moved_surface_background = true;
+            continue;
+        }
+        output[output_len] = command;
+        output_len += 1;
+    }
+    return .{ .commands = output[0..output_len] };
+}
+
+fn hybridCommandIsGpuUnderlayShadow(
+    commands: []const canvas.CanvasCommand,
+    command_index: usize,
+) bool {
+    if (command_index >= commands.len or commands[command_index] != .shadow) return false;
+    for (commands[command_index + 1 ..]) |next| {
+        switch (next) {
+            .push_opacity, .transform => continue,
+            .push_clip => |clip| return clip.presentation_layer == .gpu_underlay,
+            else => return false,
+        }
+    }
+    return false;
+}
+
+fn hybridCommandIsSurfaceShadow(
+    command: canvas.CanvasCommand,
+    surface: geometry.RectF,
+) bool {
+    return switch (command) {
+        .shadow => |shadow| !shadow.inset and std.meta.eql(shadow.rect.normalized(), surface),
+        else => false,
+    };
+}
+
+fn hybridCommandIsSurfaceBackground(
+    command: canvas.CanvasCommand,
+    surface: geometry.RectF,
+) bool {
+    return switch (command) {
+        .fill_rect => |fill| std.meta.eql(fill.rect.normalized(), surface) and switch (fill.fill) {
+            .color => true,
+            else => false,
+        },
+        .fill_rounded_rect => |fill| std.meta.eql(fill.rect.normalized(), surface) and switch (fill.fill) {
+            .color => true,
+            else => false,
+        },
+        else => false,
+    };
+}
 
 /// One entry of the frame's CURRENT keyed command list — the full draw
 /// order the retained packet protocol works on (never the scissor
@@ -66,17 +217,14 @@ const CanvasPacketCurrentCommand = struct {
     bounds: geometry.RectF,
 };
 
-// Patch-derivation scratch (threadlocal, same pattern as the text-layout
-// scratch above): the current keyed list, a key-sorted index over it for
-// duplicate detection, a key-sorted index over the view's retained
-// baseline for O(log n) lookups, per-baseline matched flags (unmatched =
-// evict), and per-current upsert flags. ~64 KiB per thread total.
-threadlocal var canvas_packet_current_scratch: [max_canvas_retained_packet_commands_per_view]CanvasPacketCurrentCommand = undefined;
-threadlocal var canvas_packet_current_sort_scratch: [max_canvas_retained_packet_commands_per_view]u32 = undefined;
-threadlocal var canvas_packet_baseline_sort_scratch: [max_canvas_retained_packet_commands_per_view]u32 = undefined;
-threadlocal var canvas_packet_baseline_matched_scratch: [max_canvas_retained_packet_commands_per_view]bool = undefined;
-threadlocal var canvas_packet_baseline_stable_scratch: [max_canvas_retained_packet_commands_per_view]bool = undefined;
-threadlocal var canvas_packet_upsert_scratch: [max_canvas_retained_packet_commands_per_view]bool = undefined;
+// Patch-derivation scratch (the `packet_*` fields of
+// `CanvasFrameScratch` above): the current keyed list, a key-sorted
+// index over it for duplicate detection, a key-sorted index over the
+// view's retained baseline for O(log n) lookups, per-baseline matched
+// flags (unmatched = evict), and per-current upsert flags. ~104 KiB per
+// planning thread total. The matched/upsert flags persist between
+// `computeCanvasPacketPatchStats` and `writeCanvasPacketPatchBinary` on
+// the same thread — the same contract the statics carried.
 
 const validateViewLabel = validation.validateViewLabel;
 const canvasRenderAnimationStartNsForView = runtime_view.canvasRenderAnimationStartNsForView;
@@ -97,6 +245,10 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             try validateViewLabel(label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+            // Validate the complete external list before diffing or mutating
+            // any retained state. copyCanvasDisplayList repeats this resource
+            // pass so direct callers keep the same transactional boundary.
+            _ = try runtime_view.CanvasResourceCounts.fromDisplayList(display_list);
             var canvas_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined;
             const changes = try canvas.DisplayList.diff(self.views[index].canvasDisplayList(), display_list, &canvas_changes);
             try self.views[index].copyCanvasDisplayList(display_list);
@@ -279,13 +431,16 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, window_id, label) orelse return false;
             const view = &self.views[index];
             const list = canvas.DisplayList{ .commands = view.canvas_commands[0..view.canvas_command_count] };
-            return list.hasPresentationLayer(.retained) and list.hasPresentationLayer(.immediate);
+            return list.hasPresentationLayer(.retained) and
+                (list.hasPresentationLayer(.gpu_underlay) or list.hasPresentationLayer(.immediate));
         }
 
-        /// Present an immediate-canvas packet over a CPU-rasterized retained
-        /// layer. The retained hash deliberately excludes immediate commands:
-        /// static text/chrome rerasterizes and crosses shared memory once,
-        /// while every animation frame carries only the compact NSGP shapes.
+        /// Present one GPU layer on the correct side of a CPU-rasterized
+        /// retained layer. Immediate canvases remain overlays; authored
+        /// widget gradients become underlays so retained text/images/effects
+        /// never enter a packet the Windows D3D renderer cannot represent.
+        /// A scene containing both GPU sides falls back rather than silently
+        /// changing painter's order.
         pub fn presentNextCanvasHybridPacket(
             self: *Runtime,
             window_id: platform.WindowId,
@@ -317,7 +472,12 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 return null;
             }
             const display_list = view.canvasDisplayList();
-            if (!display_list.hasPresentationLayer(.retained) or !display_list.hasPresentationLayer(.immediate)) return error.UnsupportedService;
+            const has_retained = display_list.hasPresentationLayer(.retained);
+            const has_underlay = display_list.hasPresentationLayer(.gpu_underlay);
+            const has_immediate = display_list.hasPresentationLayer(.immediate);
+            if (!has_retained or has_underlay == has_immediate) return error.UnsupportedService;
+            const gpu_layer: canvas.PresentationLayer = if (has_underlay) .gpu_underlay else .immediate;
+            const retained_composite: platform.GpuSurfaceRetainedComposite = if (has_underlay) .above_packet else .below_packet;
 
             var frame_options = options;
             if (frame_options.surface_size.isEmpty()) {
@@ -335,15 +495,21 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             // previous implementation filtered the completed render pass,
             // which still paid retained text/resource/layout planning on
             // every animation frame even though those pixels never changed.
-            const immediate_list = view.hybridImmediateDisplayList() orelse
-                try display_list.copyPresentationLayer(.immediate, &canvas_frame_immediate_commands_scratch);
+            const gpu_list = if (gpu_layer == .immediate)
+                view.hybridImmediateDisplayList() orelse
+                    try display_list.copyPresentationLayer(
+                        .immediate,
+                        &canvas_frame_scratch.get().immediate_commands,
+                    )
+            else
+                try hybridGpuUnderlayDisplayList(display_list, frame_options.surface_size);
             const plan_begin = self.frame_profile.begin();
-            const immediate_frame = try immediate_list.framePlan(null, frame_options, storage);
+            const gpu_frame = try gpu_list.framePlan(null, frame_options, storage);
             self.frame_profile.end(.plan, plan_begin);
-            var immediate_pass = immediate_frame.renderPass();
+            var gpu_pass = gpu_frame.renderPass();
             const encode_begin = self.frame_profile.begin();
-            var packet = try immediate_pass.gpuPacket(output);
-            packet.scale = immediate_frame.scale;
+            var packet = try gpu_pass.gpuPacket(output);
+            packet.scale = gpu_frame.scale;
             packet.images = &.{};
             packet.image_actions = &.{};
             // An empty immediate layer is a valid hybrid frame: the renderer
@@ -352,17 +518,28 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             // audio visualizers from the shared renderer on every trough.
             if (!packet.fullyRepresentable()) return error.UnsupportedService;
 
-            const pixel_size = try canvasFramePixelSize(immediate_frame);
+            const pixel_size = try canvasFramePixelSize(gpu_frame);
             if (pixels.len < pixel_size.byte_len) return error.InvalidGpuSurfacePixels;
+            const retained_clear = if (retained_composite == .above_packet)
+                canvas.Color.rgba8(0, 0, 0, 0)
+            else
+                clear_color;
+            const retained_clear_rgba8 = canvasColorToRgba8(retained_clear);
             const resized = !view.hybrid_retained_valid or
-                !sizesEqual(view.hybrid_retained_surface_size, immediate_frame.surface_size) or
-                view.hybrid_retained_scale != immediate_frame.scale;
-            const retained_changed = !view.hybrid_retained_valid or resized;
+                !sizesEqual(view.hybrid_retained_surface_size, gpu_frame.surface_size) or
+                view.hybrid_retained_scale != gpu_frame.scale or
+                view.hybrid_retained_composite != retained_composite;
+            const retained_changed = !view.hybrid_retained_valid or
+                resized or
+                !std.meta.eql(view.hybrid_retained_clear_color_rgba8, retained_clear_rgba8);
             const retained_dirty: []const geometry.RectF = &.{};
             var retained_generation: u64 = 0;
             var retained_fingerprint = view.hybrid_retained_fingerprint;
             if (retained_changed) {
-                const retained_list = try display_list.copyPresentationLayer(.retained, &canvas_frame_retained_commands_scratch);
+                const retained_list = try hybridRetainedOverlayDisplayList(
+                    display_list,
+                    gpu_frame.surface_size,
+                );
                 const retained_frame = try retained_list.framePlan(null, frame_options, storage);
                 var retained_pass = retained_frame.renderPass();
                 retained_fingerprint = retained_pass.presentationLayerFingerprint(.retained);
@@ -380,7 +557,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 surface = surface.withImages(retained_frame.image_resources).withFonts(retained_frame.font_resources);
                 retained_pass.full_repaint = true;
                 retained_pass.dirty_bounds = null;
-                try surface.renderPass(retained_pass, clear_color);
+                try surface.renderPass(retained_pass, retained_clear);
                 retained_generation = if (view.hybrid_retained_generation == std.math.maxInt(u64)) 1 else view.hybrid_retained_generation + 1;
             }
 
@@ -400,6 +577,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 .unsupported_command_count = 0,
                 .representable = true,
                 .binary = writer.buffered(),
+                .retained_composite = retained_composite,
                 .retained_width = pixel_size.width,
                 .retained_height = pixel_size.height,
                 .retained_generation = retained_generation,
@@ -417,11 +595,13 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 view.hybrid_retained_valid = true;
                 view.hybrid_retained_fingerprint = retained_fingerprint;
                 view.hybrid_retained_generation = retained_generation;
-                view.hybrid_retained_surface_size = immediate_frame.surface_size;
-                view.hybrid_retained_scale = immediate_frame.scale;
+                view.hybrid_retained_surface_size = gpu_frame.surface_size;
+                view.hybrid_retained_scale = gpu_frame.scale;
+                view.hybrid_retained_composite = retained_composite;
+                view.hybrid_retained_clear_color_rgba8 = retained_clear_rgba8;
             }
-            try view.copyPresentedCanvasSummary(display_list, immediate_frame.surface_size, immediate_frame.scale);
-            var presented_frame = immediate_frame;
+            try view.copyPresentedCanvasSummary(display_list, gpu_frame.surface_size, gpu_frame.scale);
+            var presented_frame = gpu_frame;
             // The layer-filtered plan is internally a full plan, but that is
             // not a request for the completion event to repaint the surface.
             // Persisting `full_repaint=true` here bypassed the clean-revision
@@ -1319,6 +1499,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
         }
 
         pub fn canvasFrameScratchStorage(self: *Runtime) canvas.CanvasFrameStorage {
+            const scratch = canvas_frame_scratch.get();
             return .{
                 .render_commands = &self.canvas_frame_render_commands,
                 .render_batches = &self.canvas_frame_render_batches,
@@ -1342,10 +1523,10 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 .glyph_atlas_entries = &self.canvas_frame_glyph_atlas_entries,
                 .glyph_atlas_cache_entries = &self.canvas_frame_glyph_atlas_cache_entries,
                 .glyph_atlas_cache_actions = &self.canvas_frame_glyph_atlas_cache_actions,
-                .text_layout_plans = &canvas_frame_text_layout_plans_scratch,
-                .text_layout_lines = &canvas_frame_text_layout_lines_scratch,
-                .text_layout_cache_entries = &canvas_frame_text_layout_cache_entries_scratch,
-                .text_layout_cache_actions = &canvas_frame_text_layout_cache_actions_scratch,
+                .text_layout_plans = &scratch.text_layout_plans,
+                .text_layout_lines = &scratch.text_layout_lines,
+                .text_layout_cache_entries = &scratch.text_layout_cache_entries,
+                .text_layout_cache_actions = &scratch.text_layout_cache_actions,
                 .changes = &self.canvas_frame_changes,
             };
         }
@@ -1468,14 +1649,15 @@ fn gatherCanvasPacketCurrentCommands(canvas_frame: canvas.CanvasFrame) ?[]const 
 /// byte-identical output.
 fn gatherCanvasPacketCurrentCommandsFromPlan(render_commands: []const canvas.RenderCommand, surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?[]const CanvasPacketCurrentCommand {
     const full_bounds = canvasFullRepaintBounds(surface_size, render_bounds) orelse return null;
+    const scratch = canvas_frame_scratch.get();
     var count: usize = 0;
     for (render_commands, 0..) |command, index| {
         if (!canvas.renderCommandIntersectsDirtyBounds(command, full_bounds)) continue;
         const gpu_command = canvas.canvasGpuCommandFromRenderCommand(command, index);
         if (!gpu_command.supported()) return null;
-        if (count >= canvas_packet_current_scratch.len) return null;
+        if (count >= scratch.packet_current.len) return null;
         const fingerprint = canvas.canvasGpuCommandFingerprint(gpu_command);
-        canvas_packet_current_scratch[count] = .{
+        scratch.packet_current[count] = .{
             .key = canvas.canvasGpuPacketCommandKey(gpu_command, fingerprint),
             .fingerprint = fingerprint,
             .render_index = @intCast(index),
@@ -1483,14 +1665,14 @@ fn gatherCanvasPacketCurrentCommandsFromPlan(render_commands: []const canvas.Ren
         };
         count += 1;
     }
-    const sorted = canvas_packet_current_sort_scratch[0..count];
+    const sorted = scratch.packet_current_sort[0..count];
     for (sorted, 0..) |*slot, index| slot.* = @intCast(index);
-    std.sort.pdq(u32, sorted, @as([]const CanvasPacketCurrentCommand, canvas_packet_current_scratch[0..count]), canvasPacketCurrentKeyLessThan);
+    std.sort.pdq(u32, sorted, @as([]const CanvasPacketCurrentCommand, scratch.packet_current[0..count]), canvasPacketCurrentKeyLessThan);
     var index: usize = 1;
     while (index < count) : (index += 1) {
-        if (canvas_packet_current_scratch[sorted[index - 1]].key == canvas_packet_current_scratch[sorted[index]].key) return null;
+        if (scratch.packet_current[sorted[index - 1]].key == scratch.packet_current[sorted[index]].key) return null;
     }
-    return canvas_packet_current_scratch[0..count];
+    return scratch.packet_current[0..count];
 }
 
 fn canvasPacketCurrentKeyLessThan(current: []const CanvasPacketCurrentCommand, a: u32, b: u32) bool {
@@ -1524,12 +1706,13 @@ fn computeCanvasPacketPatchStats(view: anytype, current: []const CanvasPacketCur
     const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
     const baseline_fingerprints = view.canvas_packet_baseline_fingerprints[0..baseline_count];
 
-    const baseline_sorted = canvas_packet_baseline_sort_scratch[0..baseline_count];
+    const scratch = canvas_frame_scratch.get();
+    const baseline_sorted = scratch.packet_baseline_sort[0..baseline_count];
     for (baseline_sorted, 0..) |*slot, index| slot.* = @intCast(index);
     std.sort.pdq(u32, baseline_sorted, @as([]const u64, baseline_keys), canvasPacketBaselineKeyLessThan);
-    const matched = canvas_packet_baseline_matched_scratch[0..baseline_count];
+    const matched = scratch.packet_baseline_matched[0..baseline_count];
     @memset(matched, false);
-    const upserts = canvas_packet_upsert_scratch[0..current.len];
+    const upserts = scratch.packet_upsert[0..current.len];
 
     var stats = CanvasPacketPatchStats{};
     for (current, 0..) |entry, index| {
@@ -1602,22 +1785,23 @@ fn canvasPacketPatchDirtyBounds(view: anytype, current: []const CanvasPacketCurr
     const baseline_fingerprints = view.canvas_packet_baseline_fingerprints[0..baseline_count];
     const baseline_bounds = view.canvas_packet_baseline_bounds[0..baseline_count];
 
-    const baseline_sorted = canvas_packet_baseline_sort_scratch[0..baseline_count];
+    const scratch = canvas_frame_scratch.get();
+    const baseline_sorted = scratch.packet_baseline_sort[0..baseline_count];
     for (baseline_sorted, 0..) |*slot, index| slot.* = @intCast(index);
     std.sort.pdq(u32, baseline_sorted, @as([]const u64, baseline_keys), canvasPacketBaselineKeyLessThan);
-    const matched = canvas_packet_baseline_matched_scratch[0..baseline_count];
-    const stable = canvas_packet_baseline_stable_scratch[0..baseline_count];
+    const matched = scratch.packet_baseline_matched[0..baseline_count];
+    const stable = scratch.packet_baseline_stable[0..baseline_count];
     @memset(matched, false);
     @memset(stable, false);
 
     var dirty = CanvasPacketPatchDirty{};
     for (current, 0..) |entry, index| {
-        canvas_packet_upsert_scratch[index] = true;
+        scratch.packet_upsert[index] = true;
         if (findCanvasPacketBaselineIndex(baseline_keys, baseline_sorted, entry.key)) |baseline_index| {
             matched[baseline_index] = true;
             if (baseline_fingerprints[baseline_index] == entry.fingerprint) {
                 stable[baseline_index] = true;
-                canvas_packet_upsert_scratch[index] = false;
+                scratch.packet_upsert[index] = false;
                 continue;
             }
             dirty.add(baseline_bounds[baseline_index]);
@@ -1633,7 +1817,7 @@ fn canvasPacketPatchDirtyBounds(view: anytype, current: []const CanvasPacketCurr
     // outside the union may change.
     var baseline_walk: usize = 0;
     for (current, 0..) |entry, index| {
-        if (canvas_packet_upsert_scratch[index]) continue;
+        if (scratch.packet_upsert[index]) continue;
         while (baseline_walk < baseline_count and !stable[baseline_walk]) baseline_walk += 1;
         if (baseline_walk >= baseline_count or baseline_keys[baseline_walk] != entry.key) return null;
         baseline_walk += 1;
@@ -1660,8 +1844,9 @@ fn writeCanvasPacketPatchBinary(
 ) !void {
     const baseline_count = view.canvas_packet_baseline_count;
     const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
-    const matched = canvas_packet_baseline_matched_scratch[0..baseline_count];
-    const upserts = canvas_packet_upsert_scratch[0..current.len];
+    const scratch = canvas_frame_scratch.get();
+    const matched = scratch.packet_baseline_matched[0..baseline_count];
+    const upserts = scratch.packet_upsert[0..current.len];
 
     try canvas.writeCanvasGpuPacketBinaryHeader(
         canvas.binary_packet_load_action_patch,

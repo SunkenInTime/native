@@ -9,6 +9,9 @@ const FontId = canvas.FontId;
 const ReferenceImage = canvas.ReferenceImage;
 const Affine = drawing_model.Affine;
 const LinearGradient = drawing_model.LinearGradient;
+const RadialGradient = drawing_model.RadialGradient;
+const ConicGradient = drawing_model.ConicGradient;
+const MeshGradient = drawing_model.MeshGradient;
 const Fill = drawing_model.Fill;
 const Stroke = drawing_model.Stroke;
 const DrawImage = drawing_model.DrawImage;
@@ -84,8 +87,39 @@ pub fn linearGradientFingerprint(gradient: LinearGradient) u64 {
     var hash = resourceHashTag("linear_gradient");
     hash = resourceHashPoint(hash, gradient.start);
     hash = resourceHashPoint(hash, gradient.end);
-    hash = resourceHashUsize(hash, gradient.stops.len);
-    for (gradient.stops) |stop| {
+    return gradientFingerprintStops(hash, gradient.stops, gradient.spread, gradient.interpolation);
+}
+
+pub fn radialGradientFingerprint(gradient: RadialGradient) u64 {
+    var hash = resourceHashTag("radial_gradient");
+    hash = resourceHashPoint(hash, gradient.center);
+    hash = resourceHashF32(hash, gradient.radii.width);
+    hash = resourceHashF32(hash, gradient.radii.height);
+    return gradientFingerprintStops(hash, gradient.stops, gradient.spread, gradient.interpolation);
+}
+
+pub fn conicGradientFingerprint(gradient: ConicGradient) u64 {
+    var hash = resourceHashTag("conic_gradient");
+    hash = resourceHashPoint(hash, gradient.center);
+    hash = resourceHashF32(hash, gradient.start_angle_radians);
+    return gradientFingerprintStops(hash, gradient.stops, gradient.spread, gradient.interpolation);
+}
+
+pub fn meshGradientFingerprint(gradient: MeshGradient) u64 {
+    var hash = resourceHashEnum(resourceHashTag("mesh_gradient"), @intFromEnum(gradient.interpolation));
+    hash = resourceHashUsize(hash, gradient.patches.len);
+    for (gradient.patches) |patch| {
+        for (patch.points) |point| hash = resourceHashPoint(hash, point);
+        for (patch.colors) |color| hash = resourceHashColor(hash, color);
+    }
+    return hash;
+}
+
+fn gradientFingerprintStops(hash_value: u64, stops: []const drawing_model.GradientStop, spread: drawing_model.GradientSpread, interpolation: drawing_model.GradientInterpolation) u64 {
+    var hash = resourceHashEnum(hash_value, @intFromEnum(spread));
+    hash = resourceHashEnum(hash, @intFromEnum(interpolation));
+    hash = resourceHashUsize(hash, stops.len);
+    for (stops) |stop| {
         hash = resourceHashF32(hash, stop.offset);
         hash = resourceHashColor(hash, stop.color);
     }
@@ -245,6 +279,9 @@ fn resourceHashFill(hash: u64, fill: Fill) u64 {
     return switch (fill) {
         .color => |color| resourceHashColor(resourceHashBytes(hash, "color"), color),
         .linear_gradient => |gradient| resourceHashU64(resourceHashBytes(hash, "linear_gradient"), linearGradientFingerprint(gradient)),
+        .radial_gradient => |gradient| resourceHashU64(resourceHashBytes(hash, "radial_gradient"), radialGradientFingerprint(gradient)),
+        .conic_gradient => |gradient| resourceHashU64(resourceHashBytes(hash, "conic_gradient"), conicGradientFingerprint(gradient)),
+        .mesh_gradient => |gradient| resourceHashU64(resourceHashBytes(hash, "mesh_gradient"), meshGradientFingerprint(gradient)),
     };
 }
 

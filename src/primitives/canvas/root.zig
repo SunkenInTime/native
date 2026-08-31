@@ -47,6 +47,7 @@ pub const Error = error{
     InvalidTransform,
     WidgetDepthExceeded,
     ChartPathElementListFull,
+    MeshPatchListFull,
     ChartLabelBytesFull,
     WidgetEventRouteListFull,
     WidgetInvalidationListFull,
@@ -88,7 +89,13 @@ pub const Color = drawing_model.Color;
 pub const Affine = drawing_model.Affine;
 pub const Radius = drawing_model.Radius;
 pub const GradientStop = drawing_model.GradientStop;
+pub const GradientSpread = drawing_model.GradientSpread;
+pub const GradientInterpolation = drawing_model.GradientInterpolation;
 pub const LinearGradient = drawing_model.LinearGradient;
+pub const RadialGradient = drawing_model.RadialGradient;
+pub const ConicGradient = drawing_model.ConicGradient;
+pub const MeshPatch = drawing_model.MeshPatch;
+pub const MeshGradient = drawing_model.MeshGradient;
 pub const Fill = drawing_model.Fill;
 pub const Stroke = drawing_model.Stroke;
 pub const LineCap = drawing_model.LineCap;
@@ -173,6 +180,7 @@ pub const CommandRef = command_model.CommandRef;
 pub const DiffKind = command_model.DiffKind;
 pub const DiffChange = command_model.DiffChange;
 pub const Builder = command_model.Builder;
+pub const max_builder_mesh_patches = command_model.max_builder_mesh_patches;
 
 // Canvas render data and cache plans live in `render.zig`; root keeps the public API stable.
 pub const max_render_state_stack = render_model.max_render_state_stack;
@@ -388,6 +396,7 @@ pub const WidgetAnchorPlacement = widget_model.WidgetAnchorPlacement;
 pub const WidgetAnchorAlignment = widget_model.WidgetAnchorAlignment;
 pub const WidgetStyle = widget_model.WidgetStyle;
 pub const WidgetInteractionStyle = widget_model.WidgetInteractionStyle;
+pub const WidgetCornerRadii = widget_model.WidgetCornerRadii;
 pub const WidgetVariant = widget_model.WidgetVariant;
 pub const WidgetOverscroll = widget_model.WidgetOverscroll;
 pub const WidgetIconPlacement = widget_model.WidgetIconPlacement;
@@ -405,6 +414,12 @@ pub const WidgetActions = widget_model.WidgetActions;
 pub const WidgetSemantics = widget_model.WidgetSemantics;
 pub const WidgetContextMenuItem = widget_model.WidgetContextMenuItem;
 pub const ImmediateCanvasCommand = widget_model.ImmediateCanvasCommand;
+pub const WidgetLinearGradient = widget_model.WidgetLinearGradient;
+pub const WidgetRadialGradient = widget_model.WidgetRadialGradient;
+pub const WidgetConicGradient = widget_model.WidgetConicGradient;
+pub const WidgetGradient = widget_model.WidgetGradient;
+pub const WidgetMeshPatch = widget_model.WidgetMeshPatch;
+pub const WidgetMeshGradient = widget_model.WidgetMeshGradient;
 pub const WidgetTextStyle = widget_model.WidgetTextStyle;
 pub const PresentationLayer = drawing_model.PresentationLayer;
 pub const Widget = widget_model.Widget;
@@ -475,6 +490,11 @@ pub const markdown = @import("markdown.zig");
 // Deterministic key-lookup scratch shared by the per-frame planners and
 // the runtime's keyed diffs (see plan_key_index.zig).
 pub const plan_key_index = @import("plan_key_index.zig");
+
+// Lazily heap-allocated per-thread scratch: keeps the large planner
+// buffers out of the static TLS template every OS thread must clone
+// (see lazy_tls.zig for the working-set numbers).
+pub const lazy_tls = @import("lazy_tls.zig");
 
 // Experimental markup front-end lives in `ui_markup.zig` / `ui_markup_view.zig`
 // (runtime parse + interpret: the dev/hot-reload engine) and

@@ -13,6 +13,7 @@ const platform = @import("../platform/root.zig");
 const max_canvas_commands_per_view = canvas_limits.max_canvas_commands_per_view;
 const max_canvas_retained_packet_commands_per_view = canvas_limits.max_canvas_retained_packet_commands_per_view;
 const max_canvas_gradient_stops_per_view = canvas_limits.max_canvas_gradient_stops_per_view;
+const max_canvas_mesh_patches_per_view = canvas_limits.max_canvas_mesh_patches_per_view;
 const max_canvas_path_elements_per_view = canvas_limits.max_canvas_path_elements_per_view;
 const max_canvas_glyphs_per_view = canvas_limits.max_canvas_glyphs_per_view;
 const max_canvas_text_bytes_per_view = canvas_limits.max_canvas_text_bytes_per_view;
@@ -213,6 +214,8 @@ pub const RuntimeView = struct {
     hybrid_retained_generation: u64 = 0,
     hybrid_retained_surface_size: geometry.SizeF = geometry.SizeF.init(0, 0),
     hybrid_retained_scale: f32 = 1,
+    hybrid_retained_composite: platform.GpuSurfaceRetainedComposite = .below_packet,
+    hybrid_retained_clear_color_rgba8: [4]u8 = .{ 0, 0, 0, 0 },
     /// Layer-filtered immediate list rebuilt with the owned display list.
     /// Hybrid frame ticks plan this cache directly, so static retained
     /// commands are not even walked by the 60 Hz presentation path.
@@ -230,6 +233,8 @@ pub const RuntimeView = struct {
     canvas_revision: u64 = 0,
     canvas_gradient_stops: [max_canvas_gradient_stops_per_view]canvas.GradientStop = undefined,
     canvas_gradient_stop_count: usize = 0,
+    canvas_mesh_patches: [max_canvas_mesh_patches_per_view]canvas.MeshPatch = undefined,
+    canvas_mesh_patch_count: usize = 0,
     canvas_path_elements: [max_canvas_path_elements_per_view]canvas.PathElement = undefined,
     canvas_path_element_count: usize = 0,
     canvas_glyphs: [max_canvas_glyphs_per_view]canvas.Glyph = undefined,
@@ -603,6 +608,7 @@ pub const RuntimeView = struct {
     pub const copyCanvasStroke = CanvasFrameMethods.copyCanvasStroke;
     pub const copyCanvasFill = CanvasFrameMethods.copyCanvasFill;
     pub const copyCanvasGradientStops = CanvasFrameMethods.copyCanvasGradientStops;
+    pub const copyCanvasMeshPatches = CanvasFrameMethods.copyCanvasMeshPatches;
     pub const copyCanvasPathElements = CanvasFrameMethods.copyCanvasPathElements;
     pub const copyCanvasGlyphs = CanvasFrameMethods.copyCanvasGlyphs;
     pub const copyCanvasText = CanvasFrameMethods.copyCanvasText;

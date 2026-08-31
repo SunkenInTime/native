@@ -17,6 +17,9 @@ const textBounds = text_model.textBounds;
 const drawImageFingerprint = fingerprints.drawImageFingerprint;
 const drawTextFingerprint = fingerprints.drawTextFingerprint;
 const linearGradientFingerprint = fingerprints.linearGradientFingerprint;
+const radialGradientFingerprint = fingerprints.radialGradientFingerprint;
+const conicGradientFingerprint = fingerprints.conicGradientFingerprint;
+const meshGradientFingerprint = fingerprints.meshGradientFingerprint;
 const shadowFingerprint = fingerprints.shadowFingerprint;
 const blurFingerprint = fingerprints.blurFingerprint;
 const nonZeroObjectId = fingerprints.nonZeroObjectId;
@@ -24,6 +27,9 @@ const nonNegative = fingerprints.nonNegative;
 
 pub const RenderResourceKind = enum {
     linear_gradient,
+    radial_gradient,
+    conic_gradient,
+    mesh_gradient,
     image,
     glyph_run,
     shadow,
@@ -38,6 +44,7 @@ pub const RenderResource = struct {
     image_id: ImageId = 0,
     font_id: FontId = 0,
     gradient_stop_count: usize = 0,
+    mesh_patch_count: usize = 0,
     glyph_count: usize = 0,
     text_len: usize = 0,
     fingerprint: u64 = 0,
@@ -135,6 +142,30 @@ pub const RenderResourcePlanner = struct {
                 .gradient_stop_count = gradient.stops.len,
                 .fingerprint = linearGradientFingerprint(gradient),
             }),
+            .radial_gradient => |gradient| try self.append(.{
+                .kind = .radial_gradient,
+                .command_index = index,
+                .id = nonZeroObjectId(id),
+                .bounds = bounds,
+                .gradient_stop_count = gradient.stops.len,
+                .fingerprint = radialGradientFingerprint(gradient),
+            }),
+            .conic_gradient => |gradient| try self.append(.{
+                .kind = .conic_gradient,
+                .command_index = index,
+                .id = nonZeroObjectId(id),
+                .bounds = bounds,
+                .gradient_stop_count = gradient.stops.len,
+                .fingerprint = conicGradientFingerprint(gradient),
+            }),
+            .mesh_gradient => |gradient| try self.append(.{
+                .kind = .mesh_gradient,
+                .command_index = index,
+                .id = nonZeroObjectId(id),
+                .bounds = bounds,
+                .mesh_patch_count = gradient.patches.len,
+                .fingerprint = meshGradientFingerprint(gradient),
+            }),
         }
     }
 
@@ -231,30 +262,31 @@ pub const RenderResourceCachePlanner = struct {
             previous.len >= plan_key_index.min_entries_for_index) and
             plan_key_index.fitsHashSlots(resource_cache_index_slots, previous.len) and
             plan_key_index.fitsHashSlots(resource_cache_index_slots, resource_plan.resources.len);
-        if (use_index) {
-            resource_cache_previous_index.reset();
+        const index_scratch: ?*ResourceCacheIndexScratch = if (use_index) resource_cache_index_scratch.get() else null;
+        if (index_scratch) |scratch| {
+            scratch.previous.reset();
             for (previous, 0..) |entry, index| {
                 var p = ResourceCacheIndex.probe(renderResourceKeyHash(entry.key));
-                while (resource_cache_previous_index.next(&p)) |_| {}
-                resource_cache_previous_index.insert(p, @intCast(index));
+                while (scratch.previous.next(&p)) |_| {}
+                scratch.previous.insert(p, @intCast(index));
             }
-            resource_cache_entry_index.reset();
+            scratch.entry.reset();
         }
 
         for (resource_plan.resources, 0..) |resource, resource_index| {
             const key = renderResourceKey(resource);
             const key_hash = if (use_index) renderResourceKeyHash(key) else 0;
-            if (use_index) {
+            if (index_scratch) |scratch| {
                 var p = ResourceCacheIndex.probe(key_hash);
                 var duplicate = false;
-                while (resource_cache_entry_index.next(&p)) |candidate| {
+                while (scratch.entry.next(&p)) |candidate| {
                     if (renderResourceKeysEqual(self.entries[candidate].key, key)) {
                         duplicate = true;
                         break;
                     }
                 }
                 if (duplicate) continue;
-                const previous_index = findRenderResourceCacheEntryIndexed(previous, key, key_hash);
+                const previous_index = findRenderResourceCacheEntryIndexed(&scratch.previous, previous, key, key_hash);
                 try self.appendAction(.{
                     .kind = if (previous_index == null) .upload else .retain,
                     .key = key,
@@ -265,7 +297,7 @@ pub const RenderResourceCachePlanner = struct {
                     .key = key,
                     .last_used_frame = frame_index,
                 });
-                resource_cache_entry_index.insert(p, @intCast(self.entry_len - 1));
+                scratch.entry.insert(p, @intCast(self.entry_len - 1));
                 continue;
             }
             if (findRenderResourceCacheEntry(self.entries[0..self.entry_len], key) != null) continue;
@@ -284,10 +316,10 @@ pub const RenderResourceCachePlanner = struct {
         }
 
         for (previous, 0..) |entry, cache_index| {
-            if (use_index) {
+            if (index_scratch) |scratch| {
                 var p = ResourceCacheIndex.probe(renderResourceKeyHash(entry.key));
                 var kept = false;
-                while (resource_cache_entry_index.next(&p)) |candidate| {
+                while (scratch.entry.next(&p)) |candidate| {
                     if (renderResourceKeysEqual(self.entries[candidate].key, entry.key)) {
                         kept = true;
                         break;
@@ -346,14 +378,20 @@ fn findRenderResourceCacheEntry(entries: []const RenderResourceCacheEntry, key: 
 /// half-full bound; bigger inputs fall back to the linear scans.
 const resource_cache_index_slots = 4096;
 const ResourceCacheIndex = plan_key_index.HashSlots(resource_cache_index_slots);
-threadlocal var resource_cache_previous_index: ResourceCacheIndex = .{};
-threadlocal var resource_cache_entry_index: ResourceCacheIndex = .{};
+// Lazily heap-allocated per thread (32 KiB of probe tables): reset per
+// build, so first-use init on the planning thread is the only contract —
+// threads that never plan resources never allocate it.
+const ResourceCacheIndexScratch = struct {
+    previous: ResourceCacheIndex = .{},
+    entry: ResourceCacheIndex = .{},
+};
+const resource_cache_index_scratch = @import("lazy_tls.zig").LazyTls(ResourceCacheIndexScratch);
 
 /// The chain's first equal candidate is the lowest-index equal entry —
 /// the exact value the linear scan returned.
-fn findRenderResourceCacheEntryIndexed(previous: []const RenderResourceCacheEntry, key: RenderResourceKey, key_hash: u64) ?usize {
+fn findRenderResourceCacheEntryIndexed(previous_index: *const ResourceCacheIndex, previous: []const RenderResourceCacheEntry, key: RenderResourceKey, key_hash: u64) ?usize {
     var p = ResourceCacheIndex.probe(key_hash);
-    while (resource_cache_previous_index.next(&p)) |candidate| {
+    while (previous_index.next(&p)) |candidate| {
         if (renderResourceKeysEqual(previous[candidate].key, key)) return candidate;
     }
     return null;

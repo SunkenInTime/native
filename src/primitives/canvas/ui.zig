@@ -641,6 +641,10 @@ pub fn Ui(comptime Msg: type) type {
             /// meaningful with a nonzero `resize_duration`.
             resize_origin: f32 = -1,
             style: canvas.WidgetStyle = .{},
+            /// Rare asymmetric corner overrides. Uniform rounding belongs in
+            /// style.radius; non-null overrides are retained as metadata so
+            /// the common Widget shape stays compact.
+            corner_radii: ?canvas.WidgetCornerRadii = null,
             /// Pointer-state overrides are values at the builder boundary;
             /// `el` copies non-null records into its frame arena so retained
             /// Widgets carry only two optional pointers.
@@ -1220,16 +1224,22 @@ pub fn Ui(comptime Msg: type) type {
             if (options.on_dismiss != null) warnDismissHandlerKind(kind);
             if (options.on_resize != null) warnResizeHandlerKind(kind);
             var widget = self.widgetFromOptions(kind, options);
-            const interaction_count = @as(usize, @intFromBool(options.hover_style != null)) +
+            const corner_radii = if (options.corner_radii) |radii| if (radii.isDefault()) null else radii else null;
+            const metadata_count = @as(usize, @intFromBool(corner_radii != null)) +
+                @as(usize, @intFromBool(options.hover_style != null)) +
                 @as(usize, @intFromBool(options.pressed_style != null));
-            if (interaction_count > 0) {
+            if (metadata_count > 0) {
                 const retained_count = widget.immediate_commands.len;
-                const metadata = self.arena.alloc(canvas.ImmediateCanvasCommand, retained_count + interaction_count) catch {
+                const metadata = self.arena.alloc(canvas.ImmediateCanvasCommand, retained_count + metadata_count) catch {
                     self.failed = true;
                     return .{};
                 };
                 @memcpy(metadata[0..retained_count], widget.immediate_commands);
                 var metadata_index: usize = retained_count;
+                if (corner_radii) |radii| {
+                    metadata[metadata_index] = .{ .corner_radii = radii };
+                    metadata_index += 1;
+                }
                 if (options.hover_style) |style| {
                     metadata[metadata_index] = .{ .hover_style = style };
                     metadata_index += 1;
