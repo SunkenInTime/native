@@ -5333,7 +5333,9 @@ static NativeSdkGradientPrepareResult NativeSdkMetalPrepareGradient(
     } else {
         if (!NativeSdkGradientOptions(paint, &spread, &interpolation)) return NativeSdkGradientInvalid;
         NSArray *paintStops = [paint[@"stops"] isKindOfClass:[NSArray class]] ? paint[@"stops"] : nil;
-        if (!paintStops || paintStops.count > NativeSdkCompositeMaxGradientStops - firstStop) return NativeSdkGradientInvalid;
+        /* Direct composition is proved only for positive-stop gradients.
+         * Keep the reference evaluator's zero-stop semantic on exact Pixels. */
+        if (!paintStops || paintStops.count == 0 || paintStops.count > NativeSdkCompositeMaxGradientStops - firstStop) return NativeSdkGradientInvalid;
         addedStops = paintStops.count;
         for (NSUInteger stopIndex = 0; stopIndex < addedStops; stopIndex += 1) {
             NSDictionary *sourceStop = NativeSdkPacketDictionary(paintStops[stopIndex]);

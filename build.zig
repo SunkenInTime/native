@@ -958,6 +958,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "Exact port of the shipped Windows evaluator's bounded Newton" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkCompositeMaxGradientStops = 64" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkCompositeMaxMeshPatches = 16" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "paintStops.count == 0 || paintStops.count > NativeSdkCompositeMaxGradientStops - firstStop" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "command[@\"transform\"] != nil) return NativeSdkGradientNeedsReference" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if ([kind hasSuffix:@\"_gradient\"]) return 0" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkCompositeEncodeGradient" },
