@@ -703,6 +703,7 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
 fn embeddedMetalLibrary(b: *std.Build, dep: *std.Build.Dependency) std.Build.LazyPath {
     const compile = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal", "-c" });
     compile.addFileArg(dep.path("src/platform/macos/canvas_shaders.metal"));
+    compile.addFileInput(dep.path("src/platform/macos/canvas_shader_types.h"));
     compile.addArg("-o");
     const air = compile.addOutputFileArg("native_sdk_canvas.air");
     compile.addArg("-mmacosx-version-min=11.0");

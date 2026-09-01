@@ -1,0 +1,1 @@
+fix: **macOS shared-renderer gradients**: documented rect and rounded-rect gradients now render directly in the shared Metal host, while unsupported shapes and transforms present exact reference pixels instead of opening a blank surface.

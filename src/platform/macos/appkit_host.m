@@ -1,4 +1,5 @@
 #import "appkit_host.h"
+#import "canvas_shader_types.h"
 #import "renderer_protocol_mach.h"
 
 #import <AppKit/AppKit.h>
@@ -26,6 +27,7 @@
 #include <bootstrap.h>
 #include <servers/bootstrap.h>
 #include <math.h>
+#include <float.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -512,6 +514,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, strong) id<MTLRenderPipelineState> presenterPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> compositeBlendPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> compositeOpaquePipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> compositeGradientPipeline;
 @property(nonatomic, strong) id<MTLSamplerState> sampler;
 @property(nonatomic, strong) id<MTLSamplerState> nearestRepeatSampler;
 @property(nonatomic, strong) id<MTLSamplerState> linearRepeatSampler;
@@ -537,7 +540,7 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (BOOL)ensureImmutableResources {
     @synchronized (self) {
         if (self.library && self.presenterPipeline && self.compositeBlendPipeline &&
-            self.compositeOpaquePipeline && self.sampler && self.nearestRepeatSampler &&
+            self.compositeOpaquePipeline && self.compositeGradientPipeline && self.sampler && self.nearestRepeatSampler &&
             self.linearRepeatSampler && self.flatTexture) return YES;
         if (!self.device || !self.commandQueue || native_sdk_metal_library_len == 0) return NO;
 
@@ -558,7 +561,9 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
         id<MTLFunction> canvasFragment = [library newFunctionWithName:@"native_sdk_canvas_fragment"];
         id<MTLFunction> compositeVertex = [library newFunctionWithName:@"native_sdk_composite_vertex"];
         id<MTLFunction> compositeFragment = [library newFunctionWithName:@"native_sdk_composite_fragment"];
-        if (!canvasVertex || !canvasFragment || !compositeVertex || !compositeFragment) return NO;
+        id<MTLFunction> gradientVertex = [library newFunctionWithName:@"native_sdk_gradient_vertex"];
+        id<MTLFunction> gradientFragment = [library newFunctionWithName:@"native_sdk_gradient_fragment"];
+        if (!canvasVertex || !canvasFragment || !compositeVertex || !compositeFragment || !gradientVertex || !gradientFragment) return NO;
 
         MTLRenderPipelineDescriptor *presenter = [[MTLRenderPipelineDescriptor alloc] init];
         presenter.label = @"native-sdk canvas presenter";
@@ -590,6 +595,21 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
         opaque.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
         id<MTLRenderPipelineState> opaquePipeline = [self.device newRenderPipelineStateWithDescriptor:opaque error:&error];
         if (!opaquePipeline) return NO;
+
+        MTLRenderPipelineDescriptor *gradient = [[MTLRenderPipelineDescriptor alloc] init];
+        gradient.label = @"native-sdk composite gradient";
+        gradient.vertexFunction = gradientVertex;
+        gradient.fragmentFunction = gradientFragment;
+        gradient.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        gradient.colorAttachments[0].blendingEnabled = YES;
+        gradient.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        gradient.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+        gradient.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+        gradient.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+        gradient.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        gradient.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        id<MTLRenderPipelineState> gradientPipeline = [self.device newRenderPipelineStateWithDescriptor:gradient error:&error];
+        if (!gradientPipeline) return NO;
 
         MTLSamplerDescriptor *samplerDescriptor = [[MTLSamplerDescriptor alloc] init];
         samplerDescriptor.minFilter = MTLSamplerMinMagFilterNearest;
@@ -630,12 +650,13 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
         self.presenterPipeline = presenterPipeline;
         self.compositeBlendPipeline = blendPipeline;
         self.compositeOpaquePipeline = opaquePipeline;
+        self.compositeGradientPipeline = gradientPipeline;
         self.sampler = sampler;
         self.nearestRepeatSampler = nearestRepeatSampler;
         self.linearRepeatSampler = linearRepeatSampler;
         self.flatTexture = flatTexture;
         if (trace) {
-            fprintf(stderr, "native-sdk: renderer-bakeoff stage=shader_load source=embedded-metallib pipelines=3 scope=process us=%llu\n",
+            fprintf(stderr, "native-sdk: renderer-bakeoff stage=shader_load source=embedded-metallib pipelines=4 scope=process us=%llu\n",
                     (unsigned long long)((NativeSdkTimestampNanoseconds() - beginNs) / 1000));
         }
         return YES;
@@ -940,6 +961,17 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
 @property(nonatomic, assign) uint32_t surfacePixelHeight;
 @property(nonatomic, assign) BOOL loggedWaitingForHost;
 + (instancetype)sharedConnection;
+- (NSInteger)presentPixels:(const uint8_t *)rgba8
+                byteLength:(NSUInteger)byteLength
+                     width:(NSUInteger)width
+                    height:(NSUInteger)height
+                     scale:(CGFloat)scale
+              hasDirtyRect:(BOOL)hasDirtyRect
+                    dirtyX:(CGFloat)dirtyX
+                    dirtyY:(CGFloat)dirtyY
+                dirtyWidth:(CGFloat)dirtyWidth
+               dirtyHeight:(CGFloat)dirtyHeight
+                outSurface:(IOSurfaceRef *)outSurface;
 @end
 
 @implementation NativeSdkSharedRendererConnection
@@ -1076,6 +1108,65 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
     return YES;
 }
 
+/* Shared completion decoder for packet and reference-pixel requests.
+ * Both messages return the same GPU-completed IOSurface reply, so right
+ * disposal, cache ownership, and resize invalidation must have exactly
+ * one implementation. */
+- (NSInteger)receivePresentedSurface:(IOSurfaceRef *)outSurface requestKind:(const char *)requestKind {
+    if (outSurface) *outSurface = NULL;
+    struct { WeaverRendererMachFrameReply reply; mach_msg_trailer_t trailer; } frameReply = {0};
+    kern_return_t kr = mach_msg(&frameReply.reply.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(frameReply), self.replyPort, NativeSdkSharedRendererReplyTimeoutMs, MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "weaver-shared-renderer: no %s reply within %u ms (kr=0x%x); treating host as crashed\n",
+                requestKind, NativeSdkSharedRendererReplyTimeoutMs, kr);
+        [self disconnect];
+        return 0;
+    }
+    if (frameReply.reply.magic != kWeaverRendererMachMagic ||
+        frameReply.reply.version != kWeaverRendererMachVersion ||
+        frameReply.reply.header.msgh_size != sizeof(WeaverRendererMachFrameReply)) {
+        fprintf(stderr, "weaver-shared-renderer: malformed %s reply; disconnecting incompatible host\n", requestKind);
+        mach_msg_destroy(&frameReply.reply.header);
+        [self disconnect];
+        return 0;
+    }
+    if (frameReply.reply.status != kWeaverRendererMachStatusOk) {
+        mach_msg_destroy(&frameReply.reply.header);
+        return 0;
+    }
+    const BOOL hasSurfacePort = (frameReply.reply.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0 &&
+        frameReply.reply.body.msgh_descriptor_count == 1 &&
+        frameReply.reply.surface_port.type == MACH_MSG_PORT_DESCRIPTOR;
+    if (!hasSurfacePort || frameReply.reply.surface_id == 0 ||
+        frameReply.reply.pixel_width == 0 || frameReply.reply.pixel_height == 0) {
+        mach_msg_destroy(&frameReply.reply.header);
+        return 0;
+    }
+    /* Every Ok reply carries the surface right; duplicates for a cached
+     * id are simply deallocated. A size change starts a fresh host-side
+     * ring, so the cache resets with it. */
+    if (frameReply.reply.pixel_width != self.surfacePixelWidth || frameReply.reply.pixel_height != self.surfacePixelHeight) {
+        [self.surfacesById removeAllObjects];
+        self.surfacePixelWidth = frameReply.reply.pixel_width;
+        self.surfacePixelHeight = frameReply.reply.pixel_height;
+    }
+    NSNumber *surfaceKey = @(frameReply.reply.surface_id);
+    id surfaceObject = self.surfacesById[surfaceKey];
+    if (!surfaceObject) {
+        IOSurfaceRef looked = IOSurfaceLookupFromMachPort(frameReply.reply.surface_port.name);
+        if (!looked) {
+            fprintf(stderr, "weaver-shared-renderer: surface lookup failed for id=%u\n", frameReply.reply.surface_id);
+            mach_port_deallocate(mach_task_self(), frameReply.reply.surface_port.name);
+            return 0;
+        }
+        surfaceObject = CFBridgingRelease(looked);
+        self.surfacesById[surfaceKey] = surfaceObject;
+    }
+    mach_port_deallocate(mach_task_self(), frameReply.reply.surface_port.name);
+    if (outSurface) *outSurface = (__bridge IOSurfaceRef)surfaceObject;
+    return 1;
+}
+
 /* One frame, one blocking round trip — the reply is the completion
  * signal, sent by the host only after its GPU finished the surface.
  * Returns the ABI result contract: 1 presented (outSurface valid for
@@ -1127,48 +1218,57 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
         [self disconnect];
         return 0;
     }
-    struct { WeaverRendererMachFrameReply reply; mach_msg_trailer_t trailer; } frameReply = {0};
-    kr = mach_msg(&frameReply.reply.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(frameReply), self.replyPort, NativeSdkSharedRendererReplyTimeoutMs, MACH_PORT_NULL);
+    return [self receivePresentedSurface:outSurface requestKind:"frame"];
+}
+
+/* Exact reference pixels use the same one-request/one-GPU-completion
+ * round trip as packets. The OOL mapping contains the whole RGBA8
+ * surface; dirty geometry only narrows the host upload. */
+- (NSInteger)presentPixels:(const uint8_t *)rgba8
+                byteLength:(NSUInteger)byteLength
+                     width:(NSUInteger)width
+                    height:(NSUInteger)height
+                     scale:(CGFloat)scale
+              hasDirtyRect:(BOOL)hasDirtyRect
+                    dirtyX:(CGFloat)dirtyX
+                    dirtyY:(CGFloat)dirtyY
+                dirtyWidth:(CGFloat)dirtyWidth
+               dirtyHeight:(CGFloat)dirtyHeight
+                outSurface:(IOSurfaceRef *)outSurface {
+    if (![self ensureConnected] || !rgba8 || byteLength > UINT32_MAX || width > UINT32_MAX || height > UINT32_MAX) return 0;
+    WeaverRendererMachPixels frame = {0};
+    frame.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE) | MACH_MSGH_BITS_COMPLEX;
+    frame.header.msgh_remote_port = self.sessionPort;
+    frame.header.msgh_local_port = self.replyPort;
+    frame.header.msgh_size = sizeof(frame);
+    frame.header.msgh_id = kWeaverRendererMachMsgPixels;
+    frame.body.msgh_descriptor_count = 1;
+    frame.pixels.address = (void *)rgba8;
+    frame.pixels.size = (mach_msg_size_t)byteLength;
+    frame.pixels.copy = MACH_MSG_VIRTUAL_COPY;
+    frame.pixels.deallocate = FALSE;
+    frame.pixels.type = MACH_MSG_OOL_DESCRIPTOR;
+    frame.magic = kWeaverRendererMachMagic;
+    frame.version = kWeaverRendererMachVersion;
+    frame.struct_size = sizeof(frame);
+    frame.pixel_len = (uint32_t)byteLength;
+    frame.pixel_width = (uint32_t)width;
+    frame.pixel_height = (uint32_t)height;
+    frame.scale = scale;
+    frame.has_dirty_rect = hasDirtyRect ? 1 : 0;
+    frame.dirty_x = dirtyX;
+    frame.dirty_y = dirtyY;
+    frame.dirty_width = dirtyWidth;
+    frame.dirty_height = dirtyHeight;
+    if (!weaverRendererMachPixelsValid(&frame)) return 0;
+    kern_return_t kr = mach_msg(&frame.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(frame), 0, MACH_PORT_NULL, NativeSdkSharedRendererReplyTimeoutMs, MACH_PORT_NULL);
     if (kr != KERN_SUCCESS) {
-        fprintf(stderr, "weaver-shared-renderer: no reply within %u ms (kr=0x%x) — treating host as crashed\n",
-                NativeSdkSharedRendererReplyTimeoutMs, kr);
+        fprintf(stderr, "weaver-shared-renderer: pixel send failed kr=0x%x; host gone or wedged, will reconnect\n", kr);
+        mach_msg_destroy(&frame.header);
         [self disconnect];
         return 0;
     }
-    if (frameReply.reply.status != kWeaverRendererMachStatusOk) {
-        mach_msg_destroy(&frameReply.reply.header);
-        return 0; /* refused: the engine resyncs with a full present */
-    }
-    const BOOL hasSurfacePort = (frameReply.reply.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0 &&
-        frameReply.reply.body.msgh_descriptor_count == 1;
-    if (!hasSurfacePort || frameReply.reply.surface_id == 0) {
-        mach_msg_destroy(&frameReply.reply.header);
-        return 0;
-    }
-    /* Every Ok reply carries the surface right; duplicates for a cached
-     * id are simply deallocated (the protocol's stated trade: trivially
-     * correct right bookkeeping for one descriptor per frame). A size
-     * change starts a fresh ring host-side, so the cache resets with it. */
-    if (frameReply.reply.pixel_width != self.surfacePixelWidth || frameReply.reply.pixel_height != self.surfacePixelHeight) {
-        [self.surfacesById removeAllObjects];
-        self.surfacePixelWidth = frameReply.reply.pixel_width;
-        self.surfacePixelHeight = frameReply.reply.pixel_height;
-    }
-    NSNumber *surfaceKey = @(frameReply.reply.surface_id);
-    id surfaceObject = self.surfacesById[surfaceKey];
-    if (!surfaceObject) {
-        IOSurfaceRef looked = IOSurfaceLookupFromMachPort(frameReply.reply.surface_port.name);
-        if (!looked) {
-            fprintf(stderr, "weaver-shared-renderer: surface lookup failed for id=%u\n", frameReply.reply.surface_id);
-            mach_port_deallocate(mach_task_self(), frameReply.reply.surface_port.name);
-            return 0;
-        }
-        surfaceObject = CFBridgingRelease(looked);
-        self.surfacesById[surfaceKey] = surfaceObject;
-    }
-    mach_port_deallocate(mach_task_self(), frameReply.reply.surface_port.name);
-    if (outSurface) *outSurface = (__bridge IOSurfaceRef)surfaceObject;
-    return 1;
+    return [self receivePresentedSurface:outSurface requestKind:"pixel"];
 }
 
 /* Registered-image upload (or removal, rgba8 == NULL): rides the session
@@ -1429,9 +1529,14 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
  * guards the CPU backing). */
 @property(nonatomic, strong) id<MTLRenderPipelineState> canvasCompositeBlendPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> canvasCompositeOpaquePipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> canvasCompositeGradientPipeline;
 @property(nonatomic, strong) id<MTLSamplerState> canvasCompositeNearestRepeatSampler;
 @property(nonatomic, strong) id<MTLSamplerState> canvasCompositeLinearRepeatSampler;
 @property(nonatomic, strong) id<MTLTexture> canvasCompositeFlatTexture;
+@property(nonatomic, strong) id<MTLBuffer> canvasGradientStopBuffer;
+@property(nonatomic, strong) id<MTLBuffer> canvasMeshPatchBuffer;
+@property(nonatomic, strong) NSMutableData *canvasGradientStopScratch;
+@property(nonatomic, strong) NSMutableData *canvasMeshPatchScratch;
 @property(nonatomic, assign) BOOL canvasTextureRenderable;
 /* Composite targets are private GPU memory in production. CPU-readable
  * shared storage is paid only by diagnostics and backdrop blur, the paths
@@ -1508,6 +1613,13 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *headlessImagePixelStore;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, id<MTLTexture>> *headlessImageTextureStore;
 @property(nonatomic, assign) BOOL headlessExport;
+/* Reference pixels stay separate from canvasTexture so a refused export
+ * cannot corrupt the retained packet baseline. The texture is allocated
+ * lazily only for a client that actually needs semantic fallback. */
+@property(nonatomic, strong) id<MTLTexture> headlessReferencePixelTexture;
+@property(nonatomic, assign) NSUInteger headlessReferencePixelWidth;
+@property(nonatomic, assign) NSUInteger headlessReferencePixelHeight;
+@property(nonatomic, assign) BOOL headlessReferencePixelsValid;
 /* Set synchronously by the composite seam when an export was committed,
  * cleared when its completion fires: the host reads it right after the
  * present ABI returns to know whether a completion (and therefore the
@@ -1519,6 +1631,8 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
 - (NSMutableDictionary<NSString *, NSImage *> *)activeCanvasImageStore;
 - (id<MTLTexture>)activeTextureForImageKey:(NSString *)key;
 - (NSInteger)sharedRendererPresentPacket:(const uint8_t *)packet byteLength:(NSUInteger)byteLength surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA commandCount:(NSUInteger)commandCount;
+- (BOOL)adoptSharedRendererSurface:(IOSurfaceRef)surface;
+- (BOOL)presentHeadlessReferencePixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
 - (void)renderFrameThroughIOSurfacePresenter;
 - (void)applySurfaceLayerOpacity;
@@ -1556,6 +1670,7 @@ static id<MTLTexture> NativeSdkCanvasTextureForImageKey(NSString *key, NSMutable
 - (void)stopDisplayTimer;
 - (void)noteRendererPacketSuccess;
 - (void)noteRendererPixelFallback;
+- (void)noteRendererSharedPixelSuccess;
 - (void)armRendererRetryIfDue;
 - (void)requestRetainedCanvasFrame;
 - (void)noteGpuSurfaceInputActivity;
@@ -4543,13 +4658,30 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 
 - (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight dirtyRects:(NSArray<NSValue *> *)dirtyRects rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
     if (NativeSdkSharedRendererClientEnabled()) {
-        /* No Metal in this process means no local pixel upload either.
-         * Refusing keeps the runtime's demote/retry machinery honest: it
-         * backs off, re-probes the packet path (1/5/30 s), and recovers
-         * the moment the render host is reachable again. The window
-         * keeps its retained contents meanwhile. */
-        fprintf(stderr, "weaver-shared-renderer: pixel fallback refused (device-less widget); retry cadence covers host recovery\n");
-        return NO;
+        /* The widget remains device-less: exact reference bytes cross
+         * the private channel and the returned, GPU-completed IOSurface
+         * is the only object this process adopts. */
+        @autoreleasepool {
+            IOSurfaceRef surface = NULL;
+            const NSInteger result = [[NativeSdkSharedRendererConnection sharedConnection]
+                presentPixels:rgba8
+                   byteLength:byteLength
+                        width:width
+                       height:height
+                        scale:scale
+                 hasDirtyRect:hasDirtyRect
+                       dirtyX:dirtyX
+                       dirtyY:dirtyY
+                   dirtyWidth:dirtyWidth
+                  dirtyHeight:dirtyHeight
+                   outSurface:&surface];
+            if (result != 1 || !surface || ![self adoptSharedRendererSurface:surface]) return NO;
+            if (NativeSdkRendererBakeoffTraceEnabled()) {
+                fprintf(stderr, "native-sdk: renderer-bakeoff stage=shared_present path=pixels reference_pixel_bytes=%lu\n",
+                        (unsigned long)byteLength);
+            }
+            return YES;
+        }
     }
     if (![self isAvailable] || !rgba8 || width == 0 || height == 0) return NO;
     if (byteLength != width * height * 4) return NO;
@@ -4669,6 +4801,97 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     return YES;
 }
 
+/* Render-host-only reference pixel present. This deliberately does not
+ * call presentPixelsWithWidth/renderFrame: those are window paths and do
+ * not drive headlessExportCompletion. A dedicated source texture keeps
+ * the packet texture and retained dictionary transactional until the
+ * IOSurface export actually completes. */
+- (BOOL)presentHeadlessReferencePixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength {
+    if (!self.headlessExport || ![self isAvailable] || !rgba8 || width == 0 || height == 0 ||
+        width > NSUIntegerMax / height || width * height > NSUIntegerMax / 4 ||
+        byteLength != width * height * 4 || ![self ensureCanvasPresenter] || !self.headlessExportCompletion) return NO;
+    const BOOL trace = NativeSdkRendererBakeoffTraceEnabled();
+    const uint64_t uploadBeginNs = trace ? NativeSdkTimestampNanoseconds() : 0;
+    BOOL textureChanged = NO;
+    if (!self.headlessReferencePixelTexture || self.headlessReferencePixelWidth != width || self.headlessReferencePixelHeight != height) {
+        MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+        descriptor.usage = MTLTextureUsageShaderRead;
+        descriptor.storageMode = MTLStorageModeShared;
+        self.headlessReferencePixelTexture = [self.device newTextureWithDescriptor:descriptor];
+        if (!self.headlessReferencePixelTexture) return NO;
+        self.headlessReferencePixelWidth = width;
+        self.headlessReferencePixelHeight = height;
+        self.headlessReferencePixelsValid = NO;
+        textureChanged = YES;
+    }
+
+    BOOL uploadFullTexture = textureChanged || !self.headlessReferencePixelsValid || !hasDirtyRect;
+    NSUInteger uploadX = 0;
+    NSUInteger uploadY = 0;
+    NSUInteger uploadWidth = width;
+    NSUInteger uploadHeight = height;
+    if (!uploadFullTexture) {
+        const CGFloat minX = fmax(0.0, fmin((CGFloat)width, floor(dirtyX * scale)));
+        const CGFloat minY = fmax(0.0, fmin((CGFloat)height, floor(dirtyY * scale)));
+        const CGFloat maxX = fmax(minX, fmin((CGFloat)width, ceil((dirtyX + dirtyWidth) * scale)));
+        const CGFloat maxY = fmax(minY, fmin((CGFloat)height, ceil((dirtyY + dirtyHeight) * scale)));
+        uploadX = (NSUInteger)minX;
+        uploadY = (NSUInteger)minY;
+        uploadWidth = (NSUInteger)(maxX - minX);
+        uploadHeight = (NSUInteger)(maxY - minY);
+        /* An entirely clipped dirty rect changes no surface bytes. Reuse
+         * the valid source rather than fabricating an empty Metal region. */
+        if (uploadWidth == 0 || uploadHeight == 0) {
+            uploadX = 0;
+            uploadY = 0;
+            uploadWidth = width;
+            uploadHeight = height;
+            uploadFullTexture = YES;
+        }
+    }
+    const uint8_t *uploadBytes = rgba8 + ((uploadY * width + uploadX) * 4);
+    [self.headlessReferencePixelTexture replaceRegion:MTLRegionMake2D(uploadX, uploadY, uploadWidth, uploadHeight)
+                                            mipmapLevel:0
+                                              withBytes:uploadBytes
+                                            bytesPerRow:width * 4];
+    self.headlessReferencePixelsValid = YES;
+    if (trace) {
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=texture_upload path=shared-pixels reference_pixel_bytes=%lu uploaded_bytes=%lu full=%d texture_reused=%d us=%llu\n",
+                (unsigned long)byteLength,
+                (unsigned long)(uploadWidth * uploadHeight * 4),
+                uploadFullTexture ? 1 : 0,
+                textureChanged ? 0 : 1,
+                (unsigned long long)((NativeSdkTimestampNanoseconds() - uploadBeginNs) / 1000));
+    }
+
+    void (^exportCompletion)(BOOL, IOSurfaceRef, NSUInteger, NSUInteger) = self.headlessExportCompletion;
+    __weak NativeSdkMetalSurfaceView *weakSelf = self;
+    const BOOL exported = [self.iosurfacePresenter
+        presentTexture:self.headlessReferencePixelTexture
+              pipeline:self.canvasRenderPipeline
+               sampler:self.canvasSampler
+            pixelWidth:width
+           pixelHeight:height
+            clearColor:MTLClearColorMake(0, 0, 0, 0)
+          sampleBuffer:nil
+                 layer:nil
+            completion:^(BOOL completed, IOSurfaceRef surface) {
+        NativeSdkMetalSurfaceView *strongSelf = weakSelf;
+        if (completed && strongSelf) {
+            /* The glass moved past the retained packet dictionary only
+             * now, after Metal completed and an IOSurface exists. */
+            strongSelf.hasCanvasRetainedState = NO;
+            strongSelf.canvasCompositeContentValid = NO;
+            strongSelf.canvasPacketPixelsValid = NO;
+        }
+        strongSelf.headlessExportInFlight = NO;
+        exportCompletion(completed, surface, width, height);
+    }];
+    if (!exported) return NO;
+    self.headlessExportInFlight = YES;
+    return YES;
+}
+
 - (NSInteger)presentGpuPacketWithSurfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable json:(const uint8_t *)json byteLength:(NSUInteger)byteLength {
     if (![self isAvailable]) return -1;
     if (!requiresRender) {
@@ -4754,18 +4977,23 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
              commandCount:commandCount
                outSurface:&surface];
         if (result != 1 || !surface) return result == 1 ? 0 : result;
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        self.layer.contents = (__bridge id)surface;
-        [CATransaction commit];
-        self.hasCanvasTexture = YES;
-        self.renderedFrame = YES;
-        self.hasEverPresented = YES;
-        self.canvasCompositePresentCount += 1;
-        [self stopDisplayTimer];
-        [self scheduleFrameEventEmissionForPresentCompletion:YES];
-        return 1;
+        return [self adoptSharedRendererSurface:surface] ? 1 : 0;
     }
+}
+
+- (BOOL)adoptSharedRendererSurface:(IOSurfaceRef)surface {
+    if (!surface || !self.layer) return NO;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.layer.contents = (__bridge id)surface;
+    [CATransaction commit];
+    self.hasCanvasTexture = YES;
+    self.renderedFrame = YES;
+    self.hasEverPresented = YES;
+    self.canvasCompositePresentCount += 1;
+    [self stopDisplayTimer];
+    [self scheduleFrameEventEmissionForPresentCompletion:YES];
+    return YES;
 }
 
 /* Draw-trace mode (NATIVE_SDK_GPU_DRAW_TRACE=1): per-present phase and
@@ -4889,7 +5117,7 @@ static BOOL NativeSdkCompositeNeedsCpuReadableTarget(NSArray *commands) {
  * pixel composites exactly once, like the CPU union clip). */
 
 typedef struct {
-    uint8_t type; /* 0 skip, 1 flat copy quad, 2 textured blend quad, 3 blur sandwich, 4 rounded fill, 5 rounded stroke, 6 tiled image, 7 flat blend quad */
+    uint8_t type; /* 0 skip, 1 flat copy quad, 2 textured blend quad, 3 blur sandwich, 4 rounded fill, 5 rounded stroke, 6 tiled image, 7 flat blend quad, 8 gradient fill */
     BOOL hasCullBounds;
     BOOL hasRoundedClip;
     BOOL linearSampling;
@@ -4904,7 +5132,281 @@ typedef struct {
     float colorR, colorG, colorB, colorA; /* premultiplied flat color */
     NSUInteger commandIndex;
     void *texture; /* unretained; kept alive by opTextures/raster cache */
+    NativeSdkGradientUniforms gradient;
 } NativeSdkCompositeOp;
+
+enum {
+    /* Exact mirrors of canvas_limits.max_canvas_gradient_stops_per_view and
+     * max_canvas_mesh_patches_per_view. They repeat the runtime budget at the
+     * untrusted host boundary instead of introducing a second limit. */
+    NativeSdkCompositeMaxGradientStops = 64,
+    NativeSdkCompositeMaxMeshPatches = 16,
+};
+
+_Static_assert(sizeof(NativeSdkGradientStopGpu) == 32, "Metal gradient stop ABI drift");
+_Static_assert(sizeof(NativeSdkMeshPatchGpu) == 224, "Metal mesh patch ABI drift");
+_Static_assert(sizeof(NativeSdkGradientUniforms) == 160, "Metal gradient uniform ABI drift");
+
+typedef NS_ENUM(uint8_t, NativeSdkGradientPrepareResult) {
+    NativeSdkGradientNotPresent = 0,
+    NativeSdkGradientPreparedDirect = 1,
+    NativeSdkGradientNeedsReference = 2,
+    NativeSdkGradientInvalid = 3,
+};
+
+static BOOL NativeSdkGradientNumber(id value, float *outValue) {
+    if (![value isKindOfClass:[NSNumber class]]) return NO;
+    const double valueDouble = [value doubleValue];
+    if (!isfinite(valueDouble) || valueDouble < -FLT_MAX || valueDouble > FLT_MAX) return NO;
+    if (outValue) *outValue = (float)valueDouble;
+    return YES;
+}
+
+static BOOL NativeSdkGradientArray(id value, NSUInteger count, float *outValues) {
+    if (![value isKindOfClass:[NSArray class]] || [(NSArray *)value count] != count) return NO;
+    NSArray *array = value;
+    for (NSUInteger index = 0; index < count; index += 1) {
+        if (!NativeSdkGradientNumber(array[index], &outValues[index])) return NO;
+    }
+    return YES;
+}
+
+static BOOL NativeSdkGradientScaled(float value, CGFloat scale, float *outValue) {
+    const double scaled = (double)value * (double)scale;
+    if (!isfinite(scaled) || scaled < -FLT_MAX || scaled > FLT_MAX) return NO;
+    *outValue = (float)scaled;
+    return YES;
+}
+
+static BOOL NativeSdkGradientOptions(NSDictionary *paint, float *outSpread, float *outInterpolation) {
+    id spreadValue = paint[@"spread"];
+    NSString *spread = spreadValue == nil ? @"pad" : ([spreadValue isKindOfClass:[NSString class]] ? spreadValue : nil);
+    if ([spread isEqualToString:@"pad"]) *outSpread = 0;
+    else if ([spread isEqualToString:@"repeat"]) *outSpread = 1;
+    else if ([spread isEqualToString:@"reflect"]) *outSpread = 2;
+    else return NO;
+
+    id interpolationValue = paint[@"interpolation"];
+    NSString *interpolation = interpolationValue == nil ? @"srgb_linear" : ([interpolationValue isKindOfClass:[NSString class]] ? interpolationValue : nil);
+    if ([interpolation isEqualToString:@"srgb"]) *outInterpolation = 0;
+    else if ([interpolation isEqualToString:@"srgb_linear"]) *outInterpolation = 1;
+    else if ([interpolation isEqualToString:@"oklab"]) *outInterpolation = 2;
+    else return NO;
+    return YES;
+}
+
+static NativeSdkGradientPrepareResult NativeSdkMetalPrepareGradient(
+    NSDictionary *command,
+    CGFloat scale,
+    NSUInteger pixelWidth,
+    NSUInteger pixelHeight,
+    NativeSdkGradientStopGpu *stops,
+    NSUInteger *stopCount,
+    NativeSdkMeshPatchGpu *patches,
+    NSUInteger *patchCount,
+    NativeSdkCompositeOp *op) {
+    NSDictionary *paint = NativeSdkPacketDictionary(command[@"paint"]);
+    NSString *paintKind = [paint[@"kind"] isKindOfClass:[NSString class]] ? paint[@"kind"] : @"";
+    const BOOL gradientPaint = [paintKind isEqualToString:@"linear_gradient"] ||
+        [paintKind isEqualToString:@"radial_gradient"] ||
+        [paintKind isEqualToString:@"conic_gradient"] ||
+        [paintKind isEqualToString:@"mesh_gradient"];
+    if (!gradientPaint) return NativeSdkGradientNotPresent;
+
+    NSString *kind = [command[@"kind"] isKindOfClass:[NSString class]] ? command[@"kind"] : @"";
+    const BOOL rectFill = [kind isEqualToString:@"fill_rect_gradient"];
+    const BOOL roundedFill = [kind isEqualToString:@"fill_rounded_rect_gradient"];
+    /* Arbitrary-affine edge coverage has not been proved against the
+     * reference renderer. Every transform-bearing fill and every other
+     * gradient shape stays on the exact shared-pixel path. */
+    if ((!rectFill && !roundedFill) || command[@"transform"] != nil) return NativeSdkGradientNeedsReference;
+    if (!isfinite(scale) || scale <= 0 || pixelWidth == 0 || pixelHeight == 0) return NativeSdkGradientInvalid;
+
+    NSDictionary *shape = NativeSdkPacketDictionary(command[@"shape"]);
+    NSString *shapeKind = [shape[@"kind"] isKindOfClass:[NSString class]] ? shape[@"kind"] : @"";
+    if ((rectFill && ![shapeKind isEqualToString:@"rect"]) ||
+        (roundedFill && ![shapeKind isEqualToString:@"rounded_rect"])) return NativeSdkGradientInvalid;
+    float rectValues[4] = {0};
+    if (!NativeSdkGradientArray(shape[@"rect"], 4, rectValues)) return NativeSdkGradientInvalid;
+    const double rectRight = (double)rectValues[0] + rectValues[2];
+    const double rectBottom = (double)rectValues[1] + rectValues[3];
+    if (!isfinite(rectRight) || !isfinite(rectBottom)) return NativeSdkGradientInvalid;
+    NSRect shapeRect = CGRectStandardize(NSMakeRect(rectValues[0], rectValues[1], rectValues[2], rectValues[3]));
+
+    float opacity = 1;
+    if (command[@"opacity"] && !NativeSdkGradientNumber(command[@"opacity"], &opacity)) return NativeSdkGradientInvalid;
+    opacity = fmaxf(0, fminf(1, opacity));
+
+    float shapeRadii[4] = {0};
+    if (roundedFill && !NativeSdkGradientArray(shape[@"radius"], 4, shapeRadii)) return NativeSdkGradientInvalid;
+    const CGFloat shapeMaxRadius = fmax(0.0, fmin(NSWidth(shapeRect), NSHeight(shapeRect)) * 0.5);
+    for (NSUInteger corner = 0; corner < 4; corner += 1) {
+        const float radius = (float)fmax(0.0, fmin(shapeMaxRadius, shapeRadii[corner]));
+        if (!NativeSdkGradientScaled(radius, scale, &shapeRadii[corner])) return NativeSdkGradientInvalid;
+    }
+
+    BOOL hasClip = command[@"clip"] != nil;
+    NSRect clipRect = NSZeroRect;
+    float clipRadii[4] = {0};
+    if (hasClip) {
+        float clipValues[4] = {0};
+        if (!NativeSdkGradientArray(command[@"clip"], 4, clipValues)) return NativeSdkGradientInvalid;
+        const double clipRight = (double)clipValues[0] + clipValues[2];
+        const double clipBottom = (double)clipValues[1] + clipValues[3];
+        if (!isfinite(clipRight) || !isfinite(clipBottom)) return NativeSdkGradientInvalid;
+        clipRect = CGRectStandardize(NSMakeRect(clipValues[0], clipValues[1], clipValues[2], clipValues[3]));
+        if (command[@"clipRadius"] && !NativeSdkGradientArray(command[@"clipRadius"], 4, clipRadii)) return NativeSdkGradientInvalid;
+        const CGFloat clipMaxRadius = fmax(0.0, fmin(NSWidth(clipRect), NSHeight(clipRect)) * 0.5);
+        for (NSUInteger corner = 0; corner < 4; corner += 1) {
+            const float radius = (float)fmax(0.0, fmin(clipMaxRadius, clipRadii[corner]));
+            if (!NativeSdkGradientScaled(radius, scale, &clipRadii[corner])) return NativeSdkGradientInvalid;
+        }
+    } else if (command[@"clipRadius"] != nil) {
+        return NativeSdkGradientInvalid;
+    }
+
+    NativeSdkGradientUniforms uniforms = {0};
+    uniforms.viewport = (vector_float4){(float)pixelWidth, (float)pixelHeight, 0, 0};
+    float scaledShape[4] = {0};
+    if (!NativeSdkGradientScaled((float)NSMinX(shapeRect), scale, &scaledShape[0]) ||
+        !NativeSdkGradientScaled((float)NSMinY(shapeRect), scale, &scaledShape[1]) ||
+        !NativeSdkGradientScaled((float)NSWidth(shapeRect), scale, &scaledShape[2]) ||
+        !NativeSdkGradientScaled((float)NSHeight(shapeRect), scale, &scaledShape[3])) return NativeSdkGradientInvalid;
+    uniforms.shape_rect = (vector_float4){scaledShape[0], scaledShape[1], scaledShape[2], scaledShape[3]};
+    uniforms.corner_radius = (vector_float4){shapeRadii[0], shapeRadii[1], shapeRadii[2], shapeRadii[3]};
+    uniforms.clip_rect = (vector_float4){0, 0, -1, -1};
+    if (hasClip) {
+        float scaledClip[4] = {0};
+        if (!NativeSdkGradientScaled((float)NSMinX(clipRect), scale, &scaledClip[0]) ||
+            !NativeSdkGradientScaled((float)NSMinY(clipRect), scale, &scaledClip[1]) ||
+            !NativeSdkGradientScaled((float)NSWidth(clipRect), scale, &scaledClip[2]) ||
+            !NativeSdkGradientScaled((float)NSHeight(clipRect), scale, &scaledClip[3])) return NativeSdkGradientInvalid;
+        uniforms.clip_rect = (vector_float4){scaledClip[0], scaledClip[1], scaledClip[2], scaledClip[3]};
+        uniforms.clip_radius = (vector_float4){clipRadii[0], clipRadii[1], clipRadii[2], clipRadii[3]};
+    }
+
+    float spread = 0;
+    float interpolation = 1;
+    const NSUInteger firstStop = *stopCount;
+    const NSUInteger firstPatch = *patchCount;
+    NSUInteger addedStops = 0;
+    NSUInteger addedPatches = 0;
+    if ([paintKind isEqualToString:@"mesh_gradient"]) {
+        if (!NativeSdkGradientOptions(@{ @"interpolation" : paint[@"interpolation"] ?: @"srgb_linear" }, &spread, &interpolation)) return NativeSdkGradientInvalid;
+        NSArray *paintPatches = [paint[@"patches"] isKindOfClass:[NSArray class]] ? paint[@"patches"] : nil;
+        if (!paintPatches || paintPatches.count > NativeSdkCompositeMaxMeshPatches - firstPatch) return NativeSdkGradientInvalid;
+        addedPatches = paintPatches.count;
+        for (NSUInteger patchIndex = 0; patchIndex < addedPatches; patchIndex += 1) {
+            NSDictionary *sourcePatch = NativeSdkPacketDictionary(paintPatches[patchIndex]);
+            NSArray *sourcePoints = [sourcePatch[@"points"] isKindOfClass:[NSArray class]] ? sourcePatch[@"points"] : nil;
+            NSArray *sourceColors = [sourcePatch[@"colors"] isKindOfClass:[NSArray class]] ? sourcePatch[@"colors"] : nil;
+            if (!sourcePatch || sourcePoints.count != 16 || sourceColors.count != 4) return NativeSdkGradientInvalid;
+            NativeSdkMeshPatchGpu *patch = &patches[firstPatch + patchIndex];
+            float minX = INFINITY, minY = INFINITY, maxX = -INFINITY, maxY = -INFINITY;
+            for (NSUInteger pointIndex = 0; pointIndex < 16; pointIndex += 1) {
+                float point[2] = {0};
+                if (!NativeSdkGradientArray(sourcePoints[pointIndex], 2, point)) return NativeSdkGradientInvalid;
+                if (!NativeSdkGradientScaled(point[0], scale, &point[0]) ||
+                    !NativeSdkGradientScaled(point[1], scale, &point[1])) return NativeSdkGradientInvalid;
+                minX = fminf(minX, point[0]);
+                minY = fminf(minY, point[1]);
+                maxX = fmaxf(maxX, point[0]);
+                maxY = fmaxf(maxY, point[1]);
+                vector_float4 *pair = &patch->points[pointIndex / 2];
+                if ((pointIndex & 1) == 0) {
+                    pair->x = point[0];
+                    pair->y = point[1];
+                } else {
+                    pair->z = point[0];
+                    pair->w = point[1];
+                }
+            }
+            for (NSUInteger colorIndex = 0; colorIndex < 4; colorIndex += 1) {
+                float color[4] = {0};
+                if (!NativeSdkGradientArray(sourceColors[colorIndex], 4, color)) return NativeSdkGradientInvalid;
+                patch->colors[colorIndex] = (vector_float4){color[0], color[1], color[2], color[3]};
+            }
+            patch->bounds = (vector_float4){minX, minY, maxX, maxY};
+            patch->options = (vector_float4){interpolation, 0, 0, 0};
+        }
+        uniforms.paint = (vector_float4){4, (float)firstPatch, (float)addedPatches, opacity};
+    } else {
+        if (!NativeSdkGradientOptions(paint, &spread, &interpolation)) return NativeSdkGradientInvalid;
+        NSArray *paintStops = [paint[@"stops"] isKindOfClass:[NSArray class]] ? paint[@"stops"] : nil;
+        /* Direct composition is proved only for positive-stop gradients.
+         * Keep the reference evaluator's zero-stop semantic on exact Pixels. */
+        if (!paintStops || paintStops.count == 0 || paintStops.count > NativeSdkCompositeMaxGradientStops - firstStop) return NativeSdkGradientInvalid;
+        addedStops = paintStops.count;
+        for (NSUInteger stopIndex = 0; stopIndex < addedStops; stopIndex += 1) {
+            NSDictionary *sourceStop = NativeSdkPacketDictionary(paintStops[stopIndex]);
+            float offset = 0;
+            float color[4] = {0};
+            if (!sourceStop || !NativeSdkGradientNumber(sourceStop[@"offset"], &offset) ||
+                !NativeSdkGradientArray(sourceStop[@"color"], 4, color)) return NativeSdkGradientInvalid;
+            stops[firstStop + stopIndex].color = (vector_float4){color[0], color[1], color[2], color[3]};
+            stops[firstStop + stopIndex].data = (vector_float4){offset, 0, 0, 0};
+        }
+        if ([paintKind isEqualToString:@"linear_gradient"]) {
+            float start[2] = {0}, end[2] = {0};
+            if (!NativeSdkGradientArray(paint[@"start"], 2, start) || !NativeSdkGradientArray(paint[@"end"], 2, end)) return NativeSdkGradientInvalid;
+            if (!NativeSdkGradientScaled(start[0], scale, &start[0]) ||
+                !NativeSdkGradientScaled(start[1], scale, &start[1]) ||
+                !NativeSdkGradientScaled(end[0], scale, &end[0]) ||
+                !NativeSdkGradientScaled(end[1], scale, &end[1])) return NativeSdkGradientInvalid;
+            uniforms.gradient = (vector_float4){start[0], start[1], end[0], end[1]};
+            uniforms.paint = (vector_float4){1, (float)firstStop, (float)addedStops, opacity};
+        } else if ([paintKind isEqualToString:@"radial_gradient"]) {
+            float center[2] = {0}, radii[2] = {0};
+            if (!NativeSdkGradientArray(paint[@"center"], 2, center) || !NativeSdkGradientArray(paint[@"radii"], 2, radii) || radii[0] <= 0 || radii[1] <= 0) return NativeSdkGradientInvalid;
+            if (!NativeSdkGradientScaled(center[0], scale, &center[0]) ||
+                !NativeSdkGradientScaled(center[1], scale, &center[1]) ||
+                !NativeSdkGradientScaled(radii[0], scale, &radii[0]) ||
+                !NativeSdkGradientScaled(radii[1], scale, &radii[1])) return NativeSdkGradientInvalid;
+            uniforms.gradient = (vector_float4){center[0], center[1], radii[0], 0};
+            uniforms.gradient_options = (vector_float4){spread, interpolation, 0, radii[1]};
+            uniforms.paint = (vector_float4){2, (float)firstStop, (float)addedStops, opacity};
+        } else {
+            float center[2] = {0}, angle = 0;
+            if (!NativeSdkGradientArray(paint[@"center"], 2, center) || !NativeSdkGradientNumber(paint[@"startAngle"], &angle)) return NativeSdkGradientInvalid;
+            if (!NativeSdkGradientScaled(center[0], scale, &center[0]) ||
+                !NativeSdkGradientScaled(center[1], scale, &center[1])) return NativeSdkGradientInvalid;
+            uniforms.gradient = (vector_float4){center[0], center[1], angle, 0};
+            uniforms.gradient_options = (vector_float4){spread, interpolation, 0, 0};
+            uniforms.conic_basis = (vector_float4){scale, 0, 0, scale};
+            uniforms.paint = (vector_float4){3, (float)firstStop, (float)addedStops, opacity};
+        }
+        if (![paintKind isEqualToString:@"radial_gradient"]) {
+            uniforms.gradient_options.x = spread;
+            uniforms.gradient_options.y = interpolation;
+        }
+    }
+
+    *stopCount += addedStops;
+    *patchCount += addedPatches;
+    NSRect drawRect = shapeRect;
+    if (hasClip) drawRect = NSIntersectionRect(drawRect, clipRect);
+    CGFloat drawMinX = fmax(0.0, fmin((CGFloat)pixelWidth, floor(NSMinX(drawRect) * scale)));
+    CGFloat drawMinY = fmax(0.0, fmin((CGFloat)pixelHeight, floor(NSMinY(drawRect) * scale)));
+    CGFloat drawMaxX = fmax(drawMinX, fmin((CGFloat)pixelWidth, ceil(NSMaxX(drawRect) * scale)));
+    CGFloat drawMaxY = fmax(drawMinY, fmin((CGFloat)pixelHeight, ceil(NSMaxY(drawRect) * scale)));
+    if (NSIsEmptyRect(drawRect) || drawMaxX <= drawMinX || drawMaxY <= drawMinY || opacity <= 0) {
+        op->type = 0;
+        return NativeSdkGradientPreparedDirect;
+    }
+    uniforms.draw_rect = (vector_float4){
+        (float)drawMinX,
+        (float)drawMinY,
+        (float)(drawMaxX - drawMinX),
+        (float)(drawMaxY - drawMinY),
+    };
+    op->type = 8;
+    op->pxX = (float)drawMinX;
+    op->pxY = (float)drawMinY;
+    op->pxW = (float)(drawMaxX - drawMinX);
+    op->pxH = (float)(drawMaxY - drawMinY);
+    op->gradient = uniforms;
+    return NativeSdkGradientPreparedDirect;
+}
 
 typedef struct {
     float viewport[2];
@@ -5000,6 +5502,18 @@ static void NativeSdkCompositeEncodeTiledImage(id<MTLRenderCommandEncoder> encod
     [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 }
 
+static void NativeSdkCompositeEncodeGradient(
+    id<MTLRenderCommandEncoder> encoder,
+    const NativeSdkCompositeOp *op,
+    id<MTLBuffer> stopBuffer,
+    id<MTLBuffer> patchBuffer) {
+    [encoder setVertexBytes:&op->gradient length:sizeof(op->gradient) atIndex:0];
+    [encoder setFragmentBytes:&op->gradient length:sizeof(op->gradient) atIndex:0];
+    [encoder setFragmentBuffer:stopBuffer offset:0 atIndex:1];
+    [encoder setFragmentBuffer:patchBuffer offset:0 atIndex:2];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+}
+
 static void NativeSdkCompositeSetRoundedClip(NativeSdkCompositeOp *op, NSDictionary *command, CGFloat scale) {
     NSArray *clipArray = NativeSdkPacketArray(command[@"clip"], 4);
     NSArray *clipRadius = NativeSdkPacketArray(command[@"clipRadius"], 1);
@@ -5063,7 +5577,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
      * leaves renderFrame with no presenter pipeline/sampler, so it clears the
      * CAMetalDrawable but never draws the retained texture. */
     if (![self ensureCanvasPresenter]) return NO;
-    if (self.canvasCompositeBlendPipeline && self.canvasCompositeOpaquePipeline &&
+    if (self.canvasCompositeBlendPipeline && self.canvasCompositeOpaquePipeline && self.canvasCompositeGradientPipeline &&
         self.canvasCompositeNearestRepeatSampler && self.canvasCompositeLinearRepeatSampler &&
         self.canvasCompositeFlatTexture) return YES;
     if (!self.device || !self.commandQueue) return NO;
@@ -5074,9 +5588,28 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (![resources ensureImmutableResources]) return NO;
     self.canvasCompositeBlendPipeline = resources.compositeBlendPipeline;
     self.canvasCompositeOpaquePipeline = resources.compositeOpaquePipeline;
+    self.canvasCompositeGradientPipeline = resources.compositeGradientPipeline;
     self.canvasCompositeNearestRepeatSampler = resources.nearestRepeatSampler;
     self.canvasCompositeLinearRepeatSampler = resources.linearRepeatSampler;
     self.canvasCompositeFlatTexture = resources.flatTexture;
+    return YES;
+}
+
+- (BOOL)ensureCanvasGradientResources {
+    if (self.canvasGradientStopBuffer && self.canvasMeshPatchBuffer &&
+        self.canvasGradientStopScratch && self.canvasMeshPatchScratch) return YES;
+    if (!self.device) return NO;
+    const NSUInteger stopBytes = NativeSdkCompositeMaxGradientStops * sizeof(NativeSdkGradientStopGpu);
+    const NSUInteger patchBytes = NativeSdkCompositeMaxMeshPatches * sizeof(NativeSdkMeshPatchGpu);
+    id<MTLBuffer> stopBuffer = [self.device newBufferWithLength:stopBytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> patchBuffer = [self.device newBufferWithLength:patchBytes options:MTLResourceStorageModeShared];
+    NSMutableData *stopScratch = [NSMutableData dataWithLength:stopBytes];
+    NSMutableData *patchScratch = [NSMutableData dataWithLength:patchBytes];
+    if (!stopBuffer || !patchBuffer || !stopScratch || !patchScratch) return NO;
+    self.canvasGradientStopBuffer = stopBuffer;
+    self.canvasMeshPatchBuffer = patchBuffer;
+    self.canvasGradientStopScratch = stopScratch;
+    self.canvasMeshPatchScratch = patchScratch;
     return YES;
 }
 
@@ -5246,6 +5779,9 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (!opsData) return -1;
     NativeSdkCompositeOp *ops = (NativeSdkCompositeOp *)opsData.mutableBytes;
     NSMutableArray *opTextures = [NSMutableArray array];
+    NSUInteger gradientStopCount = 0;
+    NSUInteger meshPatchCount = 0;
+    NSUInteger gradientQuadCount = 0;
     [self rasterCacheEnsureScale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight];
     for (NSUInteger index = 0; index < commands.count; index += 1) {
         NativeSdkCompositeOp *op = &ops[index];
@@ -5269,6 +5805,36 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             if (!intersects) continue;
         }
         self.canvasTraceDrawnCount += 1;
+        NSDictionary *commandPaint = NativeSdkPacketDictionary(command[@"paint"]);
+        NSString *commandPaintKind = [commandPaint[@"kind"] isKindOfClass:[NSString class]] ? commandPaint[@"kind"] : @"";
+        const BOOL hasGradientPaint = [commandPaintKind isEqualToString:@"linear_gradient"] ||
+            [commandPaintKind isEqualToString:@"radial_gradient"] ||
+            [commandPaintKind isEqualToString:@"conic_gradient"] ||
+            [commandPaintKind isEqualToString:@"mesh_gradient"];
+        if (hasGradientPaint) {
+            if (![self ensureCanvasGradientResources]) return -1;
+            NativeSdkGradientPrepareResult gradientResult = NativeSdkMetalPrepareGradient(
+                command,
+                scale,
+                pixelWidth,
+                pixelHeight,
+                (NativeSdkGradientStopGpu *)self.canvasGradientStopScratch.mutableBytes,
+                &gradientStopCount,
+                (NativeSdkMeshPatchGpu *)self.canvasMeshPatchScratch.mutableBytes,
+                &meshPatchCount,
+                op);
+            if (gradientResult != NativeSdkGradientPreparedDirect) return 0;
+            if (op->type == 8) {
+                gradientQuadCount += 1;
+                self.canvasTraceDirectCount += 1;
+            } else {
+                self.canvasTraceDrawnCount -= 1;
+            }
+            continue;
+        }
+        /* A gradient wire kind paired with a missing or malformed paint must
+         * not fall into the small Core Graphics linear subset. */
+        if ([kind hasSuffix:@"_gradient"]) return 0;
         if ([kind isEqualToString:@"blur"]) {
             MTLRegion region = {0};
             if (!NativeSdkCompositeBlurWriteRegion(command, scale, pixelWidth, pixelHeight, hasScissor, scissorRect, &region)) {
@@ -5569,6 +6135,17 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         [opTextures addObject:scratch];
     }
 
+    if (gradientStopCount > 0) {
+        memcpy(self.canvasGradientStopBuffer.contents,
+               self.canvasGradientStopScratch.bytes,
+               gradientStopCount * sizeof(NativeSdkGradientStopGpu));
+    }
+    if (meshPatchCount > 0) {
+        memcpy(self.canvasMeshPatchBuffer.contents,
+               self.canvasMeshPatchScratch.bytes,
+               meshPatchCount * sizeof(NativeSdkMeshPatchGpu));
+    }
+
     /* Encode. Everything is validated; failures past this point are
      * device-level and surface as -1 (present failure -> engine resync). */
     float clearComponents[4] = {0, 0, 0, 1};
@@ -5687,7 +6264,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             self.canvasTraceQuadCount += 1;
             continue;
         }
-        id<MTLRenderPipelineState> wanted = op->type == 1 ? self.canvasCompositeOpaquePipeline : self.canvasCompositeBlendPipeline;
+        id<MTLRenderPipelineState> wanted = op->type == 8 ? self.canvasCompositeGradientPipeline :
+            (op->type == 1 ? self.canvasCompositeOpaquePipeline : self.canvasCompositeBlendPipeline);
         for (NSUInteger rectIndex = 0; rectIndex < rectCount; rectIndex += 1) {
             if (cullToRects && op->hasCullBounds && !NativeSdkPacketRectIntersects(op->cullBounds, pointRects[rectIndex])) continue;
             if (currentPipeline != wanted) {
@@ -5711,6 +6289,12 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                     op,
                     (__bridge id<MTLTexture>)op->texture,
                     sampler);
+            } else if (op->type == 8) {
+                NativeSdkCompositeEncodeGradient(
+                    encoder,
+                    op,
+                    self.canvasGradientStopBuffer,
+                    self.canvasMeshPatchBuffer);
             } else {
                 NativeSdkCompositeEncodeQuad(encoder, pixelWidth, pixelHeight, op->pxX, op->pxY, op->pxW, op->pxH, 0, 0, NULL, YES, (__bridge id<MTLTexture>)op->texture);
             }
@@ -5724,10 +6308,13 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     }
     [commandBuffer commit];
     if (bakeoffTrace) {
-        fprintf(stderr, "native-sdk: renderer-bakeoff stage=command_encode path=composite commands=%lu quads=%lu binds=%lu us=%llu\n",
+        fprintf(stderr, "native-sdk: renderer-bakeoff stage=command_encode path=composite commands=%lu quads=%lu binds=%lu gradient_quads=%lu gradient_stop_bytes=%lu mesh_patch_bytes=%lu us=%llu\n",
                 (unsigned long)commands.count,
                 (unsigned long)self.canvasTraceQuadCount,
                 (unsigned long)self.canvasTraceBindCount,
+                (unsigned long)gradientQuadCount,
+                (unsigned long)(gradientStopCount * sizeof(NativeSdkGradientStopGpu)),
+                (unsigned long)(meshPatchCount * sizeof(NativeSdkMeshPatchGpu)),
                 (unsigned long long)((NativeSdkTimestampNanoseconds() - encodeBeginNs) / 1000));
     }
     self.canvasCompositeLastCommandBuffer = commandBuffer;
@@ -5793,7 +6380,13 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
               sampleBuffer:nil
                      layer:nil
                 completion:^(BOOL completed, IOSurfaceRef surface) {
-            weakSelf.headlessExportInFlight = NO;
+            NativeSdkMetalSurfaceView *strongSelf = weakSelf;
+            if (completed && strongSelf) {
+                /* The displayed baseline now comes from the packet texture,
+                 * so a later dirty Pixels frame must begin with a full upload. */
+                strongSelf.headlessReferencePixelsValid = NO;
+            }
+            strongSelf.headlessExportInFlight = NO;
             exportCompletion(completed, surface, pixelWidth, pixelHeight);
         }];
         if (!exported) return -1;
@@ -7012,6 +7605,22 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         if (strongSelf.gpuBackend != 3 || strongSelf.rendererRetryAfterNs != expectedRetryNs) return;
         [strongSelf requestRetainedCanvasFrame];
     });
+}
+
+/* A live shared-host pixel present is not a transient renderer failure:
+ * it is the exact semantic path for a packet the host cannot represent.
+ * Keep that choice stable for this surface session and park completely;
+ * no 1/5/30-second packet recovery probes for an unchanged widget. Host
+ * loss still reconnects on the next real pixel present. */
+- (void)noteRendererSharedPixelSuccess {
+    const BOOL changed = self.gpuBackend != 3 || self.rendererRetryAfterNs != 0;
+    self.gpuBackend = 3;
+    self.rendererRetryAfterNs = 0;
+    if (changed) {
+        self.rendererDemotionCount += 1;
+        fprintf(stderr, "native-sdk: renderer backend=software reason=shared-pixel-stable retry_ms=none failures=%lu\n",
+                (unsigned long)self.rendererDemotionCount);
+    }
 }
 
 - (void)armRendererRetryIfDue {
@@ -9364,14 +9973,18 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     NSView *view = self.nativeViews[key];
     if (![view isKindOfClass:[NativeSdkMetalSurfaceView class]]) return NO;
     NativeSdkMetalSurfaceView *surface = (NativeSdkMetalSurfaceView *)view;
-    /* A raw pixel present moves the glass past the retained command
-     * dictionary; the next patch attempt must refuse into a full
-     * resync. (The packet path calls presentPixelsWithWidth internally,
-     * so the invalidation lives here at the raw entry, not inside it.) */
-    surface.hasCanvasRetainedState = NO;
     const BOOL presented = [surface presentPixelsWithWidth:width height:height scale:scale hasDirtyRect:hasDirtyRect dirtyX:dirtyX dirtyY:dirtyY dirtyWidth:dirtyWidth dirtyHeight:dirtyHeight dirtyRects:nil rgba8:rgba8 byteLength:byteLength];
     if (presented) {
-        [surface noteRendererPixelFallback];
+        /* Only a successful present moves glass past the packet
+         * dictionary. A refused pixel frame leaves the old IOSurface and
+         * retained baseline untouched, so the next full packet remains
+         * valid. */
+        surface.hasCanvasRetainedState = NO;
+        if (NativeSdkSharedRendererClientEnabled()) {
+            [surface noteRendererSharedPixelSuccess];
+        } else {
+            [surface noteRendererPixelFallback];
+        }
         [self showDeferredWindowIfPending:windowId reason:"first-present"];
     }
     return presented;
@@ -13068,6 +13681,35 @@ static void NativeSdkRenderHostHandleResourceUpload(NativeSdkRenderHostClient *c
     if (kr != KERN_SUCCESS) mach_msg_destroy(&reply.header);
 }
 
+/* Install the one completion that turns either a packet export or a
+ * reference-pixel export into the client's IOSurface reply. Bound lazily
+ * because resource uploads may construct the renderer before its first
+ * present. The strong capture keeps an in-flight reply alive across a
+ * client disconnect; teardown breaks the renderer/completion cycle. */
+static void NativeSdkRenderHostEnsureExportCompletion(NativeSdkRenderHostClient *client, CGFloat surfaceWidth, CGFloat surfaceHeight, CGFloat scale) {
+    if (client.renderer.headlessExportCompletion) return;
+    NativeSdkRenderHostClient *capturedClient = client;
+    client.renderer.headlessExportCompletion = ^(BOOL completed, IOSurfaceRef surface, NSUInteger pixelWidth, NSUInteger pixelHeight) {
+        NativeSdkRenderHostClient *strongClient = capturedClient;
+        const mach_port_t pending = strongClient.pendingReplyPort;
+        strongClient.pendingReplyPort = MACH_PORT_NULL;
+        NativeSdkRenderHostNoteFrameDuration(strongClient);
+        if (completed && surface) {
+            if (strongClient.lastSurface != surface) {
+                if (strongClient.lastSurface) CFRelease(strongClient.lastSurface);
+                strongClient.lastSurface = (IOSurfaceRef)CFRetain(surface);
+            }
+            strongClient.lastPixelWidth = (uint32_t)pixelWidth;
+            strongClient.lastPixelHeight = (uint32_t)pixelHeight;
+            NativeSdkRenderHostSendFrameReply(pending, kWeaverRendererMachStatusOk, surface, (uint32_t)pixelWidth, (uint32_t)pixelHeight);
+        } else {
+            NativeSdkRenderHostSendFrameReply(pending, kWeaverRendererMachStatusFailed, NULL, 0, 0);
+        }
+    };
+    fprintf(stderr, "weaver-render-host: client pid=%d renderer %.0fx%.0f@%.2f\n",
+            client.widgetPid, surfaceWidth, surfaceHeight, scale);
+}
+
 static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, WeaverRendererMachFrame *frame) {
     mach_port_t replyPort = frame->header.msgh_remote_port;
     void *packetBytes = frame->packet.address;
@@ -13098,36 +13740,7 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
     if (!client.renderer) {
         client.renderer = [[NativeSdkMetalSurfaceView alloc] initHeadlessRendererWithFrame:NSMakeRect(0, 0, frame->surface_width, frame->surface_height)];
     }
-    if (!client.renderer.headlessExportCompletion) {
-        /* Bound here rather than at construction: an image upload may
-         * have created the renderer before the first frame arrived.
-         * Deliberately a STRONG capture: an export in flight must be able
-         * to answer (or destroy) its reply right even if the client
-         * disconnects mid-frame, so the completion keeps the client
-         * object alive until it has run. The renderer->completion->client
-         * ->renderer cycle is broken at teardown, which nils
-         * headlessExportCompletion. */
-        NativeSdkRenderHostClient *capturedClient = client;
-        client.renderer.headlessExportCompletion = ^(BOOL completed, IOSurfaceRef surface, NSUInteger pixelWidth, NSUInteger pixelHeight) {
-            NativeSdkRenderHostClient *strongClient = capturedClient;
-            const mach_port_t pending = strongClient.pendingReplyPort;
-            strongClient.pendingReplyPort = MACH_PORT_NULL;
-            NativeSdkRenderHostNoteFrameDuration(strongClient);
-            if (completed && surface) {
-                if (strongClient.lastSurface != surface) {
-                    if (strongClient.lastSurface) CFRelease(strongClient.lastSurface);
-                    strongClient.lastSurface = (IOSurfaceRef)CFRetain(surface);
-                }
-                strongClient.lastPixelWidth = (uint32_t)pixelWidth;
-                strongClient.lastPixelHeight = (uint32_t)pixelHeight;
-                NativeSdkRenderHostSendFrameReply(pending, kWeaverRendererMachStatusOk, surface, (uint32_t)pixelWidth, (uint32_t)pixelHeight);
-            } else {
-                NativeSdkRenderHostSendFrameReply(pending, kWeaverRendererMachStatusFailed, NULL, 0, 0);
-            }
-        };
-        fprintf(stderr, "weaver-render-host: client pid=%d renderer %.0fx%.0f@%.2f\n",
-                client.widgetPid, frame->surface_width, frame->surface_height, frame->scale);
-    }
+    NativeSdkRenderHostEnsureExportCompletion(client, frame->surface_width, frame->surface_height, frame->scale);
     client.pendingReplyPort = replyPort;
     NativeSdkRenderHostSetActiveFontTable(client.fontDescriptorsById, (uint64_t)client.widgetPid);
     const NSInteger result = [client.renderer
@@ -13167,6 +13780,57 @@ static void NativeSdkRenderHostHandleFrame(NativeSdkRenderHostClient *client, We
     NativeSdkRenderHostSendFrameReply(replyPort, result == 0 ? kWeaverRendererMachStatusRefused : kWeaverRendererMachStatusFailed, NULL, 0, 0);
 }
 
+static void NativeSdkRenderHostHandlePixels(NativeSdkRenderHostClient *client, WeaverRendererMachPixels *frame) {
+    const mach_port_t replyPort = frame->header.msgh_remote_port;
+    void *pixelBytes = frame->pixels.address;
+    const mach_msg_size_t pixelSize = frame->pixels.size;
+    if (client.pendingReplyPort != MACH_PORT_NULL || client.renderer.headlessExportInFlight) {
+        fprintf(stderr, "weaver-render-host: pid=%d sent overlapping pixels (one outstanding present per client); refused\n", client.widgetPid);
+        if (pixelBytes) vm_deallocate(mach_task_self(), (vm_address_t)pixelBytes, pixelSize);
+        NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusRefused, NULL, 0, 0);
+        return;
+    }
+    client.frameRenderBeginNs = NativeSdkRenderHostMonotonicNanoseconds();
+    if (!weaverRendererMachPixelsValid(frame)) {
+        fprintf(stderr, "weaver-render-host: invalid pixel frame from pid=%d (%ux%u len=%u scale=%.3f)\n",
+                client.widgetPid, frame->pixel_width, frame->pixel_height, frame->pixel_len, frame->scale);
+        if (pixelBytes) vm_deallocate(mach_task_self(), (vm_address_t)pixelBytes, pixelSize);
+        NativeSdkRenderHostNoteFrameDuration(client);
+        NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusRefused, NULL, 0, 0);
+        return;
+    }
+    if (!client.renderer) {
+        const CGFloat surfaceWidth = (CGFloat)frame->pixel_width / (CGFloat)frame->scale;
+        const CGFloat surfaceHeight = (CGFloat)frame->pixel_height / (CGFloat)frame->scale;
+        client.renderer = [[NativeSdkMetalSurfaceView alloc] initHeadlessRendererWithFrame:NSMakeRect(0, 0, surfaceWidth, surfaceHeight)];
+    }
+    NativeSdkRenderHostEnsureExportCompletion(client,
+                                               (CGFloat)frame->pixel_width / (CGFloat)frame->scale,
+                                               (CGFloat)frame->pixel_height / (CGFloat)frame->scale,
+                                               frame->scale);
+    client.pendingReplyPort = replyPort;
+    [client.renderer
+        presentHeadlessReferencePixelsWithWidth:frame->pixel_width
+                                         height:frame->pixel_height
+                                          scale:frame->scale
+                                   hasDirtyRect:frame->has_dirty_rect != 0
+                                         dirtyX:frame->dirty_x
+                                         dirtyY:frame->dirty_y
+                                     dirtyWidth:frame->dirty_width
+                                    dirtyHeight:frame->dirty_height
+                                          rgba8:(const uint8_t *)pixelBytes
+                                     byteLength:frame->pixel_len];
+    if (pixelBytes) vm_deallocate(mach_task_self(), (vm_address_t)pixelBytes, pixelSize);
+    if (client.renderer.headlessExportInFlight) return;
+    /* A successful headless present always arms an async completion, and
+     * main-queue serialization prevents it from clearing the in-flight flag
+     * before this handler returns. Reaching here means no completion was
+     * armed, so no IOSurface can arrive and the presentation failed. */
+    client.pendingReplyPort = MACH_PORT_NULL;
+    NativeSdkRenderHostNoteFrameDuration(client);
+    NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusFailed, NULL, 0, 0);
+}
+
 int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
     const char *envName = getenv(WEAVER_RENDER_HOST_NAME_ENV);
     const char *name = bootstrap_name && bootstrap_name[0] ? bootstrap_name
@@ -13178,6 +13842,14 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
         return 1;
     }
     NSApplicationLoad();
+    /* The host is supervised as a long-lived process. Load its immutable
+     * Metal library and four pipelines before advertising readiness so the
+     * first widget frame does not pay the measured shader-load cost. */
+    NativeSdkMetalProcessResources *metalResources = [NativeSdkMetalProcessResources sharedResources];
+    if (![metalResources ensureImmutableResources]) {
+        fprintf(stderr, "weaver-render-host: failed to initialize shared Metal resources\n");
+        return 1;
+    }
     NSMutableSet<NativeSdkRenderHostClient *> *clients = [NSMutableSet set];
 
     dispatch_source_t helloSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, servicePort, 0, dispatch_get_main_queue());
@@ -13239,6 +13911,7 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
                     if (!strongClient) return;
                     union {
                         struct { WeaverRendererMachFrame frame; mach_msg_trailer_t trailer; } framed;
+                        struct { WeaverRendererMachPixels pixels; mach_msg_trailer_t trailer; } pixel;
                         struct { WeaverRendererMachResourceUpload upload; mach_msg_trailer_t trailer; } resource;
                     } message;
                     memset(&message, 0, sizeof(message));
@@ -13281,6 +13954,23 @@ int native_sdk_appkit_render_host_run(const char *bootstrap_name) {
                             return;
                         }
                         NativeSdkRenderHostHandleResourceUpload(strongClient, &message.resource.upload);
+                        return;
+                    }
+                    if (message.framed.frame.header.msgh_id == kWeaverRendererMachMsgPixels) {
+                        /* Pixel frames are always complex with one OOL
+                         * byte descriptor. Shape is checked before any
+                         * scalar is trusted; malformed transferred rights
+                         * are destroyed as one Mach message. */
+                        const BOOL pixelShapeOk =
+                            (message.pixel.pixels.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0 &&
+                            message.pixel.pixels.body.msgh_descriptor_count == 1 &&
+                            message.pixel.pixels.pixels.type == MACH_MSG_OOL_DESCRIPTOR;
+                        if (!pixelShapeOk) {
+                            fprintf(stderr, "weaver-render-host: malformed pixel frame from pid=%d destroyed\n", strongClient.widgetPid);
+                            mach_msg_destroy(&message.pixel.pixels.header);
+                            return;
+                        }
+                        NativeSdkRenderHostHandlePixels(strongClient, &message.pixel.pixels);
                         return;
                     }
                     /* Shape before content: a frame must be a complex
