@@ -6380,7 +6380,13 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
               sampleBuffer:nil
                      layer:nil
                 completion:^(BOOL completed, IOSurfaceRef surface) {
-            weakSelf.headlessExportInFlight = NO;
+            NativeSdkMetalSurfaceView *strongSelf = weakSelf;
+            if (completed && strongSelf) {
+                /* The displayed baseline now comes from the packet texture,
+                 * so a later dirty Pixels frame must begin with a full upload. */
+                strongSelf.headlessReferencePixelsValid = NO;
+            }
+            strongSelf.headlessExportInFlight = NO;
             exportCompletion(completed, surface, pixelWidth, pixelHeight);
         }];
         if (!exported) return -1;

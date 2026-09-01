@@ -779,6 +779,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "headlessReferencePixelTexture" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (completed && strongSelf) {" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "strongSelf.hasCanvasRetainedState = NO;" },
+        // A successful packet export advances the displayed baseline away
+        // from the reference texture. The next dirty Pixels frame must
+        // therefore promote to a full upload; a failed export preserves it.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "strongSelf.headlessReferencePixelsValid = NO;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "The displayed baseline now comes from the packet texture" },
         // Completion replies share IOSurface lookup/cache/right ownership
         // across both request kinds.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "receivePresentedSurface:(IOSurfaceRef *)outSurface requestKind:" },
