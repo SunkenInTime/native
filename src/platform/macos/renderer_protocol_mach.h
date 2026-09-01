@@ -2,6 +2,7 @@
 
 #include <mach/mach.h>
 #include <stdbool.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -23,11 +24,15 @@
  * session port. */
 
 static const uint32_t kWeaverRendererMachMagic = 0x314d5257; /* WRM1 */
-static const uint32_t kWeaverRendererMachVersion = 1;
+static const uint32_t kWeaverRendererMachVersion = 2;
 /* Same packet ceiling as the Windows contract (kWeaverRendererMaxPacket):
  * a tripwire far past any measured widget packet, not a budget widgets
  * feel. */
 static const uint32_t kWeaverRendererMachMaxPacket = 8 * 1024 * 1024;
+/* Physical surface extent already enforced by packet presents. Pixel
+ * frames use the same measured tripwire, and derive their byte length
+ * from it instead of introducing a second surface budget. */
+static const uint32_t kWeaverRendererMachMaxPhysicalExtent = 16384;
 
 /* The host's per-user bootstrap name. Overridable so tests and bakeoff
  * runs can isolate a private host instance. */
@@ -38,6 +43,7 @@ enum {
     kWeaverRendererMachMsgHello = 0x57520001,
     kWeaverRendererMachMsgFrame = 0x57520002,
     kWeaverRendererMachMsgResourceUpload = 0x57520003,
+    kWeaverRendererMachMsgPixels = 0x57520004,
 };
 
 enum {
@@ -128,6 +134,30 @@ typedef struct {
     uint32_t pixel_height;
 } WeaverRendererMachFrameReply;
 
+/* Exact RGBA8 reference pixels for commands the host packet compositor
+ * cannot represent. Pixels are a full surface buffer even when a dirty
+ * rect is supplied; the rect only narrows the host texture upload. This
+ * keeps the fallback stateless on the wire and lets a failed/refused
+ * present retry with a full upload without reconstructing missing rows. */
+typedef struct {
+    mach_msg_header_t header;
+    mach_msg_body_t body;
+    mach_msg_ool_descriptor_t pixels;
+    uint32_t magic;
+    uint32_t version;
+    uint32_t struct_size;
+    uint32_t pixel_len;
+    uint32_t pixel_width;
+    uint32_t pixel_height;
+    double scale;
+    double dirty_x;
+    double dirty_y;
+    double dirty_width;
+    double dirty_height;
+    uint32_t has_dirty_rect;
+    uint32_t reserved;
+} WeaverRendererMachPixels;
+
 /* One registered resource, uploaded (or removed) ahead of the packets
  * that reference it. payload_len == 0 (with a null descriptor size) is a
  * removal; the reply is the completion signal, mirroring frames. Images
@@ -199,4 +229,31 @@ static inline bool weaverRendererMachFrameValid(const WeaverRendererMachFrame *f
         frame->scale > 0 && frame->scale <= 16.0 &&
         frame->surface_width * frame->scale <= 16384.0 &&
         frame->surface_height * frame->scale <= 16384.0;
+}
+
+static inline bool weaverRendererMachPixelsValid(const WeaverRendererMachPixels *frame) {
+    if (!frame ||
+        frame->header.msgh_size != sizeof(WeaverRendererMachPixels) ||
+        frame->header.msgh_id != kWeaverRendererMachMsgPixels ||
+        frame->magic != kWeaverRendererMachMagic ||
+        frame->version != kWeaverRendererMachVersion ||
+        frame->struct_size != sizeof(WeaverRendererMachPixels) ||
+        frame->pixel_len == 0 ||
+        frame->pixels.size != frame->pixel_len ||
+        frame->pixels.type != MACH_MSG_OOL_DESCRIPTOR ||
+        frame->pixel_width == 0 || frame->pixel_height == 0 ||
+        frame->pixel_width > kWeaverRendererMachMaxPhysicalExtent ||
+        frame->pixel_height > kWeaverRendererMachMaxPhysicalExtent ||
+        !isfinite(frame->scale) || frame->scale <= 0 || frame->scale > 16.0 ||
+        frame->has_dirty_rect > 1 || frame->reserved != 0 ||
+        !isfinite(frame->dirty_x) || !isfinite(frame->dirty_y) ||
+        !isfinite(frame->dirty_width) || !isfinite(frame->dirty_height)) return false;
+    const uint64_t expected_len = (uint64_t)frame->pixel_width * (uint64_t)frame->pixel_height * 4u;
+    if (expected_len > UINT32_MAX || frame->pixel_len != (uint32_t)expected_len) return false;
+    if (frame->has_dirty_rect != 0) {
+        if (frame->dirty_width <= 0 || frame->dirty_height <= 0) return false;
+        if (!isfinite(frame->dirty_x + frame->dirty_width) ||
+            !isfinite(frame->dirty_y + frame->dirty_height)) return false;
+    }
+    return true;
 }

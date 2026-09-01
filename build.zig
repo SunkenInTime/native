@@ -221,6 +221,17 @@ pub fn build(b: *std.Build) void {
         artifact.root_module.linkSystemLibrary("c", .{});
         break :tests artifact;
     } else null;
+    const macos_renderer_protocol_tests: ?*std.Build.Step.Compile = if (target.result.os.tag == .macos) tests: {
+        const renderer_protocol_test_mod = module(b, target, optimize, "src/platform/macos/renderer_protocol_mach_tests.zig");
+        const artifact = testArtifact(b, renderer_protocol_test_mod);
+        artifact.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/renderer_protocol_mach_tests.c"),
+            .flags = &.{"-std=c11"},
+        });
+        artifact.root_module.addIncludePath(b.path("src/platform/macos"));
+        artifact.root_module.linkSystemLibrary("c", .{});
+        break :tests artifact;
+    } else null;
 
     // The embeddable static library's root module carries only the C ABI
     // exports (fixed WebView shell host); user-app canvas libraries are
@@ -504,6 +515,9 @@ pub fn build(b: *std.Build) void {
     if (windows_image_decoder_tests) |tests| {
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
+    if (macos_renderer_protocol_tests) |tests| {
+        test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
     for (desktop_test_shards) |shard_tests| {
         test_step.dependOn(&b.addRunArtifact(shard_tests).step);
     }
@@ -684,7 +698,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostHandleResourceUpload(strongClient, &message.resource.upload);" },
         // An image arriving before the first frame constructs the
         // renderer; the export completion binds lazily so that order works.
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!client.renderer.headlessExportCompletion) {" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostEnsureExportCompletion(client" },
         // A replacement host gets every registered image replayed on
         // reconnect, and a retain action installs from the store when the
         // fresh view cache lacks the entry — art survives host crashes.
@@ -715,9 +729,10 @@ pub fn build(b: *std.Build) void {
         // Surface rights bookkeeping: duplicates for cached ids are
         // deallocated every frame.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "mach_port_deallocate(mach_task_self(), frameReply.reply.surface_port.name);" },
-        // Local fallbacks refuse loudly in client mode; the existing
-        // demote/retry machinery covers host recovery.
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "pixel fallback refused (device-less widget)" },
+        // Reference pixels use the same device-less IOSurface adoption
+        // path, with no local Metal objects or fallback retry timer.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "presentPixels:rgba8" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "reason=shared-pixel-stable retry_ms=none" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-render-host", "Verify the macOS render host keeps the shared-renderer contract", &.{
         // Versioned handshake separate from frame framing, same policy as
@@ -743,6 +758,29 @@ pub fn build(b: *std.Build) void {
         // in-flight flag is what tells the host a completion is coming.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (client.renderer.headlessExportInFlight) return;" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "self.headlessExportInFlight = YES;" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-shared-renderer-pixels", "Verify exact fallback pixels cross the shared Metal render host transactionally", &.{
+        // Protocol v2 adds one checked OOL RGBA8 message. The validator
+        // derives exact bytes from the established physical extent and
+        // rejects stale versions and non-finite dirty geometry.
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "kWeaverRendererMachVersion = 2" },
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "kWeaverRendererMachMsgPixels" },
+        .{ .path = "src/platform/macos/renderer_protocol_mach.h", .pattern = "weaverRendererMachPixelsValid" },
+        // Pixels may be the first post-hello request; the host constructs
+        // its renderer, installs the shared completion, and exports a real
+        // GPU-completed IOSurface rather than calling the window path.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostHandlePixels" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostEnsureExportCompletion(client" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "presentHeadlessReferencePixelsWithWidth" },
+        // A separate lazy source texture keeps packet state transactional;
+        // only the successful Metal completion invalidates that baseline.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "headlessReferencePixelTexture" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (completed && strongSelf) {" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "strongSelf.hasCanvasRetainedState = NO;" },
+        // Completion replies share IOSurface lookup/cache/right ownership
+        // across both request kinds.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "receivePresentedSurface:(IOSurfaceRef *)outSurface requestKind:" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "reference_pixel_bytes=" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-iosurface-presenter", "Verify the IOSurface presentation path keeps drawable-path semantics", &.{
         // The flag and the plain content layer (no CAMetalLayer in this mode).
@@ -889,6 +927,7 @@ pub fn build(b: *std.Build) void {
     }
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-production-metal-lifetime", "Verify AppKit ships the measured process-lifetime Metal architecture", &.{
         .{ .path = "build/app.zig", .pattern = "embeddedMetalLibrary(b, dep)" },
+        .{ .path = "build/app.zig", .pattern = "compile.addFileInput(dep.path(\"src/platform/macos/canvas_shader_types.h\"))" },
         .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "native_sdk_composite_fragment" },
         .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "float coverage = clamp(0.5 - distance, 0.0, 1.0)" },
         .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "uniforms.primitive == 4u" },
@@ -906,6 +945,23 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "failure == 2 ? 5 * NativeSdkNanosecondsPerSecond : 30 * NativeSdkNanosecondsPerSecond" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "strongSelf.rendererRetryAfterNs != expectedRetryNs" },
         .{ .path = "src/runtime/gpu_surface_events.zig", .pattern = "if (backend_changed) self.invalidateFor(.state" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-shared-gradient-compositor", "Verify the shared Metal host accelerates proved gradient fills and fails closed to exact pixels", &.{
+        .{ .path = "src/platform/macos/canvas_shader_types.h", .pattern = "NativeSdkGradientStopGpu" },
+        .{ .path = "src/platform/macos/canvas_shader_types.h", .pattern = "NativeSdkMeshPatchGpu" },
+        .{ .path = "src/platform/macos/canvas_shader_types.h", .pattern = "NativeSdkGradientUniforms" },
+        .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "native_sdk_gradient_fragment" },
+        .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "native_sdk_sample_gradient" },
+        .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "native_sdk_sample_mesh" },
+        .{ .path = "src/platform/macos/canvas_shaders.metal", .pattern = "Exact port of the shipped Windows evaluator's bounded Newton" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkCompositeMaxGradientStops = 64" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkCompositeMaxMeshPatches = 16" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "command[@\"transform\"] != nil) return NativeSdkGradientNeedsReference" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if ([kind hasSuffix:@\"_gradient\"]) return 0" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkCompositeEncodeGradient" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "gradient_stop_bytes=%lu mesh_patch_bytes=%lu" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (![metalResources ensureImmutableResources])" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "presentHeadlessReferencePixelsWithWidth" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-transforms", "Verify AppKit GPU packet presenter applies command transforms", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketApplyTransform(command[@\"transform\"])" },
