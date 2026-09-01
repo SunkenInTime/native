@@ -13801,7 +13801,7 @@ static void NativeSdkRenderHostHandlePixels(NativeSdkRenderHostClient *client, W
                                                (CGFloat)frame->pixel_height / (CGFloat)frame->scale,
                                                frame->scale);
     client.pendingReplyPort = replyPort;
-    const BOOL presented = [client.renderer
+    [client.renderer
         presentHeadlessReferencePixelsWithWidth:frame->pixel_width
                                          height:frame->pixel_height
                                           scale:frame->scale
@@ -13814,11 +13814,13 @@ static void NativeSdkRenderHostHandlePixels(NativeSdkRenderHostClient *client, W
                                      byteLength:frame->pixel_len];
     if (pixelBytes) vm_deallocate(mach_task_self(), (vm_address_t)pixelBytes, pixelSize);
     if (client.renderer.headlessExportInFlight) return;
-    /* A successful headless present always owns an async completion. If
-     * none was armed, no IOSurface can arrive and the request failed. */
+    /* A successful headless present always arms an async completion, and
+     * main-queue serialization prevents it from clearing the in-flight flag
+     * before this handler returns. Reaching here means no completion was
+     * armed, so no IOSurface can arrive and the presentation failed. */
     client.pendingReplyPort = MACH_PORT_NULL;
     NativeSdkRenderHostNoteFrameDuration(client);
-    NativeSdkRenderHostSendFrameReply(replyPort, presented ? kWeaverRendererMachStatusFailed : kWeaverRendererMachStatusRefused, NULL, 0, 0);
+    NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusFailed, NULL, 0, 0);
 }
 
 int native_sdk_appkit_render_host_run(const char *bootstrap_name) {

@@ -772,6 +772,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostHandlePixels" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostEnsureExportCompletion(client" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "presentHeadlessReferencePixelsWithWidth" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Reaching here means no completion was" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRenderHostSendFrameReply(replyPort, kWeaverRendererMachStatusFailed, NULL, 0, 0);" },
         // A separate lazy source texture keeps packet state transactional;
         // only the successful Metal completion invalidates that baseline.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "headlessReferencePixelTexture" },
