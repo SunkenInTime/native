@@ -93,18 +93,22 @@ pub fn widgetLineHeight(text_size: f32) f32 {
 }
 
 /// Wrap budget for text painted inside a pixel-snapped frame. Geometry
-/// snapping can shave up to half a device pixel off the layout frame
-/// that intrinsic sizing measured with the exact same metrics — enough
-/// to word-wrap an exact-fit line mid-word ("Sort" painting as
-/// "Sor"/"t"). Hand the shaved quantum back to the wrap so snapping
-/// never changes line breaks; glyph origins still snap independently.
-/// (Elision has its own exact-fit slack — `text_elision_slack` — so
-/// label budgets stay byte-identical for alignment.)
+/// snapping rounds each frame edge to the device grid on its own, so a
+/// frame whose intrinsic sizing measured an exact fit can lose up to one
+/// whole device pixel: the left edge rounds up by as much as half a
+/// pixel while the right edge rounds down by as much as half a pixel.
+/// Receipt: a 34.77px "Start" label at x = 92.62 snapped to [93, 127],
+/// a 34px frame; the earlier half-pixel budget (34.5) still wrapped it
+/// mid-word as "Star"/"t". Hand the whole quantum back to the wrap so
+/// snapping never changes line breaks; glyph origins still snap
+/// independently. (Elision has its own exact-fit slack —
+/// `text_elision_slack` — so label budgets stay byte-identical for
+/// alignment.)
 pub fn textWrapMaxWidth(tokens: DesignTokens, width: f32) f32 {
     if (!tokens.pixel_snap.geometry) return width;
     const scale = tokens.pixel_snap.scale;
     if (!std.math.isFinite(scale) or scale <= 0) return width;
-    return width + 0.5 / scale;
+    return width + 1.0 / scale;
 }
 
 /// The single source of truth for how a span paragraph (`.text` widget
