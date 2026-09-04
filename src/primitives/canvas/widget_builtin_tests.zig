@@ -3655,39 +3655,71 @@ test "themed design tokens flow into widget display lists" {
     }
 }
 
+fn snapCliffMeasure(context: ?*anyopaque, font_id: canvas.FontId, size: f32, text: []const u8) f32 {
+    _ = context;
+    _ = font_id;
+    _ = size;
+    // The measured 34.77px "Start" from the receipt below, spread evenly
+    // over its five bytes so prefixes and clusters measure proportionally.
+    return 34.76758 * @as(f32, @floatFromInt(text.len)) / 5;
+}
+
+const snap_cliff_measure = canvas.TextMeasureProvider{ .measure_fn = snapCliffMeasure };
+
 test "widget text at intrinsic width does not wrap under geometry pixel snapping" {
-    // Geometry snapping can shave up to half a device pixel off the frame
-    // that intrinsic sizing measured; the text emitter hands the shaved
-    // quantum back to the wrap budget so an exact-fit label ("Sort")
-    // never breaks into "Sor"/"t". Regression for the snapped-frame wrap
-    // seam surfaced when the estimator became the bundled face's real
-    // advance table.
+    // Geometry snapping rounds each frame edge on its own, so the frame
+    // that intrinsic sizing measured can lose up to one whole device
+    // pixel: a label pushed to the right edge carries one fractional
+    // edge, a centered label carries two. The text emitter hands the
+    // whole quantum back to the wrap budget so an exact-fit label
+    // ("Sort", "Start") never breaks into "Sor"/"t" or "Star"/"t".
+    //
+    // Receipt for the two-edge case, replayed exactly by the provider
+    // above: a 34.77px "Start" paragraph centered in a 220px row sits at
+    // x = 92.62 and snaps to [93, 127], a 34px frame. The earlier
+    // half-pixel budget (34.5) still wrapped it into two runs.
+    const Case = struct { measure: ?*const canvas.TextMeasureProvider, alignment: canvas.WidgetMainAlignment, width: f32, label: []const u8 };
+    const cases = [_]Case{
+        .{ .measure = null, .alignment = .end, .width = 400, .label = "Sort" },
+        .{ .measure = &snap_cliff_measure, .alignment = .center, .width = 220, .label = "Start" },
+        .{ .measure = &snap_cliff_measure, .alignment = .end, .width = 220.4, .label = "Start" },
+    };
     const scales = [_]f32{ 1, 2 };
-    for (scales) |scale| {
-        const tokens = DesignTokens{ .pixel_snap = .{ .geometry = true, .text = true, .scale = scale } };
-        var label = Widget{ .id = 7, .kind = .text, .text = "Sort" };
-        label.size = .sm;
-        const children = [_]Widget{ Widget{ .id = 2, .kind = .stack, .layout = .{ .grow = 1 } }, label };
-        const row = Widget{ .id = 1, .kind = .row, .layout = .{ .gap = 10, .cross_alignment = .center }, .children = &children };
-
-        var nodes: [4]WidgetLayoutNode = undefined;
-        const layout = try canvas.layoutWidgetTreeWithTokens(row, geometry.RectF.init(0, 0, 400, 34), tokens, &nodes);
-
-        var commands: [8]CanvasCommand = undefined;
-        var builder = Builder.init(&commands);
-        try canvas.emitWidgetLayout(&builder, layout, tokens);
-        var seen = false;
-        for (builder.displayList().commands) |command| switch (command) {
-            .draw_text => |text| {
-                seen = true;
-                var lines: [4]TextLine = undefined;
-                const text_layout = try canvas.layoutTextRun(text, text.text_layout.?, &lines);
-                try std.testing.expectEqual(@as(usize, 1), text_layout.lineCount());
-            },
-            else => {},
+    for (scales) |scale| for (cases) |case| {
+        var tokens = DesignTokens{ .pixel_snap = .{ .geometry = true, .text = true, .scale = scale } };
+        tokens.text_measure = case.measure;
+        const spans = [_]canvas.TextSpan{.{ .text = case.label }};
+        // Both text shapes: the plain label and the span paragraph that
+        // wraps by default (what a runtime paragraph projects to).
+        const shapes = [_]Widget{
+            .{ .id = 7, .kind = .text, .text = case.label, .size = .sm },
+            .{ .id = 7, .kind = .text, .text = case.label, .spans = &spans, .size = .sm },
         };
-        try std.testing.expect(seen);
-    }
+        for (shapes) |label| {
+            const children = [_]Widget{label};
+            const row = Widget{ .id = 1, .kind = .row, .layout = .{ .main_alignment = case.alignment, .cross_alignment = .center }, .children = &children };
+
+            var nodes: [4]WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTreeWithTokens(row, geometry.RectF.init(0, 0, case.width, 34), tokens, &nodes);
+
+            var commands: [8]CanvasCommand = undefined;
+            var builder = Builder.init(&commands);
+            try canvas.emitWidgetLayout(&builder, layout, tokens);
+            var text_commands: usize = 0;
+            for (builder.displayList().commands) |command| switch (command) {
+                .draw_text => |text| {
+                    text_commands += 1;
+                    var lines: [4]TextLine = undefined;
+                    const text_layout = try canvas.layoutTextRun(text, text.text_layout.?, &lines);
+                    try std.testing.expectEqual(@as(usize, 1), text_layout.lineCount());
+                },
+                else => {},
+            };
+            // A span paragraph emits one draw_text per laid-out run, so a
+            // wrapped label shows up as a second command.
+            try std.testing.expectEqual(@as(usize, 1), text_commands);
+        }
+    };
 }
 
 test "label-exact controls at intrinsic width never elide under geometry pixel snapping" {
