@@ -800,6 +800,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (features.runtime_markup) .{} else {},
         layout_nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
         gpu_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined,
+        /// Scratch for `scheduleAnimations`, which runs on every rebuild.
+        /// As a 272 KiB stack local it sat in `rebuild`'s frame, and the
+        /// Windows stack probe made every page resident in every app,
+        /// whether or not it declares animations. Here it costs nothing
+        /// until an app's animations use it.
+        render_animations: [canvas_limits.max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined,
         /// Packet transport buffer, sized for the larger of the two wire
         /// encodings (the compact binary bound; the JSON bound is
         /// smaller and the runtime clamps JSON encodes to it), so a
@@ -970,8 +976,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 },
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
-                .effects = Effects.init(backing),
+                // Both set in place below. A by-value `Effects.init` and the
+                // tables' default image each write every page of their
+                // undefined arrays (the effect rings, the extent caches),
+                // ~650 KiB that most apps never use, and `Effects.init`
+                // also routes its 493 KiB through the caller's stack.
+                .effects = undefined,
+                .virtual_extent_tables = undefined,
             };
+            self.effects.initInPlace(backing);
+            for (&self.virtual_extent_tables) |*table| table.reset();
         }
 
         fn assertOptions(options: Options) void {
@@ -2046,7 +2060,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// runtime then regenerates the widget span on internal state
         /// changes while preserving the chrome via
         /// `emitCanvasWidgetDisplayListWithChrome`.
-        fn installChromeDisplayList(self: *Self, runtime: *Runtime, window_id: platform.WindowId, chrome: ChromeOptions, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) anyerror!void {
+        ///
+        /// noinline: its frame is ~1 MiB of display-list scratch, and inlined
+        /// into `rebuild` the Windows stack probe made all of it resident in
+        /// every app, including apps that never declare chrome.
+        noinline fn installChromeDisplayList(self: *Self, runtime: *Runtime, window_id: platform.WindowId, chrome: ChromeOptions, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) anyerror!void {
             var chrome_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
             var chrome_builder = canvas.Builder.init(&chrome_commands);
             try chrome.build(&self.model, &chrome_builder, self.canvas_size, tokens);
@@ -2074,9 +2092,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn scheduleAnimations(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
             const animations_fn = self.options.animations orelse return;
             const tree = &(self.tree orelse return);
-            var animations: [canvas_limits.max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined;
-            const count = animations_fn(&self.model, tree, self.frame_timestamp_ns, &animations);
-            _ = try runtime.setCanvasRenderAnimations(window_id, self.options.canvas_label, animations[0..count]);
+            const count = animations_fn(&self.model, tree, self.frame_timestamp_ns, &self.render_animations);
+            _ = try runtime.setCanvasRenderAnimations(window_id, self.options.canvas_label, self.render_animations[0..count]);
         }
 
         /// Re-declare the model-derived layout tweens after a rebuild.

@@ -160,6 +160,16 @@ pub const CanvasDisplayListScratch = struct {
     text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
     text_len: usize = 0,
 
+    /// Empty the scratch without touching its arrays, so storage that lives
+    /// in a long-lived struct stays untouched until a frame uses it.
+    pub fn reset(self: *CanvasDisplayListScratch) void {
+        self.gradient_stop_count = 0;
+        self.mesh_patch_count = 0;
+        self.path_element_count = 0;
+        self.glyph_count = 0;
+        self.text_len = 0;
+    }
+
     pub fn appendCopiedCommand(self: *CanvasDisplayListScratch, builder: *canvas.Builder, command: canvas.CanvasCommand) anyerror!void {
         try builder.append(try self.copyCanvasCommand(command));
     }

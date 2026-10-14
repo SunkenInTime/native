@@ -35,13 +35,25 @@ struct NativeSdkSharedRendererClient {
     std::string last_failure;
 };
 
+/* An environment-named file path, or empty when the variable is unset.
+ * Sized from the variable itself: a 32K-character stack buffer here put
+ * 64 KiB in the frame of every caller, and the stack probe makes all of it
+ * resident even when the variable is unset. */
+static std::wstring environmentPath(const wchar_t *name) {
+    const DWORD needed = GetEnvironmentVariableW(name, nullptr, 0);
+    if (needed == 0) return {};
+    std::wstring value(needed, L'\0');
+    const DWORD length = GetEnvironmentVariableW(name, value.data(), needed);
+    if (length == 0 || length >= needed) return {};
+    value.resize(length);
+    return value;
+}
+
 static void appendDpiLine(const char *line, size_t length) {
-    wchar_t path[32768] = {};
-    const DWORD path_length = GetEnvironmentVariableW(L"WEAVER_DPI_LOG", path,
-        ARRAYSIZE(path));
-    if (!line || length == 0 || path_length == 0 ||
-        path_length >= ARRAYSIZE(path)) return;
-    HANDLE file = CreateFileW(path, FILE_APPEND_DATA,
+    if (!line || length == 0) return;
+    const std::wstring path = environmentPath(L"WEAVER_DPI_LOG");
+    if (path.empty()) return;
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA,
         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
         FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
