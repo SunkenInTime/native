@@ -196,6 +196,10 @@ constexpr UINT kAudioSessionMessage = WM_APP + 45;
  * loop starves it far below the contract cadence, while posted messages
  * keep their place in the queue. */
 constexpr UINT kAudioSpectrumMessage = WM_APP + 46;
+/* A scheduled GPU-surface frame emission firing from a deadline timer or a
+ * direct post. WPARAM is the emission's id and LPARAM its source (see
+ * GpuEmissionSource); only the emission currently scheduled may emit. */
+constexpr UINT kGpuEmitMessage = WM_APP + 47;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
 static void reportWeaverBackend(const char *backend) {
@@ -510,6 +514,13 @@ struct NativeView {
      * demand-driven, so an idle surface emits ZERO frame events (the
      * idle law the macOS host enforces). */
     bool gpu_emission_scheduled = false;
+    /* Which pending emission is the scheduled one (source + id). A
+     * superseded emission can still arrive: a fired deadline timer or a
+     * direct post cannot be recalled. Matching on identity makes it a
+     * no-op instead of a second, self-re-arming frame chain. */
+    int gpu_emission_source = 0;
+    uint64_t gpu_emission_id = 0;
+    uint64_t gpu_emission_post_seq = 0;
     bool gpu_presented = false;
     /* One-shot: the next scheduled emission must fire at grid
      * promptness even while minimized. Two producers set it — an input
@@ -1970,6 +1981,14 @@ constexpr UINT_PTR kGpuFrameTimerId = 1;
 /* The one-shot scheduled-emission timer (the single frame-event gate). */
 constexpr UINT_PTR kGpuEmitTimerId = 2;
 
+/* How the scheduled emission will arrive. */
+enum GpuEmissionSource {
+    kGpuEmissionNone = 0,
+    kGpuEmissionPosted = 1,   /* kGpuEmitMessage posted now (already due) */
+    kGpuEmissionDeadline = 2, /* kGpuEmitMessage from a winmm deadline timer */
+    kGpuEmissionUiTimer = 3,  /* WM_TIMER kGpuEmitTimerId from SetTimer */
+};
+
 static uint64_t gpuTimestampNs() {
     static LARGE_INTEGER frequency = {};
     if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
@@ -2627,10 +2646,10 @@ using TimeSetEventFn = UINT (WINAPI *)(UINT, UINT,
     void (CALLBACK *)(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR),
     DWORD_PTR, UINT);
 
-static void CALLBACK gpuSurfaceDeadlineCallback(UINT, UINT, DWORD_PTR user,
+static void CALLBACK gpuSurfaceDeadlineCallback(UINT timer_id, UINT, DWORD_PTR user,
     DWORD_PTR, DWORD_PTR) {
     HWND hwnd = reinterpret_cast<HWND>(user);
-    if (hwnd) PostMessageW(hwnd, WM_TIMER, kGpuEmitTimerId, 0);
+    if (hwnd) PostMessageW(hwnd, kGpuEmitMessage, timer_id, kGpuEmissionDeadline);
 }
 
 /* Animated shared surfaces need a deadline timer, not SetTimer's UI timer
@@ -2639,18 +2658,48 @@ static void CALLBACK gpuSurfaceDeadlineCallback(UINT, UINT, DWORD_PTR user,
  * this helper only for surfaces that own a shared-renderer client: software
  * surfaces stay on the coalescing UI timer and neither load winmm nor inherit
  * multimedia-timer behavior from compatibility layers such as Wine. */
-static bool scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns) {
-    using LoadFn = HMODULE (WINAPI *)(LPCWSTR);
+static HMODULE winmmModule() {
     static HMODULE winmm = LoadLibraryW(L"winmm.dll");
-    static TimeSetEventFn time_set_event = winmm
-        ? reinterpret_cast<TimeSetEventFn>(GetProcAddress(winmm, "timeSetEvent"))
+    return winmm;
+}
+
+/* Returns the deadline timer's id, or 0 when no deadline timer is
+ * available (the caller falls back to SetTimer). */
+static UINT scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns) {
+    static TimeSetEventFn time_set_event = winmmModule()
+        ? reinterpret_cast<TimeSetEventFn>(GetProcAddress(winmmModule(), "timeSetEvent"))
         : nullptr;
-    if (!time_set_event) return false;
+    if (!time_set_event) return 0;
     constexpr UINT kTimeOneShot = 0;
     constexpr UINT kTimeKillSynchronous = 0x0100;
     const UINT delay_ms = (UINT)std::max<uint64_t>(1, (delay_ns + 999999ull) / 1000000ull);
     return time_set_event(delay_ms, 1, gpuSurfaceDeadlineCallback,
-        reinterpret_cast<DWORD_PTR>(hwnd), kTimeOneShot | kTimeKillSynchronous) != 0;
+        reinterpret_cast<DWORD_PTR>(hwnd), kTimeOneShot | kTimeKillSynchronous);
+}
+
+/* Withdraw the scheduled emission so a producer can re-arm it at a new
+ * delay. Cancelling is best effort (a deadline timer may already have
+ * posted, and a direct post cannot be recalled); the identity check in
+ * the window procedure is what guarantees the stale one never emits. */
+static void cancelGpuSurfaceEmission(NativeView &view) {
+    using TimeKillEventFn = UINT (WINAPI *)(UINT);
+    static TimeKillEventFn time_kill_event = winmmModule()
+        ? reinterpret_cast<TimeKillEventFn>(GetProcAddress(winmmModule(), "timeKillEvent"))
+        : nullptr;
+    if (view.gpu_emission_source == kGpuEmissionDeadline && time_kill_event) {
+        time_kill_event((UINT)view.gpu_emission_id);
+    } else if (view.gpu_emission_source == kGpuEmissionUiTimer && view.hwnd) {
+        KillTimer(view.hwnd, kGpuEmitTimerId);
+    }
+    view.gpu_emission_scheduled = false;
+    view.gpu_emission_source = kGpuEmissionNone;
+    view.gpu_emission_id = 0;
+}
+
+static void markGpuSurfaceEmission(NativeView &view, int source, uint64_t id) {
+    view.gpu_emission_scheduled = true;
+    view.gpu_emission_source = source;
+    view.gpu_emission_id = id;
 }
 
 /* The single surface-frame emission: view state (nonblank verdict, sample
@@ -2796,14 +2845,19 @@ static void gpuSurfaceScheduleFrameEmission(NativeView &view) {
      * work, so post the same WM_TIMER message directly. The scheduled flag
      * still folds all producers and the handler keeps one-shot semantics. */
     if (delay_ns == 0) {
-        if (PostMessageW(view.hwnd, WM_TIMER, kGpuEmitTimerId, 0)) {
-            view.gpu_emission_scheduled = true;
+        const uint64_t id = ++view.gpu_emission_post_seq;
+        if (PostMessageW(view.hwnd, kGpuEmitMessage, (WPARAM)id, kGpuEmissionPosted)) {
+            markGpuSurfaceEmission(view, kGpuEmissionPosted, id);
         }
         return;
     }
-    if ((view.gpu_presenter && scheduleGpuSurfaceDeadline(view.hwnd, delay_ns)) ||
-        SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr)) {
-        view.gpu_emission_scheduled = true;
+    const UINT deadline_id = view.gpu_presenter ? scheduleGpuSurfaceDeadline(view.hwnd, delay_ns) : 0;
+    if (deadline_id != 0) {
+        markGpuSurfaceEmission(view, kGpuEmissionDeadline, deadline_id);
+        return;
+    }
+    if (SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr)) {
+        markGpuSurfaceEmission(view, kGpuEmissionUiTimer, kGpuEmitTimerId);
     }
 }
 
@@ -3011,16 +3065,28 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
                 return 0;
             }
             if (wparam == kGpuEmitTimerId) {
-                /* The one scheduled emission fires: one-shot semantics
-                 * (KillTimer before the emit — SetTimer timers repeat),
-                 * and the scheduled flag clears BEFORE emitting so the
-                 * emission's engine dispatch can re-arm the scheduler. */
+                /* One-shot semantics: KillTimer before the emit, since
+                 * SetTimer timers repeat. */
                 KillTimer(hwnd, kGpuEmitTimerId);
-                view->gpu_emission_scheduled = false;
+                if (!view->gpu_emission_scheduled || view->gpu_emission_source != kGpuEmissionUiTimer) return 0;
+                cancelGpuSurfaceEmission(*view);
                 gpuSurfaceEmitFrame(host, *view, hwnd);
                 return 0;
             }
             break;
+        case kGpuEmitMessage:
+            /* Only the emission currently scheduled emits. Input and
+             * restore re-arm the scheduler at a new delay; the superseded
+             * deadline timer or post still arrives, and emitting it too
+             * would start a second frame chain that re-arms itself forever
+             * (each further input adding another). The scheduled state
+             * clears BEFORE emitting so the emission's engine dispatch can
+             * re-arm the scheduler. */
+            if (!view->gpu_emission_scheduled || view->gpu_emission_source != (int)lparam ||
+                view->gpu_emission_id != (uint64_t)wparam) return 0;
+            cancelGpuSurfaceEmission(*view);
+            gpuSurfaceEmitFrame(host, *view, hwnd);
+            return 0;
         case WM_PAINT: {
             PAINTSTRUCT paint = {};
             HDC dc = BeginPaint(hwnd, &paint);
@@ -5390,7 +5456,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                         NativeView &surface = view_entry.second;
                         if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission_scheduled) continue;
                         if (!resized_window || surface.window_id != resized_window->id) continue;
-                        surface.gpu_emission_scheduled = false;
+                        cancelGpuSurfaceEmission(surface);
                         gpuSurfaceScheduleFrameEmission(surface);
                     }
                 }
@@ -6329,7 +6395,7 @@ int native_sdk_windows_note_gpu_surface_input(Host *host, uint64_t window_id, co
     NativeView &view = found->second;
     view.gpu_prompt_frame_pending = true;
     if (view.gpu_emission_scheduled) {
-        view.gpu_emission_scheduled = false;
+        cancelGpuSurfaceEmission(view);
         gpuSurfaceScheduleFrameEmission(view);
     }
     return 1;

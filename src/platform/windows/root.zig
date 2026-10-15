@@ -1561,8 +1561,14 @@ test "windows top-level frame delivery stays demand-driven" {
     // multimedia deadline. The software path must fall through to the
     // coalescing UI timer so compatibility layers cannot run a caret or
     // other continuous animation fast enough to starve input dispatch.
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "view.gpu_presenter && scheduleGpuSurfaceDeadline") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "view.gpu_presenter ? scheduleGpuSurfaceDeadline") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "SetTimer(view.hwnd, kGpuEmitTimerId") != null);
+    // A deadline timer or direct post cannot be recalled when input or a
+    // restore re-arms the scheduler, so the window procedure must only emit
+    // the emission that is currently scheduled; emitting a superseded one
+    // starts a second self-re-arming frame chain (hundreds of fps after a
+    // few mouse moves).
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "view->gpu_emission_id != (uint64_t)wparam") != null);
 }
 
 test "windows audio event maps kinds and payload" {
