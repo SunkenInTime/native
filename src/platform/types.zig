@@ -193,6 +193,7 @@ pub const ViewId = u64;
 /// with `-Dwidget-windows` (generated app graphs without the option keep 1).
 pub const widget_profile_windows: usize = if (@hasDecl(native_sdk_options, "widget_windows")) native_sdk_options.widget_windows else 1;
 pub const max_windows: usize = if (native_sdk_options.widget_profile) widget_profile_windows else 16;
+pub const max_windows_per_effects_table: usize = if (native_sdk_options.widget_profile) widget_profile_windows else 1;
 pub const max_window_label_bytes: usize = 64;
 pub const max_window_title_bytes: usize = 128;
 /// Budget for a window's webview source payload — for `.html` sources this

@@ -13,6 +13,9 @@ pub const WebViewSource = types.WebViewSource;
 pub const WindowId = types.WindowId;
 pub const ViewId = types.ViewId;
 pub const max_windows = types.max_windows;
+/// Windows one app's fixed effect tables serve: every window of a
+/// widget-profile host (`-Dwidget-windows`), otherwise one.
+pub const max_windows_per_effects_table = types.max_windows_per_effects_table;
 pub const max_window_label_bytes = types.max_window_label_bytes;
 pub const max_window_title_bytes = types.max_window_title_bytes;
 pub const max_window_source_bytes = types.max_window_source_bytes;
