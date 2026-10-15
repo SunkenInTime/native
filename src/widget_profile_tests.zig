@@ -13,6 +13,10 @@ test "widget profile selects the bounded platform and runtime capacities" {
     // One app drives every window of a host, so its fx timer table grows
     // with the window count.
     try std.testing.expectEqual(16 * native_sdk_options.widget_windows, native_sdk.max_effect_timers);
+    // So do the runtime-wide image and font registries: every widget keeps
+    // the budget it had as its own process.
+    try std.testing.expectEqual(16 * native_sdk_options.widget_windows, native_sdk.max_registered_canvas_images);
+    try std.testing.expectEqual(2 * native_sdk_options.widget_windows, native_sdk.runtime.max_registered_canvas_fonts);
     // The widget profile bounds the platform shape (one window/view/webview);
     // per-view budgets stay at the stock, measured capacities so widget UI
     // never budgets commands or nodes differently from desktop UI.

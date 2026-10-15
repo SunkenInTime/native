@@ -344,7 +344,8 @@ pub const Runtime = struct {
     /// the frame planner hands to renderers each plan.
     canvas_image_entries: [canvas_limits.max_registered_canvas_images]runtime_canvas_images.CanvasImageEntry = [_]runtime_canvas_images.CanvasImageEntry{.{}} ** canvas_limits.max_registered_canvas_images,
     canvas_image_count: usize = 0,
-    canvas_image_pixels: [canvas_limits.max_registered_canvas_images][canvas_limits.max_registered_canvas_image_pixel_bytes]u8 = undefined,
+    /// Each registered image's pixels, allocated at registration and sized to it.
+    canvas_image_pixels: [canvas_limits.max_registered_canvas_images][]u8 = @splat(&.{}),
     canvas_image_resources_scratch: [canvas_limits.max_registered_canvas_images]canvas.ReferenceImage = undefined,
     /// Runtime-registered canvas fonts (see canvas_fonts.zig): entry
     /// metadata, the per-slot TrueType byte pool with parsed face views
@@ -353,7 +354,9 @@ pub const Runtime = struct {
     /// registration for platforms without host-side text measurement.
     canvas_font_entries: [canvas_limits.max_registered_canvas_fonts]runtime_canvas_fonts.CanvasFontEntry = [_]runtime_canvas_fonts.CanvasFontEntry{.{}} ** canvas_limits.max_registered_canvas_fonts,
     canvas_font_count: usize = 0,
-    canvas_font_bytes: [canvas_limits.max_registered_canvas_fonts][canvas_limits.max_registered_canvas_font_bytes]u8 = undefined,
+    /// Each registered face's bytes, allocated at registration and sized
+    /// to it; faces are permanent, so they live as long as the runtime.
+    canvas_font_bytes: [canvas_limits.max_registered_canvas_fonts][]u8 = @splat(&.{}),
     canvas_font_faces: [canvas_limits.max_registered_canvas_fonts]canvas.font_ttf.Face = undefined,
     canvas_font_resources_scratch: [canvas_limits.max_registered_canvas_fonts]canvas.ReferenceFont = undefined,
     canvas_font_measure_provider: canvas.TextMeasureProvider = .{ .measure_fn = runtime_canvas_fonts.unboundCanvasFontMeasure },

@@ -85,13 +85,16 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
             if (rgba8.len != byte_len) return error.InvalidImageDimensions;
             if (byte_len > max_registered_canvas_image_pixel_bytes) return error.ImageTooLarge;
 
-            const index = findCanvasImageIndex(self, id) orelse blk: {
-                if (self.canvas_image_count >= max_registered_canvas_images) return error.ImageRegistryFull;
-                const index = self.canvas_image_count;
-                self.canvas_image_count += 1;
-                break :blk index;
-            };
-            @memcpy(self.canvas_image_pixels[index][0..byte_len], rgba8);
+            const existing = findCanvasImageIndex(self, id);
+            if (existing == null and self.canvas_image_count >= max_registered_canvas_images) return error.ImageRegistryFull;
+            const index = existing orelse self.canvas_image_count;
+            if (self.canvas_image_pixels[index].len != byte_len) {
+                const pixels = try std.heap.page_allocator.alloc(u8, byte_len);
+                std.heap.page_allocator.free(self.canvas_image_pixels[index]);
+                self.canvas_image_pixels[index] = pixels;
+            }
+            if (existing == null) self.canvas_image_count += 1;
+            @memcpy(self.canvas_image_pixels[index], rgba8);
             self.canvas_image_entries[index] = .{
                 .id = id,
                 .width = width,
@@ -140,13 +143,10 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         pub fn unregisterCanvasImage(self: *Runtime, id: canvas.ImageId) bool {
             const index = findCanvasImageIndex(self, id) orelse return false;
             const last = self.canvas_image_count - 1;
-            if (index != last) {
-                self.canvas_image_entries[index] = self.canvas_image_entries[last];
-                @memcpy(
-                    self.canvas_image_pixels[index][0..self.canvas_image_entries[index].byte_len],
-                    self.canvas_image_pixels[last][0..self.canvas_image_entries[index].byte_len],
-                );
-            }
+            std.heap.page_allocator.free(self.canvas_image_pixels[index]);
+            self.canvas_image_pixels[index] = self.canvas_image_pixels[last];
+            self.canvas_image_pixels[last] = &.{};
+            if (index != last) self.canvas_image_entries[index] = self.canvas_image_entries[last];
             self.canvas_image_entries[last] = .{};
             self.canvas_image_count = last;
             // Best-effort drop of the platform-side texture: platforms
