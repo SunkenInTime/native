@@ -43,6 +43,19 @@ inline uint64_t weaverPackGpuDeadline(uint32_t hwnd32, uint32_t generation) {
 inline uint32_t weaverGpuDeadlineHwnd(uint64_t user) { return (uint32_t)user; }
 inline uint32_t weaverGpuDeadlineGeneration(uint64_t user) { return (uint32_t)(user >> 32); }
 
+/* A SetTimer emission's timer id carries its generation, so a WM_TIMER
+ * already queued for a superseded timer (KillTimer does not remove queued
+ * messages) is told apart from the current one. The tag bit keeps these ids
+ * clear of a surface's fixed timer ids. 64-bit Windows only (UINT_PTR). */
+constexpr uint64_t kWeaverGpuUiTimerTag = 1ull << 32;
+inline uint64_t weaverGpuUiTimerId(uint32_t generation) {
+    return kWeaverGpuUiTimerTag | generation;
+}
+inline bool weaverIsGpuUiTimerId(uint64_t id) {
+    return (id >> 32) == 1;
+}
+inline uint32_t weaverGpuUiTimerGeneration(uint64_t id) { return (uint32_t)id; }
+
 inline bool weaverGpuEmissionAccepts(const WeaverGpuEmission &current, int source,
     uint32_t generation) {
     return current.scheduled && current.source == source &&

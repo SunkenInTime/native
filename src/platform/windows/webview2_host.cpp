@@ -1973,8 +1973,7 @@ constexpr uint64_t kGpuFrameIntervalNs = 16666667ull;
 constexpr uint64_t kGpuOccludedHeartbeatNs = 1000000000ull;
 /* Placeholder pump timer (repeating, retired by the first present). */
 constexpr UINT_PTR kGpuFrameTimerId = 1;
-/* The one-shot scheduled-emission timer (the single frame-event gate). */
-constexpr UINT_PTR kGpuEmitTimerId = 2;
+static_assert(sizeof(UINT_PTR) == 8, "GPU emission timer ids carry a 32-bit generation above a tag bit");
 
 static uint64_t gpuTimestampNs() {
     static LARGE_INTEGER frequency = {};
@@ -2829,7 +2828,7 @@ static void gpuSurfaceScheduleFrameEmission(NativeView &view) {
         view.gpu_emission = { true, kWeaverGpuEmissionDeadline, generation };
         return;
     }
-    if (SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr)) {
+    if (SetTimer(view.hwnd, (UINT_PTR)weaverGpuUiTimerId(generation), delay_ms, nullptr)) {
         view.gpu_emission = { true, kWeaverGpuEmissionUiTimer, generation };
     }
 }
@@ -2843,6 +2842,13 @@ static void gpuSurfaceRearmFrameEmission(NativeView &view) {
     view.gpu_emission.scheduled = false;
     gpuSurfaceScheduleFrameEmission(view);
     view.gpu_emission = weaverGpuEmissionAfterRearm(previous, view.gpu_emission);
+    /* A superseded SetTimer would repeat until killed; retire it once its
+     * replacement is in place (a message it already queued is dropped by
+     * generation). Deadlines and posts are one-shot and need nothing. */
+    if (previous.scheduled && previous.source == kWeaverGpuEmissionUiTimer &&
+        view.gpu_emission.generation != previous.generation) {
+        KillTimer(view.hwnd, (UINT_PTR)weaverGpuUiTimerId(previous.generation));
+    }
 }
 
 static void paintGpuSurface(NativeView &view, HWND hwnd, HDC dc) {
@@ -3048,12 +3054,12 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
                 gpuSurfaceScheduleFrameEmission(*view);
                 return 0;
             }
-            if (wparam == kGpuEmitTimerId) {
-                /* One-shot semantics: KillTimer before the emit, since
-                 * SetTimer timers repeat. */
-                KillTimer(hwnd, kGpuEmitTimerId);
+            if (weaverIsGpuUiTimerId((uint64_t)wparam)) {
+                /* One-shot semantics: kill this emission's own timer before
+                 * the emit, since SetTimer timers repeat. */
+                KillTimer(hwnd, wparam);
                 if (!weaverGpuEmissionAccepts(view->gpu_emission, kWeaverGpuEmissionUiTimer,
-                        view->gpu_emission.generation)) return 0;
+                        weaverGpuUiTimerGeneration((uint64_t)wparam))) return 0;
                 view->gpu_emission.scheduled = false;
                 gpuSurfaceEmitFrame(host, *view, hwnd);
                 return 0;

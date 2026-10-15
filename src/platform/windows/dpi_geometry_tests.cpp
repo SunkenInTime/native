@@ -183,6 +183,17 @@ extern "C" int native_sdk_dpi_geometry_tests() {
     const WeaverGpuEmission kept = weaverGpuEmissionAfterRearm(deadline,
         { false, kWeaverGpuEmissionNone, 9 });
     expect(weaverGpuEmissionAccepts(kept, kWeaverGpuEmissionDeadline, 7));
+    // SetTimer emissions: the id carries the generation, so a WM_TIMER
+    // queued by a superseded timer is refused while its replacement counts.
+    expect(weaverIsGpuUiTimerId(weaverGpuUiTimerId(0xFFFFFFFFu)));
+    expect(weaverGpuUiTimerGeneration(weaverGpuUiTimerId(0xFFFFFFFFu)) == 0xFFFFFFFFu);
+    expect(!weaverIsGpuUiTimerId(1) && !weaverIsGpuUiTimerId(2) && !weaverIsGpuUiTimerId(0x1000));
+    const WeaverGpuEmission ui_rearmed = weaverGpuEmissionAfterRearm(
+        { true, kWeaverGpuEmissionUiTimer, 10 }, { true, kWeaverGpuEmissionUiTimer, 11 });
+    expect(!weaverGpuEmissionAccepts(ui_rearmed, kWeaverGpuEmissionUiTimer,
+        weaverGpuUiTimerGeneration(weaverGpuUiTimerId(10))));
+    expect(weaverGpuEmissionAccepts(ui_rearmed, kWeaverGpuEmissionUiTimer,
+        weaverGpuUiTimerGeneration(weaverGpuUiTimerId(11))));
 
     // Software pixels, retained pixels, and shared GPU textures all consume
     // this same physical edge extent; no path re-derives it from width alone.
