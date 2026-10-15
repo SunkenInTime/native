@@ -1170,7 +1170,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     return;
                 }
             }
-            try self.rebuild(runtime, self.canvas_window_id);
+            self.rebuild(runtime, self.canvas_window_id) catch |err| {
+                // Independent windows do not wait on the main canvas:
+                // reconcile and refresh them before reporting its failure.
+                if (self.options.window_view_revision == null) return err;
+                self.applyWindows(runtime);
+                self.refreshWindowSlots(runtime, msg) catch {};
+                return err;
+            };
             try self.refreshWindowSlots(runtime, msg);
             // A Msg dispatched FROM a secondary window still rebuilt the
             // main canvas above: one model owns every window's view.
@@ -1962,17 +1969,30 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// projected through `project_update` when the change came from a
         /// Msg, and otherwise kept as is. Without `window_view_revision`
         /// every window rebuilds (`rebuildWindowSlots`).
+        ///
+        /// Independent windows do not wait on each other: a window whose
+        /// projection or rebuild fails keeps its last tree, the rest still
+        /// refresh, and the first failure is returned afterwards.
         fn refreshWindowSlots(self: *Self, runtime: *Runtime, msg: ?MsgT) anyerror!void {
             const window_view_revision = self.options.window_view_revision orelse return self.rebuildWindowSlots(runtime);
+            var first_failure: ?anyerror = null;
             for (self.window_slots[0..self.window_slot_count]) |*slot| {
                 if (!slot.installed) continue;
-                if (slot.projected_revision_known and window_view_revision(&self.model, slot.label()) == slot.projected_revision) {
-                    const project_update = self.options.project_update orelse continue;
-                    const event = msg orelse continue;
-                    if (try project_update(runtime, slot.window_id, slot.canvasLabel(), &self.model, event)) continue;
-                }
-                try self.rebuildWindowSlot(runtime, slot);
+                self.refreshWindowSlot(runtime, slot, window_view_revision, msg) catch |err| {
+                    ui_app_log.warn("declared window '{s}' failed to refresh: {s}", .{ slot.label(), @errorName(err) });
+                    if (first_failure == null) first_failure = err;
+                };
             }
+            if (first_failure) |err| return err;
+        }
+
+        fn refreshWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot, window_view_revision: *const fn (model: *const ModelT, window_label: []const u8) u64, msg: ?MsgT) anyerror!void {
+            if (slot.projected_revision_known and window_view_revision(&self.model, slot.label()) == slot.projected_revision) {
+                const project_update = self.options.project_update orelse return;
+                const event = msg orelse return;
+                if (try project_update(runtime, slot.window_id, slot.canvasLabel(), &self.model, event)) return;
+            }
+            try self.rebuildWindowSlot(runtime, slot);
         }
 
         /// Read one declared window's runtime-owned widget state back into
@@ -2931,9 +2951,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (self.chromeInsetsMsg(runtime, frame_event.window_id)) |msg| {
                     self.applyMsg(msg);
                 }
-                try self.rebuild(runtime, frame_event.window_id);
-                if (self.options.chrome == null) {
-                    _ = try runtime.emitCanvasWidgetDisplayList(frame_event.window_id, self.options.canvas_label, runtime.tokensWithTextMeasure(self.effectiveTokens()));
+                if (self.rebuild(runtime, frame_event.window_id)) |_| {
+                    if (self.options.chrome == null) {
+                        _ = try runtime.emitCanvasWidgetDisplayList(frame_event.window_id, self.options.canvas_label, runtime.tokensWithTextMeasure(self.effectiveTokens()));
+                    }
+                } else |err| {
+                    // With independent windows the main canvas is one
+                    // window among many: it installs without a tree (the
+                    // next rebuild retries it) and the declared windows
+                    // still open. Otherwise its failure is the app's.
+                    if (self.options.window_view_revision == null) return err;
+                    ui_app_log.warn("main canvas '{s}' failed its first build: {s}; declared windows install without it", .{ self.options.canvas_label, @errorName(err) });
+                    self.applyWindows(runtime);
                 }
                 self.installed = true;
                 self.startMarkupWatch(runtime);

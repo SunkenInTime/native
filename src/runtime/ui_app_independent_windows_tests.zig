@@ -11,6 +11,7 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_model = @import("ui_app.zig");
 const support = @import("test_support.zig");
+const canvas_limits = @import("canvas_limits.zig");
 
 const main_canvas = "desk-canvas";
 const window_labels = [_][]const u8{ "a", "b" };
@@ -23,10 +24,14 @@ const DeskModel = struct {
     paints: [2]u32 = .{ 0, 0 },
     syncs: [2]u32 = .{ 0, 0 },
     frames: [2]u32 = .{ 0, 0 },
+    /// The window's view outgrows the per-view layout budget, so its
+    /// rebuild fails.
+    overflowing: [2]bool = .{ false, false },
 };
 
 const DeskMsg = union(enum) {
     bump: u8,
+    overflow: u8,
     paint: u8,
     frame: u8,
 };
@@ -55,6 +60,10 @@ fn canvasIndex(label: []const u8) ?usize {
 fn deskUpdate(model: *DeskModel, msg: DeskMsg) void {
     switch (msg) {
         .bump => |index| model.counts[index] += 1,
+        .overflow => |index| {
+            model.overflowing[index] = true;
+            model.counts[index] += 1;
+        },
         .paint => |index| model.paints[index] += 1,
         .frame => |index| model.frames[index] += 1,
     }
@@ -80,7 +89,7 @@ fn projectDesk(
     // A bump moves its own window's view; every other canvas already
     // shows the update. Paint and frame Msgs are paint-only everywhere.
     return switch (msg) {
-        .bump => |index| target != index,
+        .bump, .overflow => |index| target != index,
         .paint, .frame => true,
     };
 }
@@ -92,6 +101,11 @@ fn deskView(ui: *DeskApp.Ui, _: *const DeskModel) DeskApp.Ui.Node {
 fn deskWindowView(ui: *DeskApp.Ui, model: *const DeskModel, window_label: []const u8) DeskApp.Ui.Node {
     const index = windowIndex(window_label);
     view_builds[index] += 1;
+    if (model.overflowing[index]) {
+        const rows = ui.arena.alloc(DeskApp.Ui.Node, canvas_limits.max_canvas_widget_nodes_per_view + 1) catch unreachable;
+        for (rows) |*row| row.* = ui.text(.{}, "row");
+        return ui.column(.{}, rows);
+    }
     return ui.column(.{ .padding = 8 }, .{ui.text(.{}, ui.fmt("count {d}", .{model.counts[index]}))});
 }
 
@@ -279,4 +293,18 @@ test "a declared window's frame maps through window_on_frame and syncs only that
     try std.testing.expectEqual(syncs_before[0], fixture.app_state.model.syncs[0]);
     try std.testing.expect(fixture.app_state.model.syncs[1] > syncs_before[1]);
     try std.testing.expectEqual([2]u32{ 0, 0 }, view_builds);
+}
+
+test "a declared window whose rebuild fails does not hold back the others" {
+    if (comptime support.platform.max_windows < 3) return error.SkipZigTest;
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    try std.testing.expectError(error.WidgetLayoutListFull, fixture.app_state.dispatch(&fixture.harness.runtime, 1, .{ .overflow = 0 }));
+    view_builds = .{ 0, 0 };
+    // Window a still fails (its revision never projected), window b
+    // rebuilds anyway, and the failure is still reported.
+    try std.testing.expectError(error.WidgetLayoutListFull, fixture.app_state.dispatch(&fixture.harness.runtime, 1, .{ .bump = 1 }));
+    try std.testing.expectEqual([2]u32{ 1, 1 }, view_builds);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.counts[1]);
 }
