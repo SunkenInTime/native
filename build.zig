@@ -105,7 +105,8 @@ pub fn build(b: *std.Build) void {
     const platform_info_mod = module(b, target, optimize, "src/primitives/platform_info/root.zig");
     const json_mod = module(b, target, optimize, "src/primitives/json/root.zig");
     const canvas_mod = module(b, target, optimize, "src/primitives/canvas/root.zig");
-    const native_sdk_options = nativeSdkOptionsModule(b, widget_profile);
+    const widget_windows = b.option(usize, "widget-windows", "Window and view capacity of the widget profile") orelse 1;
+    const native_sdk_options = nativeSdkOptionsModule(b, widget_profile, widget_windows);
     canvas_mod.addImport("native_sdk_options", native_sdk_options);
     canvas_mod.addImport("geometry", geometry_mod);
     canvas_mod.addImport("json", json_mod);
@@ -2791,9 +2792,10 @@ pub fn build(b: *std.Build) void {
     cef_bundle_step.dependOn(&cef_bundle_script.step);
 }
 
-fn nativeSdkOptionsModule(b: *std.Build, widget_profile: bool) *std.Build.Module {
+fn nativeSdkOptionsModule(b: *std.Build, widget_profile: bool, widget_windows: usize) *std.Build.Module {
     const options = b.addOptions();
     options.addOption(bool, "widget_profile", widget_profile);
+    options.addOption(usize, "widget_windows", widget_windows);
     return options.createModule();
 }
 

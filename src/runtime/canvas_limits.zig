@@ -339,4 +339,10 @@ pub const max_canvas_widget_provenance_key_bytes: usize = 48;
 // rebuild-per-Msg bill visible-by-construction. Declaring more windows
 // than this warns loudly (naming this budget) and ignores the excess;
 // it never takes the render loop down.
-pub const max_ui_app_windows: usize = 4;
+//
+// The widget-profile host is the "window per document" architecture
+// above: one Runtime, one window per widget, each skipping rebuilds
+// through `window_view_revision`. Its slot budget follows the runtime's
+// window capacity (`-Dwidget-windows`), so the runtime cap is the only
+// one a host can hit.
+pub const max_ui_app_windows: usize = if (native_sdk_options.widget_profile) @max(@import("../platform/types.zig").widget_profile_windows, 4) else 4;

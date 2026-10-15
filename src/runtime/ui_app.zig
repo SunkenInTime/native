@@ -301,6 +301,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// titlebar-control channel's scope, not this field's.
             /// Platforms without the concept keep standard chrome.
             titlebar: app_manifest.WindowTitlebarStyle = .standard,
+            /// Desktop-widget surface flags, the same fields and meaning
+            /// as the scene's `ShellWindow`: per-pixel alpha, stacking
+            /// layer, pointer pass-through, and showing without taking
+            /// focus. Applied at creation, like the title.
+            transparent: bool = false,
+            layer: app_manifest.WindowLayer = .normal,
+            click_through: bool = false,
+            no_activate: bool = false,
             /// Msg dispatched when the USER closes the window (never for
             /// a reconcile close the model itself initiated). The
             /// dismissal precedent: the window is already gone as an
@@ -443,15 +451,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// can keep the retained trees instead of rebuilding and laying
             /// them out. Apps with paint-only mutable leaves may pair this
             /// with `project_update` to refresh those leaves before the
-            /// rebuild is skipped.
+            /// rebuild is skipped. With `window_view_revision` set, this
+            /// covers the main canvas only.
             view_revision: ?*const fn (model: *const ModelT) u64 = null,
+            /// The `view_revision` of one declared window, keyed by its
+            /// label: the fields that window's `window_view` reads. Set it
+            /// when declared windows render independent parts of the model
+            /// (one window per document, per widget): a dispatched Msg then
+            /// rebuilds only the windows whose revision moved, instead of
+            /// every open window, and same-revision windows go through
+            /// `project_update` like the main canvas.
+            window_view_revision: ?*const fn (model: *const ModelT, window_label: []const u8) u64 = null,
             /// Project a same-revision update into retained runtime state.
             /// Return true when the update is fully represented and no view
             /// rebuild is required; false takes the ordinary rebuild path.
             /// This hook is never consulted until a successful view build has
             /// recorded a revision. The window id and canvas label identify
-            /// the primary retained canvas being projected, regardless of
-            /// which window originated the message.
+            /// the retained canvas being projected, regardless of which
+            /// window originated the message: the primary canvas, and with
+            /// `window_view_revision` each same-revision declared window.
             project_update: ?*const fn (runtime: *Runtime, window_id: platform.WindowId, canvas_label: []const u8, model: *const ModelT, msg: MsgT) anyerror!bool = null,
             /// TEA's init command: runs exactly once, on the installing
             /// frame, after the effects channel is bound and before the
@@ -588,6 +606,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Called after presenting every frame except the installing
             /// one.
             on_frame: ?*const fn (model: *const ModelT, frame: platform.GpuFrame) ?MsgT = null,
+            /// `on_frame` for declared windows, keyed by window label.
+            /// The resulting Msg dispatches from that window.
+            window_on_frame: ?*const fn (model: *const ModelT, window_label: []const u8, frame: platform.GpuFrame) ?MsgT = null,
             /// Optional mapping from native top-level window frame
             /// reports into messages. The platform owns live movement;
             /// this hook observes the resulting logical frame and scale
@@ -596,12 +617,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             on_window_frame: ?*const fn (frame: core.WindowFrameEvent) ?MsgT = null,
             /// Reads runtime-owned widget state (slider values, scroll
             /// offsets) back into the model before update and rebuild so
-            /// the next source tree does not stomp it. Main canvas only:
-            /// declared secondary windows' widget state is runtime-owned
-            /// between rebuilds but has no sync hook yet — keep
-            /// continuous controls in the secondary windows model-driven
-            /// (echo `on_change`/`on_scroll` values back into `value`).
+            /// the next source tree does not stomp it. Main canvas only;
+            /// declared windows use `window_sync`.
             sync: ?*const fn (model: *ModelT, layout: canvas.WidgetLayoutTree) void = null,
+            /// `sync` for declared windows, keyed by window label. Runs
+            /// before a rebuild of that window and before `update` for a
+            /// Msg dispatched from that window (its input, its frames):
+            /// only that window's own events move its runtime-owned
+            /// widget state. Without it, keep continuous controls in
+            /// declared windows model-driven (echo `on_change`/`on_scroll`
+            /// values back into `value`).
+            window_sync: ?*const fn (model: *ModelT, window_label: []const u8, layout: canvas.WidgetLayoutTree) void = null,
             /// Model-derived webview panes, re-applied after every rebuild
             /// (so also on resize and every dispatched Msg): each pane
             /// snaps its scene-declared webview to a canvas widget's
@@ -644,7 +670,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Per-window view for declared secondary windows, keyed by
             /// the descriptor's window label — the `view` seam with the
             /// window identity alongside. Rebuilt for every open window
-            /// on every dispatched Msg. Markup deliberately binds ONE
+            /// on every dispatched Msg, unless `window_view_revision`
+            /// says the window's inputs did not move. Markup deliberately binds ONE
             /// window's content (the main canvas): there is no `window`
             /// element in the closed grammar because windows are shell
             /// concerns, not view-tree concerns — a markup-authored
@@ -699,6 +726,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             tree: ?Ui.Tree = null,
             arena_index: usize = 0,
             arenas: [2]std.heap.ArenaAllocator,
+            /// `window_view_revision` at this window's last build;
+            /// meaningful only once `projected_revision_known`.
+            projected_revision: u64 = 0,
+            projected_revision_known: bool = false,
 
             fn init(backing: std.mem.Allocator) WindowSlot {
                 return .{ .arenas = .{
@@ -1103,9 +1134,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Apply a message and rebuild the widget tree. Runtime-owned
         /// widget state is synced into the model first so `update` sees
         /// current slider values and scroll offsets.
-        pub fn dispatch(self: *Self, runtime: *Runtime, _: platform.WindowId, msg: MsgT) anyerror!void {
+        pub fn dispatch(self: *Self, runtime: *Runtime, window_id: platform.WindowId, msg: MsgT) anyerror!void {
             self.bindEffectsChannel(runtime);
             self.syncModel(runtime, self.canvas_window_id);
+            if (self.windowSlotIndexByWindowId(window_id)) |index| self.syncWindowSlot(runtime, &self.window_slots[index]);
             self.applyMsg(msg);
             self.publishAudioState(runtime);
             // Before the installing frame there is nothing to render
@@ -1119,19 +1151,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (self.projectedViewRevisionMatches()) {
                 if (self.options.project_update) |project_update| {
                     if (try project_update(runtime, self.canvas_window_id, self.options.canvas_label, &self.model, msg)) {
-                        // project_update only targets the primary retained
-                        // canvas. Reconcile the declared window set (including
-                        // a user-closed window the model still declares), then
-                        // rebuild installed secondary trees because they have
-                        // no projection hook of their own.
+                        // The primary canvas is projected. Reconcile the
+                        // declared window set (including a user-closed
+                        // window the model still declares), then bring the
+                        // declared windows up to date.
                         self.applyWindows(runtime);
-                        try self.rebuildWindowSlots(runtime);
+                        try self.refreshWindowSlots(runtime, msg);
                         return;
                     }
-                } else return;
+                } else if (self.options.window_view_revision == null) {
+                    return;
+                } else {
+                    self.applyWindows(runtime);
+                    try self.refreshWindowSlots(runtime, msg);
+                    return;
+                }
             }
             try self.rebuild(runtime, self.canvas_window_id);
-            try self.rebuildWindowSlots(runtime);
+            try self.refreshWindowSlots(runtime, msg);
             // A Msg dispatched FROM a secondary window still rebuilt the
             // main canvas above: one model owns every window's view.
         }
@@ -1165,7 +1202,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.publishAudioState(runtime);
             if (dispatched) {
                 try self.rebuild(runtime, self.canvas_window_id);
-                try self.rebuildWindowSlots(runtime);
+                try self.refreshWindowSlots(runtime, null);
             }
         }
 
@@ -1814,6 +1851,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .titlebar = descriptor.titlebar,
                 .min_width = descriptor.min_width,
                 .min_height = descriptor.min_height,
+                .transparent = descriptor.transparent,
+                .layer = descriptor.layer,
+                .click_through = descriptor.click_through,
+                .no_activate = descriptor.no_activate,
                 // Deterministic reopen: the descriptor is the geometry
                 // channel, not a persisted frame store.
                 .restore_state = false,
@@ -1838,6 +1879,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             slot.pixel_snap_scale = self.pixel_snap_scale;
             slot.tree = null;
             slot.arena_index = 0;
+            slot.projected_revision_known = false;
             self.window_slot_count += 1;
         }
 
@@ -1910,8 +1952,36 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
         }
 
+        /// After a model change: rebuild each installed declared window
+        /// whose `window_view_revision` moved; a same-revision window is
+        /// projected through `project_update` when the change came from a
+        /// Msg, and otherwise kept as is. Without `window_view_revision`
+        /// every window rebuilds (`rebuildWindowSlots`).
+        fn refreshWindowSlots(self: *Self, runtime: *Runtime, msg: ?MsgT) anyerror!void {
+            const window_view_revision = self.options.window_view_revision orelse return self.rebuildWindowSlots(runtime);
+            for (self.window_slots[0..self.window_slot_count]) |*slot| {
+                if (!slot.installed) continue;
+                if (slot.projected_revision_known and window_view_revision(&self.model, slot.label()) == slot.projected_revision) {
+                    const project_update = self.options.project_update orelse continue;
+                    const event = msg orelse continue;
+                    if (try project_update(runtime, slot.window_id, slot.canvasLabel(), &self.model, event)) continue;
+                }
+                try self.rebuildWindowSlot(runtime, slot);
+            }
+        }
+
+        /// Read one declared window's runtime-owned widget state back into
+        /// the model (`window_sync`).
+        fn syncWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) void {
+            const window_sync = self.options.window_sync orelse return;
+            if (slot.tree == null) return;
+            const layout = runtime.canvasWidgetLayout(slot.window_id, slot.canvasLabel()) catch return;
+            window_sync(&self.model, slot.label(), layout);
+        }
+
         fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
             const window_view = self.options.window_view orelse return;
+            self.syncWindowSlot(runtime, slot);
             const tokens = runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot));
             const next_index = slot.arena_index ^ 1;
             _ = slot.arenas[next_index].reset(.retain_capacity);
@@ -1936,6 +2006,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             slot.tree = tree;
             slot.arena_index = next_index;
+            if (self.options.window_view_revision) |window_view_revision| {
+                slot.projected_revision = window_view_revision(&self.model, slot.label());
+                slot.projected_revision_known = true;
+            }
             // Same close-on-vanish rule as the main canvas rebuild.
             if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
                 self.clearContextMenuFallback();
@@ -2919,6 +2993,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // holds the stale scale (`rebuildEmitsTokens`).
                 slot.pixel_snap_scale = scale;
                 try self.rebuildWindowSlot(runtime, slot);
+            }
+            if (!installing) {
+                // The main canvas's order: the frame's Msg mutates first,
+                // then this frame presents the resulting generation.
+                if (self.options.window_on_frame) |window_on_frame| {
+                    if (runtime.gpuSurfaceFrame(slot.window_id, slot.canvasLabel())) |gpu_frame| {
+                        if (window_on_frame(&self.model, slot.label(), gpu_frame)) |msg| {
+                            try self.dispatch(runtime, frame_event.window_id, msg);
+                        }
+                    } else |_| {}
+                }
             }
             try self.presentFrame(runtime, frame_event, slot.canvasLabel(), installing);
         }

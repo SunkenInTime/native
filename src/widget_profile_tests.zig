@@ -5,8 +5,10 @@ const native_sdk_options = @import("native_sdk_options");
 test "widget profile selects the bounded platform and runtime capacities" {
     if (!native_sdk_options.widget_profile) return error.SkipZigTest;
 
-    try std.testing.expectEqual(@as(usize, 1), native_sdk.platform.max_windows);
-    try std.testing.expectEqual(@as(usize, 1), native_sdk.platform.max_views);
+    // One window and view per widget process by default; a multi-widget
+    // host raises both with -Dwidget-windows=N. Webviews stay at one.
+    try std.testing.expectEqual(native_sdk_options.widget_windows, native_sdk.platform.max_windows);
+    try std.testing.expectEqual(native_sdk_options.widget_windows, native_sdk.platform.max_views);
     try std.testing.expectEqual(@as(usize, 1), native_sdk.platform.max_webviews);
     // The widget profile bounds the platform shape (one window/view/webview);
     // per-view budgets stay at the stock, measured capacities so widget UI

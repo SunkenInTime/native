@@ -188,7 +188,11 @@ pub const WebViewSource = struct {
 
 pub const WindowId = u64;
 pub const ViewId = u64;
-pub const max_windows: usize = if (native_sdk_options.widget_profile) 1 else 16;
+/// Window capacity of the widget profile: 1 for a single-widget process;
+/// a host build that runs several widget windows in one runtime raises it
+/// with `-Dwidget-windows` (generated app graphs without the option keep 1).
+pub const widget_profile_windows: usize = if (@hasDecl(native_sdk_options, "widget_windows")) native_sdk_options.widget_windows else 1;
+pub const max_windows: usize = if (native_sdk_options.widget_profile) widget_profile_windows else 16;
 pub const max_window_label_bytes: usize = 64;
 pub const max_window_title_bytes: usize = 128;
 /// Budget for a window's webview source payload — for `.html` sources this
@@ -222,7 +226,7 @@ pub const max_drop_paths_bytes: usize = 8192;
 pub const max_drop_paths: usize = max_drop_paths_bytes / 2 + 1;
 pub const max_window_event_name_bytes: usize = 64;
 pub const max_window_event_detail_bytes: usize = 8192;
-pub const max_views: usize = if (native_sdk_options.widget_profile) 1 else 32;
+pub const max_views: usize = if (native_sdk_options.widget_profile) widget_profile_windows else 32;
 pub const max_view_label_bytes: usize = 64;
 pub const max_view_role_bytes: usize = 64;
 pub const max_view_accessibility_label_bytes: usize = 256;
