@@ -27,6 +27,8 @@ const DeskModel = struct {
     /// The window's view outgrows the per-view layout budget, so its
     /// rebuild fails.
     overflowing: [2]bool = .{ false, false },
+    /// Window b stops being declared once its own frame Msg arrives.
+    close_b_on_frame: bool = false,
 };
 
 const DeskMsg = union(enum) {
@@ -117,8 +119,9 @@ fn deskWindowOnFrame(_: *const DeskModel, window_label: []const u8, _: support.p
     return .{ .frame = @intCast(windowIndex(window_label)) };
 }
 
-fn deskWindows(_: *const DeskModel, scratch: *DeskApp.WindowsScratch) []const DeskApp.WindowDescriptor {
-    for (window_labels, canvas_labels, 0..) |label, canvas_label, index| {
+fn deskWindows(model: *const DeskModel, scratch: *DeskApp.WindowsScratch) []const DeskApp.WindowDescriptor {
+    const declared: usize = if (model.close_b_on_frame and model.frames[1] > 0) 1 else window_labels.len;
+    for (window_labels[0..declared], canvas_labels[0..declared], 0..) |label, canvas_label, index| {
         scratch.windows[index] = .{
             .label = label,
             .canvas_label = canvas_label,
@@ -135,7 +138,7 @@ fn deskWindows(_: *const DeskModel, scratch: *DeskApp.WindowsScratch) []const De
             .gpu_backend = if (index == 1) .software else null,
         };
     }
-    return scratch.windows[0..window_labels.len];
+    return scratch.windows[0..declared];
 }
 
 const desk_views = [_]app_manifest.ShellView{
@@ -314,4 +317,19 @@ test "a declared window whose rebuild fails does not hold back the others" {
     const presents_before = fixture.harness.null_platform.gpu_surface_present_count + fixture.harness.null_platform.gpu_surface_packet_present_count;
     try fixture.frame(fixture.windowId("b"), "b-canvas", 3);
     try std.testing.expect(fixture.harness.null_platform.gpu_surface_present_count + fixture.harness.null_platform.gpu_surface_packet_present_count > presents_before);
+}
+
+test "a window closed by its own frame's Msg is not presented" {
+    if (comptime support.platform.max_windows < 3) return error.SkipZigTest;
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+    fixture.app_state.model.close_b_on_frame = true;
+    const b = fixture.windowId("b");
+
+    try fixture.frame(b, "b-canvas", 2);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.frames[1]);
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    for (fixture.harness.runtime.listWindows(&buffer)) |info| {
+        try std.testing.expect(!(info.open and std.mem.eql(u8, info.label, "b")));
+    }
 }

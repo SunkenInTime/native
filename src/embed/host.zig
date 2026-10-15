@@ -757,6 +757,7 @@ pub const MobileHostApp = struct {
 
     pub fn destroy(self: *MobileHostApp) void {
         disableAutomation(self);
+        self.embedded.runtime.deinit();
         std.heap.page_allocator.destroy(self);
     }
 
