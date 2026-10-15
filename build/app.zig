@@ -36,6 +36,10 @@ pub const AppOptions = struct {
     /// caller's `-Dwidget-profile` value; the SDK default remains the
     /// stock desktop profile.
     widget_profile: ?bool = null,
+    /// Window (and view) capacity of the widget profile: 1 for a
+    /// single-widget process, more for a host that runs several widget
+    /// windows in one runtime. Ignored by the stock profile.
+    widget_windows: usize = 1,
     /// Trace mode used when the caller does not pass `-Dtrace`. Ordinary
     /// apps keep event tracing; high-frequency shells such as desktop
     /// widgets may choose `.off` without removing the explicit build flag.
@@ -136,7 +140,7 @@ pub fn addMobileLib(b: *std.Build, dep: *std.Build.Dependency, options: MobileLi
 /// generated graph or ejected `addApp` — can produce the embed library
 /// with nothing but `-Dtarget`).
 fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, options: MobileLibOptions, widget_profile: bool) void {
-    const native_sdk_mod = nativeSdkModule(b, dep, target, optimize, widget_profile);
+    const native_sdk_mod = nativeSdkModule(b, dep, target, optimize, widget_profile, 1);
     // Android hosts load the embed lib inside a shared object
     // (System.loadLibrary / NativeActivity), so every object must be PIC —
     // without it Zig emits local-exec TLS relocations (R_AARCH64_TLSLE_*)
@@ -423,7 +427,7 @@ fn exampleOptimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, defa
 }
 
 fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, app_options: AppOptions, options_mod: *std.Build.Module, widget_profile: bool) *std.Build.Module {
-    const native_sdk_mod = nativeSdkModule(b, dep, target, optimize, widget_profile);
+    const native_sdk_mod = nativeSdkModule(b, dep, target, optimize, widget_profile, app_options.widget_windows);
     const runner_mod = b.createModule(.{
         .root_source_file = dep.path("src/app_runner/root.zig"),
         .target = target,
@@ -479,8 +483,8 @@ fn localModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     });
 }
 
-fn nativeSdkModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, widget_profile: bool) *std.Build.Module {
-    const native_sdk_options = nativeSdkOptionsModule(b, widget_profile);
+fn nativeSdkModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, widget_profile: bool, widget_windows: usize) *std.Build.Module {
+    const native_sdk_options = nativeSdkOptionsModule(b, widget_profile, widget_windows);
     const geometry_mod = externalModule(b, dep, target, optimize, "src/primitives/geometry/root.zig");
     const assets_mod = externalModule(b, dep, target, optimize, "src/primitives/assets/root.zig");
     const app_dirs_mod = externalModule(b, dep, target, optimize, "src/primitives/app_dirs/root.zig");
@@ -511,9 +515,10 @@ fn nativeSdkModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.
     return native_sdk_mod;
 }
 
-fn nativeSdkOptionsModule(b: *std.Build, widget_profile: bool) *std.Build.Module {
+fn nativeSdkOptionsModule(b: *std.Build, widget_profile: bool, widget_windows: usize) *std.Build.Module {
     const options = b.addOptions();
     options.addOption(bool, "widget_profile", widget_profile);
+    options.addOption(usize, "widget_windows", widget_windows);
     return options.createModule();
 }
 

@@ -1077,6 +1077,7 @@ noinline fn runCapture(app: native_sdk.App, options: RunOptions, init: std.proce
     }
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     var driver: CaptureDriver = .{
         .io = init.io,
         .null_platform = &null_platform,
@@ -1240,6 +1241,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = null_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1295,6 +1297,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = mac_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1347,6 +1350,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = linux_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1398,6 +1402,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = windows_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1518,6 +1523,7 @@ noinline fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std
     }
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     // Bridge policy and security must match what the recording ran
     // under (they gate replayed bridge_message dispatch); automation,
     // window-state restore, and tracing stay off — replay consumes only

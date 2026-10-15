@@ -362,7 +362,10 @@ pub const Runtime = struct {
     /// the frame planner hands to renderers each plan.
     canvas_image_entries: [canvas_limits.max_registered_canvas_images]runtime_canvas_images.CanvasImageEntry = [_]runtime_canvas_images.CanvasImageEntry{.{}} ** canvas_limits.max_registered_canvas_images,
     canvas_image_count: usize = 0,
-    canvas_image_pixels: [canvas_limits.max_registered_canvas_images][canvas_limits.max_registered_canvas_image_pixel_bytes]u8 = undefined,
+    /// Each registered image's pixels, allocated at registration and sized
+    /// to it. Only the first `canvas_image_count` are valid: a host-sized
+    /// table is past `initAt`'s small-default bound and is never defaulted.
+    canvas_image_pixels: [canvas_limits.max_registered_canvas_images][]u8 = undefined,
     canvas_image_resources_scratch: [canvas_limits.max_registered_canvas_images]canvas.ReferenceImage = undefined,
     /// Runtime-registered canvas fonts (see canvas_fonts.zig): entry
     /// metadata, the per-slot TrueType byte pool with parsed face views
@@ -371,7 +374,10 @@ pub const Runtime = struct {
     /// registration for platforms without host-side text measurement.
     canvas_font_entries: [canvas_limits.max_registered_canvas_fonts]runtime_canvas_fonts.CanvasFontEntry = [_]runtime_canvas_fonts.CanvasFontEntry{.{}} ** canvas_limits.max_registered_canvas_fonts,
     canvas_font_count: usize = 0,
-    canvas_font_bytes: [canvas_limits.max_registered_canvas_fonts][canvas_limits.max_registered_canvas_font_bytes]u8 = undefined,
+    /// Each registered face's bytes, allocated at registration and sized
+    /// to it; faces are permanent, so they live as long as the runtime.
+    /// Only the first `canvas_font_count` are valid.
+    canvas_font_bytes: [canvas_limits.max_registered_canvas_fonts][]u8 = undefined,
     canvas_font_faces: [canvas_limits.max_registered_canvas_fonts]canvas.font_ttf.Face = undefined,
     canvas_font_resources_scratch: [canvas_limits.max_registered_canvas_fonts]canvas.ReferenceFont = undefined,
     canvas_font_measure_provider: canvas.TextMeasureProvider = .{ .measure_fn = runtime_canvas_fonts.unboundCanvasFontMeasure },
@@ -417,6 +423,16 @@ pub const Runtime = struct {
         // (tests do constantly): bump the generation so nothing measured
         // against a previous runtime's provider can be served to this one.
         canvas.bumpTextMeasureGeneration();
+    }
+
+    /// Release what the runtime allocated beyond its own memory: the
+    /// registered images' pixels and fonts' bytes. Call before freeing the
+    /// Runtime.
+    pub fn deinit(self: *Runtime) void {
+        for (self.canvas_image_pixels[0..self.canvas_image_count]) |pixels| std.heap.page_allocator.free(pixels);
+        self.canvas_image_count = 0;
+        for (self.canvas_font_bytes[0..self.canvas_font_count]) |bytes| std.heap.page_allocator.free(bytes);
+        self.canvas_font_count = 0;
     }
 
     fn fieldHasSmallDefault(comptime field: std.builtin.Type.StructField) bool {
@@ -834,6 +850,7 @@ pub fn TestHarness() type {
         }
 
         pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
+            self.runtime.deinit();
             gpa.destroy(self);
         }
 
