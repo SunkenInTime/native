@@ -1171,12 +1171,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
             }
             self.rebuild(runtime, self.canvas_window_id) catch |err| {
-                // Independent windows do not wait on the main canvas:
-                // reconcile and refresh them before reporting its failure.
+                // With independent windows the main canvas is one window
+                // among many: its failure is logged and stays its own.
                 if (self.options.window_view_revision == null) return err;
+                ui_app_log.warn("main canvas '{s}' failed to rebuild and keeps its last tree: {s}", .{ self.options.canvas_label, @errorName(err) });
                 self.applyWindows(runtime);
-                self.refreshWindowSlots(runtime, msg) catch {};
-                return err;
             };
             try self.refreshWindowSlots(runtime, msg);
             // A Msg dispatched FROM a secondary window still rebuilt the
@@ -1971,19 +1970,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// every window rebuilds (`rebuildWindowSlots`).
         ///
         /// Independent windows do not wait on each other: a window whose
-        /// projection or rebuild fails keeps its last tree, the rest still
-        /// refresh, and the first failure is returned afterwards.
+        /// projection or rebuild fails is logged and keeps its last tree,
+        /// and the rest still refresh. The failure stays that window's: it
+        /// is not returned into the dispatch of whichever window's event
+        /// triggered the refresh.
         fn refreshWindowSlots(self: *Self, runtime: *Runtime, msg: ?MsgT) anyerror!void {
             const window_view_revision = self.options.window_view_revision orelse return self.rebuildWindowSlots(runtime);
-            var first_failure: ?anyerror = null;
             for (self.window_slots[0..self.window_slot_count]) |*slot| {
                 if (!slot.installed) continue;
                 self.refreshWindowSlot(runtime, slot, window_view_revision, msg) catch |err| {
-                    ui_app_log.warn("declared window '{s}' failed to refresh: {s}", .{ slot.label(), @errorName(err) });
-                    if (first_failure == null) first_failure = err;
+                    ui_app_log.warn("declared window '{s}' failed to refresh and keeps its last tree: {s}", .{ slot.label(), @errorName(err) });
                 };
             }
-            if (first_failure) |err| return err;
         }
 
         fn refreshWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot, window_view_revision: *const fn (model: *const ModelT, window_label: []const u8) u64, msg: ?MsgT) anyerror!void {
@@ -2866,6 +2864,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// the runtime, translating each failure into a teaching error
         /// naming the font and what is wrong before propagating it.
         fn registerDeclaredFonts(self: *Self, runtime: *Runtime) anyerror!void {
+            // Every face gets its attempt: one bad file must not leave the
+            // faces after it unregistered. The first failure is returned.
+            var first_failure: ?anyerror = null;
             for (self.options.fonts) |font| {
                 runtime.registerCanvasFont(font.id, font.ttf) catch |err| {
                     switch (err) {
@@ -2902,9 +2903,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             .{ font.name, font.id, @errorName(err) },
                         ),
                     }
-                    return err;
+                    if (first_failure == null) first_failure = err;
                 };
             }
+            if (first_failure) |err| return err;
         }
 
         fn handleFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
@@ -2929,7 +2931,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // every frame.
                 if (!self.fonts_registered) {
                     self.fonts_registered = true;
-                    try registerDeclaredFonts(self, runtime);
+                    // Independent windows install whatever faces loaded:
+                    // each failure was logged by name, and the windows
+                    // whose faces registered must not wait on it.
+                    registerDeclaredFonts(self, runtime) catch |err| {
+                        if (self.options.window_view_revision == null) return err;
+                    };
                 }
                 if (self.options.init_fx) |init_fx| {
                     if (!self.init_fx_ran) {

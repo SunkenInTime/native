@@ -85,15 +85,22 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
             if (rgba8.len != byte_len) return error.InvalidImageDimensions;
             if (byte_len > max_registered_canvas_image_pixel_bytes) return error.ImageTooLarge;
 
-            const existing = findCanvasImageIndex(self, id);
-            if (existing == null and self.canvas_image_count >= max_registered_canvas_images) return error.ImageRegistryFull;
-            const index = existing orelse self.canvas_image_count;
-            if (self.canvas_image_pixels[index].len != byte_len) {
-                const pixels = try std.heap.page_allocator.alloc(u8, byte_len);
-                std.heap.page_allocator.free(self.canvas_image_pixels[index]);
-                self.canvas_image_pixels[index] = pixels;
-            }
-            if (existing == null) self.canvas_image_count += 1;
+            // Slots past `canvas_image_count` hold nothing: a new id gets
+            // fresh pixels, a replaced one keeps its buffer when it fits.
+            const index = if (findCanvasImageIndex(self, id)) |replaced| blk: {
+                if (self.canvas_image_pixels[replaced].len != byte_len) {
+                    const pixels = try std.heap.page_allocator.alloc(u8, byte_len);
+                    std.heap.page_allocator.free(self.canvas_image_pixels[replaced]);
+                    self.canvas_image_pixels[replaced] = pixels;
+                }
+                break :blk replaced;
+            } else blk: {
+                if (self.canvas_image_count >= max_registered_canvas_images) return error.ImageRegistryFull;
+                const added = self.canvas_image_count;
+                self.canvas_image_pixels[added] = try std.heap.page_allocator.alloc(u8, byte_len);
+                self.canvas_image_count += 1;
+                break :blk added;
+            };
             @memcpy(self.canvas_image_pixels[index], rgba8);
             self.canvas_image_entries[index] = .{
                 .id = id,
@@ -145,7 +152,6 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
             const last = self.canvas_image_count - 1;
             std.heap.page_allocator.free(self.canvas_image_pixels[index]);
             self.canvas_image_pixels[index] = self.canvas_image_pixels[last];
-            self.canvas_image_pixels[last] = &.{};
             if (index != last) self.canvas_image_entries[index] = self.canvas_image_entries[last];
             self.canvas_image_entries[last] = .{};
             self.canvas_image_count = last;

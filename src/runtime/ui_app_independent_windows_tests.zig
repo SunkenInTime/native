@@ -300,11 +300,18 @@ test "a declared window whose rebuild fails does not hold back the others" {
     const fixture = try Fixture.create();
     defer fixture.destroy();
 
-    try std.testing.expectError(error.WidgetLayoutListFull, fixture.app_state.dispatch(&fixture.harness.runtime, 1, .{ .overflow = 0 }));
+    // Window a's failure is logged and stays its own: the dispatch that
+    // triggered it succeeds.
+    try fixture.app_state.dispatch(&fixture.harness.runtime, 1, .{ .overflow = 0 });
     view_builds = .{ 0, 0 };
-    // Window a still fails (its revision never projected), window b
-    // rebuilds anyway, and the failure is still reported.
-    try std.testing.expectError(error.WidgetLayoutListFull, fixture.app_state.dispatch(&fixture.harness.runtime, 1, .{ .bump = 1 }));
+    // Window a still fails (its revision never projected); window b
+    // rebuilds anyway.
+    try fixture.app_state.dispatch(&fixture.harness.runtime, 1, .{ .bump = 1 });
     try std.testing.expectEqual([2]u32{ 1, 1 }, view_builds);
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.counts[1]);
+
+    // A healthy window's own frame still presents while a fails.
+    const presents_before = fixture.harness.null_platform.gpu_surface_present_count + fixture.harness.null_platform.gpu_surface_packet_present_count;
+    try fixture.frame(fixture.windowId("b"), "b-canvas", 3);
+    try std.testing.expect(fixture.harness.null_platform.gpu_surface_present_count + fixture.harness.null_platform.gpu_surface_packet_present_count > presents_before);
 }
