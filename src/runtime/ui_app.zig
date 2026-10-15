@@ -309,6 +309,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             layer: app_manifest.WindowLayer = .normal,
             click_through: bool = false,
             no_activate: bool = false,
+            /// This window's canvas renderer. Null renders through the main
+            /// canvas's declared backend, like every other gpu option.
+            gpu_backend: ?app_manifest.GpuSurfaceBackend = null,
             /// Msg dispatched when the USER closes the window (never for
             /// a reconcile close the model itself initiated). The
             /// dismissal precedent: the window is already gone as an
@@ -1904,9 +1907,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     view.gpu_alpha_mode = scene_view.gpu_alpha_mode;
                     view.gpu_color_space = scene_view.gpu_color_space;
                     view.gpu_vsync = scene_view.gpu_vsync;
+                    if (descriptor.gpu_backend) |backend| view.gpu_backend = backend;
                     return view;
                 }
             }
+            if (descriptor.gpu_backend) |backend| view.gpu_backend = backend;
             return view;
         }
 

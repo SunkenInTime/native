@@ -118,6 +118,7 @@ fn deskWindows(_: *const DeskModel, scratch: *DeskApp.WindowsScratch) []const De
             .layer = if (index == 0) .bottom else .topmost,
             .click_through = index == 0,
             .no_activate = true,
+            .gpu_backend = if (index == 1) .software else null,
         };
     }
     return scratch.windows[0..window_labels.len];
@@ -196,6 +197,17 @@ const Fixture = struct {
         unreachable;
     }
 
+    /// The backend the window's canvas was CREATED with (the runtime's
+    /// own view record follows whatever backend frames later report).
+    fn canvasBackend(self: Fixture, label: []const u8) support.platform.GpuSurfaceBackend {
+        const null_platform = self.harness.null_platform;
+        const window_id = self.windowId(label);
+        for (null_platform.views[0..null_platform.view_count]) |view| {
+            if (view.window_id == window_id) return view.gpu_backend;
+        }
+        unreachable;
+    }
+
     fn platformIndex(self: Fixture, label: []const u8) usize {
         const null_platform = self.harness.null_platform;
         for (null_platform.windows[0..null_platform.window_count], 0..) |info, index| {
@@ -222,6 +234,11 @@ test "declared windows carry the widget surface flags to the platform" {
     try std.testing.expectEqual(support.platform.WindowLayer.topmost, null_platform.window_layer[b]);
     try std.testing.expect(!null_platform.window_click_through[b]);
     try std.testing.expect(null_platform.window_no_activate[b]);
+
+    // A declared backend wins; without one the window renders like the
+    // main canvas.
+    try std.testing.expectEqual(support.platform.GpuSurfaceBackend.metal, fixture.canvasBackend("a"));
+    try std.testing.expectEqual(support.platform.GpuSurfaceBackend.software, fixture.canvasBackend("b"));
 }
 
 test "a Msg rebuilds only the declared window whose revision moved" {
