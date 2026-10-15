@@ -2951,10 +2951,20 @@ static bool ensureLayeredScratch(LayeredScratch &scratch, HDC screen_dc, int wid
     return true;
 }
 
-/* Straight-alpha RGBA8 rows -> premultiplied BGRA, the layout
- * UpdateLayeredWindow's AC_SRC_ALPHA blend reads. */
-static void premultiplyRowToBgra(uint8_t *dst, const uint8_t *src, int pixels) {
+/* Straight-alpha RGBA8 rows -> the BGRA UpdateLayeredWindow's AC_SRC_ALPHA
+ * blend reads: premultiplied for a premultiplied surface, and fully
+ * opaque (alpha forced to 255, colors unchanged) for an opaque one. */
+static void rowToLayeredBgra(uint8_t *dst, const uint8_t *src, int pixels, bool premultiplied) {
     for (int x = 0; x < pixels; ++x) {
+        if (!premultiplied) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = 255;
+            dst += 4;
+            src += 4;
+            continue;
+        }
         const uint8_t alpha = src[3];
         dst[0] = (uint8_t)(((uint32_t)src[2] * alpha + 127) / 255);
         dst[1] = (uint8_t)(((uint32_t)src[1] * alpha + 127) / 255);
@@ -3025,7 +3035,7 @@ static bool presentLayeredGpuSurface(Host *host, Window &window, const NativeVie
             const size_t destination_offset =
                 static_cast<size_t>(destination.top + source_y) * stride +
                 static_cast<size_t>(destination.left + source_left) * 4;
-            premultiplyRowToBgra(scratch.bits + destination_offset, rgba8 + source_offset, source_right - source_left);
+            rowToLayeredBgra(scratch.bits + destination_offset, rgba8 + source_offset, source_right - source_left, view.gpu_alpha_mode == 2);
         }
     }
     window.layered_width = client_width;
