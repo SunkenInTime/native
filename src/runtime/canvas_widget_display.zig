@@ -324,6 +324,9 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // so `first_view_built` -> this = reconcile + emit.
             defer launch_timing.lapOnce("first_display_list_emitted");
 
+            if (self.display_list_refresh_active) return error.DisplayListRefreshReentered;
+            self.display_list_refresh_active = true;
+            defer self.display_list_refresh_active = false;
             const scratch = &self.display_list_refresh_scratch;
             const chrome_storage = &scratch.copied;
             chrome_storage.reset();
