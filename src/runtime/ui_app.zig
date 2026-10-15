@@ -1153,7 +1153,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (!self.installed) return;
             if (self.projectedViewRevisionMatches()) {
                 if (self.options.project_update) |project_update| {
-                    if (try project_update(runtime, self.canvas_window_id, self.options.canvas_label, &self.model, msg)) {
+                    const projected = project_update(runtime, self.canvas_window_id, self.options.canvas_label, &self.model, msg) catch |err| projected: {
+                        // Independent windows: the main canvas's failed
+                        // projection is its own; it rebuilds below.
+                        if (self.options.window_view_revision == null) return err;
+                        ui_app_log.warn("main canvas '{s}' failed to project an update: {s}", .{ self.options.canvas_label, @errorName(err) });
+                        break :projected false;
+                    };
+                    if (projected) {
                         // The primary canvas is projected. Reconcile the
                         // declared window set (including a user-closed
                         // window the model still declares), then bring the
@@ -1203,15 +1210,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (!self.effects.hasPending()) return;
             self.bindEffectsChannel(runtime);
             self.syncModel(runtime, self.canvas_window_id);
+            const independent = self.options.window_view_revision != null;
             var dispatched = false;
             while (self.effects.takeMsg()) |msg| {
                 self.applyMsg(msg);
                 dispatched = true;
+                // Independent windows see every Msg: a paint-only change
+                // projects through `project_update` like a dispatch.
+                if (independent) try self.refreshWindowSlots(runtime, msg);
             }
             self.publishAudioState(runtime);
             if (dispatched) {
-                try self.rebuild(runtime, self.canvas_window_id);
-                try self.refreshWindowSlots(runtime, null);
+                if (!independent) {
+                    try self.rebuild(runtime, self.canvas_window_id);
+                    try self.refreshWindowSlots(runtime, null);
+                } else {
+                    self.rebuild(runtime, self.canvas_window_id) catch |err| {
+                        ui_app_log.warn("main canvas '{s}' failed to rebuild and keeps its last tree: {s}", .{ self.options.canvas_label, @errorName(err) });
+                    };
+                }
             }
         }
 
@@ -3042,6 +3059,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     if (runtime.gpuSurfaceFrame(slot.window_id, slot.canvasLabel())) |gpu_frame| {
                         if (window_on_frame(&self.model, slot.label(), gpu_frame)) |msg| {
                             try self.dispatch(runtime, frame_event.window_id, msg);
+                            // The Msg may have closed this window or moved
+                            // its slot; present only a window still declared.
+                            const current = self.windowSlotByCanvasLabel(frame_event.label) orelse return;
+                            return self.presentFrame(runtime, frame_event, current.canvasLabel(), installing);
                         }
                     } else |_| {}
                 }
