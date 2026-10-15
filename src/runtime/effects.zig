@@ -440,8 +440,9 @@ pub const EffectClipboardResult = struct {
 /// fixed table: they do NOT consume `max_effects` slots or worker
 /// threads (a timer is a platform service arm, not a blocking effect),
 /// and timer keys are their own namespace — an fx timer key never
-/// collides with a spawn/fetch/file key.
-pub const max_effect_timers: usize = 16;
+/// collides with a spawn/fetch/file key. A multi-window widget host runs
+/// one app for every widget window, so the table holds 16 per window.
+pub const max_effect_timers: usize = 16 * platform.max_windows_per_effects_table;
 
 /// Whether an fx timer fires once and retires or keeps firing until
 /// `cancelTimer`.
