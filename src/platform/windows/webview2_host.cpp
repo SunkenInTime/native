@@ -2896,8 +2896,26 @@ static bool ensureLayeredScratch(LayeredScratch &scratch, HDC screen_dc, int wid
     return true;
 }
 
-static bool presentLayeredGpuSurface(Host *host, Window &window, const NativeView &view, int dirty_left, int dirty_top, int dirty_right, int dirty_bottom, bool full_copy) {
-    if (!window.hwnd || !window.transparent || view.gpu_bgra.empty()) return false;
+/* Straight-alpha RGBA8 rows -> premultiplied BGRA, the layout
+ * UpdateLayeredWindow's AC_SRC_ALPHA blend reads. */
+static void premultiplyRowToBgra(uint8_t *dst, const uint8_t *src, int pixels) {
+    for (int x = 0; x < pixels; ++x) {
+        const uint8_t alpha = src[3];
+        dst[0] = (uint8_t)(((uint32_t)src[2] * alpha + 127) / 255);
+        dst[1] = (uint8_t)(((uint32_t)src[1] * alpha + 127) / 255);
+        dst[2] = (uint8_t)(((uint32_t)src[0] * alpha + 127) / 255);
+        dst[3] = alpha;
+        dst += 4;
+        src += 4;
+    }
+}
+
+/* A layered window keeps no pixels of its own: the frame's changed rows go
+ * straight from the renderer's RGBA output into the shared scratch DIB and
+ * the compositor keeps everything else. `full_frame` says the RGBA output
+ * covers the whole surface (a resize, the first frame, or no dirty rect). */
+static bool presentLayeredGpuSurface(Host *host, Window &window, const NativeView &view, const uint8_t *rgba8, int dirty_left, int dirty_top, int dirty_right, int dirty_bottom, bool full_frame) {
+    if (!window.hwnd || !window.transparent || !rgba8) return false;
     if (view.gpu_buf_width <= 0 || view.gpu_buf_height <= 0) return false;
 
     HDC screen_dc = GetDC(nullptr);
@@ -2921,16 +2939,22 @@ static bool presentLayeredGpuSurface(Host *host, Window &window, const NativeVie
     const WeaverPhysicalRectI destination = view.gpu_geometry_physical;
     const bool destination_changed = !window.layered_gpu_frame_valid ||
         !weaverPhysicalRectsEqual(window.layered_gpu_frame, destination);
-    const bool whole_window = full_copy || resized || destination_changed;
+    const bool whole_window = full_frame || resized || destination_changed;
     if (whole_window) {
-        // Everything the view does not cover is transparent.
+        // Everything the view does not cover is transparent. A new client
+        // size or view destination comes with a geometry change that makes
+        // the runtime render the whole surface, so `full_frame` normally
+        // holds here; if it does not, only the dirty rows are known and the
+        // rest of the surface stays transparent until the next full frame.
         for (int y = 0; y < client_height; ++y) {
             memset(scratch.bits + static_cast<size_t>(y) * stride, 0, static_cast<size_t>(client_width) * 4);
         }
-        dirty_left = 0;
-        dirty_top = 0;
-        dirty_right = view.gpu_buf_width;
-        dirty_bottom = view.gpu_buf_height;
+        if (full_frame) {
+            dirty_left = 0;
+            dirty_top = 0;
+            dirty_right = view.gpu_buf_width;
+            dirty_bottom = view.gpu_buf_height;
+        }
     }
     const int source_left = std::max(0, std::max(dirty_left, -destination.left));
     const int source_top = std::max(0, std::max(dirty_top, -destination.top));
@@ -2940,14 +2964,13 @@ static bool presentLayeredGpuSurface(Host *host, Window &window, const NativeVie
         std::min(dirty_bottom, client_height - destination.top));
     const bool copies = source_right > source_left && source_bottom > source_top;
     if (copies) {
-        const size_t row_bytes = static_cast<size_t>(source_right - source_left) * 4;
         for (int source_y = source_top; source_y < source_bottom; ++source_y) {
             const size_t source_offset =
                 (static_cast<size_t>(source_y) * view.gpu_buf_width + source_left) * 4;
             const size_t destination_offset =
                 static_cast<size_t>(destination.top + source_y) * stride +
                 static_cast<size_t>(destination.left + source_left) * 4;
-            memcpy(scratch.bits + destination_offset, view.gpu_bgra.data() + source_offset, row_bytes);
+            premultiplyRowToBgra(scratch.bits + destination_offset, rgba8 + source_offset, source_right - source_left);
         }
     }
     window.layered_width = client_width;
@@ -6424,10 +6447,16 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
      * over the top band and composites its own caption material wherever
      * the redirection surface's alpha is 0 — the app's pixels must read
      * as opaque there or the whole header band would vanish under DWM
-     * chrome (only the punched button hole yields on purpose). */
-    view.gpu_bgra.resize(width * height * 4);
+     * chrome (only the punched button hole yields on purpose). Layered
+     * windows convert straight into the shared layered DIB instead and
+     * retain nothing (`presentLayeredGpuSurface`). */
+    if (layered) {
+        std::vector<uint8_t>().swap(view.gpu_bgra);
+    } else {
+        view.gpu_bgra.resize(width * height * 4);
+    }
     uint8_t *dst = view.gpu_bgra.data();
-    for (int y = dirty_top; y < dirty_bottom; ++y) {
+    if (!layered) for (int y = dirty_top; y < dirty_bottom; ++y) {
         for (int x = dirty_left; x < dirty_right; ++x) {
             const size_t index = (size_t)y * width + (size_t)x;
             const uint8_t *src = rgba8 + index * 4;
@@ -6451,18 +6480,22 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
      * button cluster matched to the header the app just presented. */
     if (owner != host->windows.end()) syncHiddenCaptionColor(host, owner->second, view, rgba8, width, height);
 
+    // The sample pixel is only this frame's when it lies in the rendered
+    // rows: outside them the renderer's buffer may hold another view's.
+    const bool sample_rendered = (int)(height / 2) >= dirty_top && (int)(height / 2) < dirty_bottom &&
+        (int)(width / 2) >= dirty_left && (int)(width / 2) < dirty_right;
     const size_t sample_index = ((height / 2) * width + width / 2) * 4;
     const uint8_t sr = rgba8[sample_index + 0];
     const uint8_t sg = rgba8[sample_index + 1];
     const uint8_t sb = rgba8[sample_index + 2];
     const uint8_t sa = rgba8[sample_index + 3];
-    if (sr != 0 || sg != 0 || sb != 0) {
+    if (sample_rendered && (sr != 0 || sg != 0 || sb != 0)) {
         view.gpu_nonblank = 1;
         view.gpu_sample_color = ((uint32_t)sa << 24) | ((uint32_t)sr << 16) | ((uint32_t)sg << 8) | (uint32_t)sb;
     }
 
     if (layered) {
-        if (!presentLayeredGpuSurface(host, owner->second, view, dirty_left, dirty_top, dirty_right, dirty_bottom, full_update)) return 0;
+        if (!presentLayeredGpuSurface(host, owner->second, view, rgba8, dirty_left, dirty_top, dirty_right, dirty_bottom, full_update)) return 0;
     } else {
         RECT dirty = { dirty_left, dirty_top, dirty_right, dirty_bottom };
         InvalidateRect(view.hwnd, full_update ? nullptr : &dirty, FALSE);
