@@ -6133,6 +6133,13 @@ int native_sdk_windows_close_window(Host *host, uint64_t window_id) {
     destroyNativeViewsForWindow(host, window_id);
     destroyChildWebViewsForWindow(host, window_id);
     DestroyWindow(found->second.hwnd);
+    /* The runtime reopens a label under a new id, so nothing looks this
+     * entry up again: erase it, or every closed window leaves one behind
+     * (224 bytes each). Here, not in WM_DESTROY, which runs inside loops
+     * over this map (destroyAllWindows) and calls back into the app; a
+     * nested close of this id returns early, and erasing another entry
+     * leaves those loops' iterators valid. */
+    host->windows.erase(found);
     return 1;
 }
 
