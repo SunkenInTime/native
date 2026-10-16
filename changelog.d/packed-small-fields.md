@@ -1,0 +1,1 @@
+improvement: **Views and the runtime start with fewer resident pages**: large fixed-capacity storage in `RuntimeView` and `Runtime` is aligned ahead of the small fields, so building a view writes one page instead of 32 and the runtime three instead of 22; ten Weaver clock widgets in one host went from 9.56 to 9.01 MiB private working set.
