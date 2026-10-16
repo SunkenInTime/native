@@ -229,6 +229,15 @@ pub const NullAudio = struct {
     }
 };
 
+/// Test hook run inside `NullPlatform.createWindow` once the window is
+/// recorded: stands in for the window messages a real host delivers
+/// synchronously while it creates a window (the Windows host emits
+/// frame events from WM_MOVE/WM_SIZE before `createWindow` returns).
+pub const NullCreateWindowHook = struct {
+    context: *anyopaque,
+    run: *const fn (context: *anyopaque, info: WindowInfo) anyerror!void,
+};
+
 pub const NullPlatform = struct {
     surface_value: Surface = .{},
     web_engine: WebEngine = .system,
@@ -318,6 +327,8 @@ pub const NullPlatform = struct {
     show_op_seq: usize = 0,
     window_first_present_seq: [max_windows]usize = [_]usize{0} ** max_windows,
     window_shown_seq: [max_windows]usize = [_]usize{0} ** max_windows,
+    /// Optional re-entrancy seam: see `NullCreateWindowHook`.
+    create_window_hook: ?NullCreateWindowHook = null,
     /// Window ids handed to `startWindowDrag`, in call order: the
     /// window-drag region channel's recording seam. A double-click is
     /// two recorded calls (the host side decides drag vs zoom from the
@@ -852,6 +863,7 @@ pub const NullPlatform = struct {
             self.window_shown_seq[self.window_count] = 0;
         }
         self.window_count += 1;
+        if (self.create_window_hook) |hook| try hook.run(hook.context, info);
         return info;
     }
 
