@@ -399,7 +399,7 @@ test "runtime batches pointer widget display list refreshes" {
     try std.testing.expect(retained.nodes[1].widget.state.selected);
     try std.testing.expectEqual(@as(f32, 1), retained.nodes[1].widget.value);
 
-    const travel = canvas.toggleWidgetKnobTravel(retained.nodes[1].widget, harness.runtime.views[0].widget_tokens);
+    const travel = canvas.toggleWidgetKnobTravel(retained.nodes[1].widget, harness.runtime.views[0].widget_tokens.*);
     const animations = try harness.runtime.canvasRenderAnimations(1, "canvas");
     try std.testing.expectEqual(@as(usize, 1), animations.len);
     try std.testing.expectEqual(canvas.toggleWidgetKnobCommandId(4), animations[0].id);

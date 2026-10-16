@@ -117,7 +117,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             if (canvasWidgetModelDrivenVirtual(scroll_node.widget)) return false;
 
             if (scroll_node.widget.kind == .textarea) {
-                const max_offset = canvas.textInputMaxScrollOffsetForWidget(scroll_node.widget, self.widget_tokens);
+                const max_offset = canvas.textInputMaxScrollOffsetForWidget(scroll_node.widget, self.widget_tokens.*);
                 if (max_offset <= 0) return false;
                 const current_offset = std.math.clamp(scroll_node.widget.value, 0, max_offset);
                 return if (delta_y > 0) current_offset < max_offset else current_offset > 0;
@@ -184,11 +184,11 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             const widget = self.widget_layout_nodes[scroll_index].widget;
             if (widget.kind != .textarea) return null;
 
-            const viewport = canvas.textInputViewportForWidget(widget, self.widget_tokens) orelse return null;
+            const viewport = canvas.textInputViewportForWidget(widget, self.widget_tokens.*) orelse return null;
             const current = canvas.ScrollState{
-                .offset = canvas.clampedTextInputScrollOffsetForWidget(widget, self.widget_tokens, widget.value),
+                .offset = canvas.clampedTextInputScrollOffsetForWidget(widget, self.widget_tokens.*, widget.value),
                 .viewport_extent = viewport.height,
-                .content_extent = canvas.textInputContentExtentForWidget(widget, self.widget_tokens),
+                .content_extent = canvas.textInputContentExtentForWidget(widget, self.widget_tokens.*),
             };
             const next = switch (source) {
                 .wheel => current.applyWheelClamped(delta_y, self.widget_tokens.scroll),
@@ -307,14 +307,14 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
 
         pub fn canvasWidgetScrollContentExtent(self: *const RuntimeView, scroll_index: usize, viewport: geometry.RectF) f32 {
             if (scroll_index < self.widget_layout_node_count and self.widget_layout_nodes[scroll_index].widget.kind == .textarea) {
-                return canvas.textInputContentExtentForWidget(self.widget_layout_nodes[scroll_index].widget, self.widget_tokens);
+                return canvas.textInputContentExtentForWidget(self.widget_layout_nodes[scroll_index].widget, self.widget_tokens.*);
             }
             // Virtualized containers derive their extent from the item
             // count and extent (declared count for windowed virtual
             // lists), never from the mounted descendants — walking the
             // built window would collapse the extent to the window.
             if (scroll_index < self.widget_layout_node_count and self.widget_layout_nodes[scroll_index].widget.layout.virtualized) {
-                return @max(viewport.height, canvas.virtualWidgetScrollContentExtentWithTokens(self.widget_layout_nodes[scroll_index].widget, viewport.height, self.widget_tokens));
+                return @max(viewport.height, canvas.virtualWidgetScrollContentExtentWithTokens(self.widget_layout_nodes[scroll_index].widget, viewport.height, self.widget_tokens.*));
             }
             const scroll_depth = self.widget_layout_nodes[scroll_index].depth;
             const offset = self.widget_layout_nodes[scroll_index].widget.value;
@@ -344,25 +344,25 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             if (index >= self.widget_layout_node_count) return;
             var widget = self.widget_layout_nodes[index].widget;
             if (canvasWidgetSingleLineTextKind(widget.kind)) {
-                const next_offset = canvas.textInputCaretVisibleScrollOffsetForWidget(widget, self.widget_tokens, widget.value);
+                const next_offset = canvas.textInputCaretVisibleScrollOffsetForWidget(widget, self.widget_tokens.*, widget.value);
                 if (next_offset == widget.value) return;
                 self.widget_layout_nodes[index].widget.value = next_offset;
                 return;
             }
             if (widget.kind != .textarea) return;
 
-            const viewport = canvas.textInputViewportForWidget(widget, self.widget_tokens) orelse return;
-            const geometry_value = canvas.textGeometryForWidget(widget, self.widget_tokens);
+            const viewport = canvas.textInputViewportForWidget(widget, self.widget_tokens.*) orelse return;
+            const geometry_value = canvas.textGeometryForWidget(widget, self.widget_tokens.*);
             const caret = geometry_value.caret_bounds orelse return;
 
-            var next_offset = canvas.clampedTextInputScrollOffsetForWidget(widget, self.widget_tokens, widget.value);
+            var next_offset = canvas.clampedTextInputScrollOffsetForWidget(widget, self.widget_tokens.*, widget.value);
             const padding: f32 = 2;
             if (caret.y < viewport.y) {
                 next_offset -= viewport.y - caret.y + padding;
             } else if (caret.maxY() > viewport.maxY()) {
                 next_offset += caret.maxY() - viewport.maxY() + padding;
             }
-            next_offset = canvas.clampedTextInputScrollOffsetForWidget(widget, self.widget_tokens, next_offset);
+            next_offset = canvas.clampedTextInputScrollOffsetForWidget(widget, self.widget_tokens.*, next_offset);
             if (next_offset == widget.value) return;
             widget.value = next_offset;
             self.widget_layout_nodes[index].widget.value = next_offset;

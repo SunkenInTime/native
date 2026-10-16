@@ -221,7 +221,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             if (bounds.isEmpty()) return error.InvalidCommand;
             var aim_widget = node.widget;
             aim_widget.frame = node.frame;
-            return canvas.widgetControlAimPoint(aim_widget, self.views[view_index].widget_tokens);
+            return canvas.widgetControlAimPoint(aim_widget, self.views[view_index].widget_tokens.*);
         }
 
         pub fn dispatchAutomationWidgetWheel(self: *Runtime, app: runtime_api.App(Runtime), wheel: AutomationWidgetWheel) anyerror!void {
