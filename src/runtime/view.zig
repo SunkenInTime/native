@@ -936,20 +936,4 @@ pub const RuntimeView = struct {
         self.gpu_first_frame_latency_budget_exceeded_count = if (self.gpu_first_frame_latency_budget_ns > 0 and self.gpu_first_frame_latency_ns > self.gpu_first_frame_latency_budget_ns) 1 else 0;
         self.gpu_first_frame_latency_budget_ok = self.gpu_first_frame_latency_budget_exceeded_count == 0;
     }
-
-    pub fn copyRuntimeStateFrom(self: *RuntimeView, source: *const RuntimeView, scratch: *canvas_widget_runtime.CanvasWidgetCopyScratch) void {
-        self.* = source.*;
-        self.label = copyInto(&self.label_storage, source.label) catch unreachable;
-        self.parent = if (source.parent) |parent| copyInto(&self.parent_storage, parent) catch unreachable else null;
-        self.role = copyInto(&self.role_storage, source.role) catch unreachable;
-        self.accessibility_label = copyInto(&self.accessibility_label_storage, source.accessibility_label) catch unreachable;
-        self.text = copyInto(&self.text_storage, source.text) catch unreachable;
-        self.command = copyInto(&self.command_storage, source.command) catch unreachable;
-        self.copyCanvasDisplayList(source.canvasDisplayList()) catch unreachable;
-        self.canvas_revision = source.canvas_revision;
-        self.copyPresentedCanvasSummaryFrom(source);
-        self.copyWidgetLayoutTree(source.widgetLayoutTree(), scratch) catch unreachable;
-        self.widget_revision = source.widget_revision;
-        @memcpy(self.widget_scroll_states[0..source.widget_layout_node_count], source.widget_scroll_states[0..source.widget_layout_node_count]);
-    }
 };

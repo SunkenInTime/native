@@ -184,7 +184,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             const from_tx = if (animation.selected) animation.travel else -animation.travel;
             const render_animation = motion.animation(.{
                 .id = canvas.toggleWidgetKnobCommandId(animation.id),
-                .start_ns = canvasRenderAnimationStartNsForView(&self.views[view_index]),
+                .start_ns = canvasRenderAnimationStartNsForView(self.views[view_index]),
                 .duration = .fast,
                 .from_transform = canvas.Affine.translate(from_tx, 0),
                 .to_transform = canvas.Affine.identity(),
@@ -202,7 +202,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
 
         fn publishCanvasWidgetAccessibilityMaybeDeferred(self: *Runtime, view_index: usize, allow_deferral: bool) anyerror!void {
             if (view_index >= self.view_count) return;
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             if (view.kind != .gpu_surface) return;
             // Frame-profile `a11y` stage: node assembly + the platform
             // publish, riding every owned refresh. No-op unless
@@ -364,7 +364,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// holds steady while the user types or moves it). When no caret
         /// is showing the animation is removed so the view goes idle.
         fn reconcileCanvasWidgetCaretBlink(self: *Runtime, view_index: usize) void {
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             const desired = canvasWidgetCaretBlinkTarget(view);
             const previous = view.canvas_widget_caret_blink_id;
             const desired_id: canvas.ObjectId = if (desired) |target| target.command_id else 0;
@@ -409,7 +409,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// nothing: arcs, dials, and placeholder blocks render as
         /// static poses (the segmented emitter bakes its trail then).
         fn reconcileCanvasWidgetLoopAnimations(self: *Runtime, view_index: usize) void {
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             var desired_ids: [canvas_limits.max_canvas_widget_loop_animations_per_view]canvas.ObjectId = undefined;
             var desired_count: usize = 0;
 
@@ -673,7 +673,7 @@ fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {
 }
 
 fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
-    for (self.views[0..self.view_count], 0..) |*view, index| {
+    for (self.views[0..self.view_count], 0..) |view, index| {
         if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
     }
     return null;

@@ -519,6 +519,11 @@ pub const WindowDragRegion = struct {
 pub const WindowShowMode = enum {
     immediate,
     on_first_present,
+    /// Created hidden and never shown by Native: a window that exists to
+    /// own the app (it quits when its last window closes) while every
+    /// visible surface is a secondary window that comes and goes. Windows
+    /// only for now; other platforms refuse it at create.
+    hidden,
 };
 
 /// Keep a window attached to one corner of the primary display's visible

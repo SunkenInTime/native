@@ -56,6 +56,9 @@ pub const RunOptions = struct {
     startup_window_layer: ?native_sdk.WindowLayer = null,
     /// Optional so false can explicitly replace a compiled true value.
     startup_click_through: ?bool = null,
+    /// Replaces the compiled show mode of the startup window; `.hidden`
+    /// keeps it off screen for the app's life.
+    startup_window_show: ?native_sdk.WindowShowMode = null,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     js_window_api: bool = false,
@@ -118,6 +121,9 @@ pub const RunOptions = struct {
         if (self.startup_click_through) |click_through| {
             info.main_window.click_through = click_through;
             if (windows.len > 0) buffers.restored_windows[0].click_through = click_through;
+        }
+        if (self.startup_window_show) |show| {
+            info.main_window.show = show;
         }
         info.main_window.primary_display_anchor = self.primary_display_anchor;
         if (windows.len > 0) buffers.restored_windows[0].primary_display_anchor = self.primary_display_anchor;
