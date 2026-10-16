@@ -99,6 +99,34 @@ test "closing a view leaves every other view where it was" {
     try std.testing.expectEqualStrings("fourth", first.label);
 }
 
+test "a hidden window stays hidden through its canvas presents" {
+    if (comptime platform.max_windows < 2) return error.SkipZigTest;
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "hidden", .source = platform.WebViewSource.html("<p>Hidden</p>") };
+        }
+    };
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    const info = try harness.runtime.createWindow(.{ .label = "anchor", .title = "Anchor", .show = .hidden });
+    _ = try harness.runtime.createView(.{ .window_id = info.id, .label = "anchor-canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 1, 1) });
+    const index = for (harness.null_platform.windows[0..harness.null_platform.window_count], 0..) |window, i| {
+        if (window.id == info.id) break i;
+    } else return error.WindowNotFound;
+    try std.testing.expect(!harness.null_platform.window_visible[index]);
+    try harness.runtime.options.platform.services.presentGpuSurfacePacket(.{
+        .window_id = info.id,
+        .label = "anchor-canvas",
+        .surface_size = geometry.SizeF.init(1, 1),
+        .json = "{\"v\":1}",
+    });
+    try std.testing.expect(!harness.null_platform.window_visible[index]);
+}
+
 test "runtime creates lists focuses and closes windows" {
     if (comptime platform.max_windows < 2) return error.SkipZigTest;
 
