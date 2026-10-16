@@ -335,6 +335,14 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         fn cacheHybridImmediateDisplayList(self: *RuntimeView) anyerror!void {
+            // With no immediate draws the filtered copy would hold only
+            // clips and transforms, which paint nothing: an empty list says
+            // the same without touching the cache's pages.
+            if (!self.canvasDisplayList().hasPresentationLayer(.immediate)) {
+                self.hybrid_immediate_command_count = 0;
+                self.hybrid_immediate_valid = true;
+                return;
+            }
             const filtered = try self.canvasDisplayList().copyPresentationLayer(.immediate, &self.hybrid_immediate_commands);
             self.hybrid_immediate_command_count = filtered.commands.len;
             self.hybrid_immediate_valid = true;

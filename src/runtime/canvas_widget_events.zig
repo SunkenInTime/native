@@ -65,7 +65,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 .hover, .down, .wheel => {},
             }
 
-            const route = try self.views[index].widgetLayoutTree().routePointerEventWithTokens(pointer, self.views[index].widget_tokens, output);
+            const route = try self.views[index].widgetLayoutTree().routePointerEventWithTokens(pointer, self.views[index].widget_tokens.*, output);
             return .{
                 .window_id = input_event.window_id,
                 .view_label = self.views[index].label,
@@ -356,7 +356,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const target_id: canvas.ObjectId = if (pointer_event.target) |target| target.id else 0;
             const hover_target = layout_tree.hoverTargetForHit(pointer_event.target);
             const hover_target_id: canvas.ObjectId = if (hover_target) |value| value.id else 0;
-            const hit_target = layout_tree.hoverTargetForHit(layout_tree.hitTestWithTokens(pointer_event.pointer.point, self.views[index].widget_tokens));
+            const hit_target = layout_tree.hoverTargetForHit(layout_tree.hitTestWithTokens(pointer_event.pointer.point, self.views[index].widget_tokens.*));
             const hit_target_id: canvas.ObjectId = if (hit_target) |value| value.id else 0;
             const hit_cursor = platformCursorFromCanvas(layout_tree.cursorForHit(hit_target));
             var next_hovered_id = self.views[index].canvas_widget_hovered_id;
@@ -437,7 +437,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const node = layout.findById(hovered_id) orelse return null;
             var widget = node.widget;
             widget.frame = node.frame;
-            return canvas.chartWidgetHoverIndex(widget, self.views[view_index].widget_tokens, point);
+            return canvas.chartWidgetHoverIndex(widget, self.views[view_index].widget_tokens.*, point);
         }
 
         pub fn syncCanvasWidgetCursorForView(self: *Runtime, view_index: usize) anyerror!void {
@@ -484,7 +484,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // Tokens matter here: chart hover chrome (axis gutters, the
             // floating detail card) measures text through the view's
             // live tokens, so the dirty region must measure the same way.
-            const local_dirty = self.views[view_index].widgetLayoutTree().renderStateDirtyBoundsWithTokens(previous, next, self.views[view_index].widget_tokens);
+            const local_dirty = self.views[view_index].widgetLayoutTree().renderStateDirtyBoundsWithTokens(previous, next, self.views[view_index].widget_tokens.*);
             invalidateForCanvasWidgetRenderStateDirty(self, view_index, local_dirty);
             const publish_accessibility = previous.focused_id != next.focused_id;
             _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(self, view_index, publish_accessibility);
@@ -687,7 +687,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         fn applyCanvasWidgetClearButtonPress(self: *Runtime, index: usize, target_id: canvas.ObjectId, point: geometry.PointF) anyerror!bool {
             const node_index = self.views[index].canvasWidgetNodeIndexById(target_id) orelse return false;
             const widget = self.views[index].widget_layout_nodes[node_index].widget;
-            const hit_rect = canvas.textInputClearButtonHitRect(widget, self.views[index].widget_tokens) orelse return false;
+            const hit_rect = canvas.textInputClearButtonHitRect(widget, self.views[index].widget_tokens.*) orelse return false;
             if (!hit_rect.containsPoint(point)) return false;
             const dirty = try self.views[index].applyCanvasWidgetTextEdit(target_id, .clear) orelse return true;
             if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {

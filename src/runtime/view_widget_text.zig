@@ -128,7 +128,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             current_selection: canvas.TextSelection,
         ) ?canvas.TextSelection {
             if (click_count >= 2) {
-                const offset = canvas.textOffsetForWidgetPoint(widget, point, self.widget_tokens) orelse return null;
+                const offset = canvas.textOffsetForWidgetPoint(widget, point, self.widget_tokens.*) orelse return null;
                 const unit = canvasWidgetMultiClickUnitSelection(widget, offset, click_count);
                 if (!extend) {
                     self.canvas_widget_multi_click_anchor = unit.range(widget.text.len);
@@ -137,7 +137,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 return canvasWidgetMultiClickDragSelection(self.canvas_widget_multi_click_anchor, unit, widget.text.len);
             }
             const anchor: ?usize = if (extend) current_selection.anchor else null;
-            return canvas.textSelectionForWidgetPoint(widget, point, anchor, self.widget_tokens);
+            return canvas.textSelectionForWidgetPoint(widget, point, anchor, self.widget_tokens.*);
         }
 
         /// The run one multi-click selects at `offset`. Triple-click
@@ -183,7 +183,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             if (extend and self.canvas_widget_selected_text_id != target_id) return null;
             const current_selection = widget.text_selection orelse canvas.TextSelection.collapsed(0);
             const anchor: ?usize = if (extend) current_selection.anchor else null;
-            const next_selection = canvas.staticTextSelectionForWidgetPoint(widget, point, anchor, self.widget_tokens) orelse return null;
+            const next_selection = canvas.staticTextSelectionForWidgetPoint(widget, point, anchor, self.widget_tokens.*) orelse return null;
             if (self.canvas_widget_selected_text_id == target_id and widget.text_selection != null and canvasTextSelectionsEqual(current_selection, next_selection)) return null;
 
             self.widget_layout_nodes[index].widget.text_selection = next_selection;

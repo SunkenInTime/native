@@ -93,6 +93,13 @@ pub const canvasSurfacePixelSize = canvas_frame_helpers.canvasSurfacePixelSize;
 pub const canvasFramePixelSize = canvas_frame_helpers.canvasFramePixelSize;
 
 const RuntimeView = runtime_view.RuntimeView;
+
+/// One design token set shared by the views holding it.
+pub const WidgetTokenSet = struct {
+    tokens: canvas.DesignTokens,
+    /// Views holding this set; at zero the slot is free for another.
+    views: u32,
+};
 const nowNanoseconds = runtime_clock.nowNanoseconds;
 const timestampToU64 = runtime_clock.timestampToU64;
 const RuntimeWindow = runtime_state.RuntimeWindow;
@@ -189,6 +196,11 @@ pub const Runtime = struct {
     window_count: usize = 0,
     views: [platform.max_views]RuntimeView align(storage_align) = undefined,
     view_count: usize = 0,
+    /// Design token sets the views share; each live view holds at most one,
+    /// so a slot per view always suffices. Slots are touched only as sets
+    /// are first used: an app whose views share one set pays for one.
+    widget_token_sets: [platform.max_views]WidgetTokenSet align(storage_align) = undefined,
+    widget_token_set_count: usize = 0,
     webviews: [platform.max_webviews]RuntimeWebView align(storage_align) = undefined,
     webview_count: usize = 0,
     tray_items: [platform.max_tray_items]RuntimeTrayItem align(storage_align) = undefined,
@@ -374,6 +386,36 @@ pub const Runtime = struct {
     /// storage; by-value construction materializes a stack temporary in Debug
     /// builds that overflows default thread stacks, so every embedding
     /// constructs through a pointer.
+    /// The shared copy of `tokens` for a view moving off `previous`: the
+    /// built-in default, an equal set another view holds, or a free slot.
+    pub fn swapWidgetTokens(self: *Runtime, previous: *const canvas.DesignTokens, tokens: canvas.DesignTokens) *const canvas.DesignTokens {
+        self.releaseWidgetTokens(previous);
+        if (std.meta.eql(tokens, runtime_view.default_widget_tokens)) return &runtime_view.default_widget_tokens;
+        var free: ?usize = null;
+        for (self.widget_token_sets[0..self.widget_token_set_count], 0..) |*set, index| {
+            if (set.views == 0) {
+                if (free == null) free = index;
+            } else if (std.meta.eql(set.tokens, tokens)) {
+                set.views += 1;
+                return &set.tokens;
+            }
+        }
+        const index = free orelse index: {
+            self.widget_token_set_count += 1;
+            break :index self.widget_token_set_count - 1;
+        };
+        self.widget_token_sets[index] = .{ .tokens = tokens, .views = 1 };
+        return &self.widget_token_sets[index].tokens;
+    }
+
+    /// A view stops holding `tokens` (it is removed, or takes others).
+    pub fn releaseWidgetTokens(self: *Runtime, tokens: *const canvas.DesignTokens) void {
+        if (tokens == &runtime_view.default_widget_tokens) return;
+        const set: *WidgetTokenSet = @fieldParentPtr("tokens", @constCast(tokens));
+        std.debug.assert(@intFromPtr(set) >= @intFromPtr(&self.widget_token_sets) and set.views > 0);
+        set.views -= 1;
+    }
+
     pub fn initAt(self: *Runtime, options: Options) void {
         inline for (@typeInfo(Runtime).@"struct".fields) |field| {
             if (comptime fieldHasSmallDefault(field)) {

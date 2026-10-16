@@ -29,7 +29,7 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             const index = self.canvasWidgetNodeIndexById(id) orelse return null;
             const widget = self.widget_layout_nodes[index].widget;
             if (!canvasWidgetSwitchControlKind(widget.kind) or widget.state.disabled) return null;
-            const travel = canvas.toggleWidgetKnobTravel(widget, self.widget_tokens);
+            const travel = canvas.toggleWidgetKnobTravel(widget, self.widget_tokens.*);
             if (travel <= 0) return null;
             return .{
                 .id = id,

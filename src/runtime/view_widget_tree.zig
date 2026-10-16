@@ -292,7 +292,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             );
             clampCanvasWidgetLayoutTextOffsets(
                 self.widget_layout_nodes[0..self.widget_layout_node_count],
-                self.widget_tokens,
+                self.widget_tokens.*,
             );
 
             const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
@@ -379,7 +379,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 // Same hover-target walk as live pointer moves: the wash
                 // and cursor a scroll settles on must match what a real
                 // move to this point would produce.
-                const hit = layout.hoverTargetForHit(layout.hitTestWithTokens(value, self.widget_tokens));
+                const hit = layout.hoverTargetForHit(layout.hitTestWithTokens(value, self.widget_tokens.*));
                 next_hovered_id = if (hit) |target| target.id else 0;
                 next_cursor = platformCursorFromCanvas(layout.cursorForHit(hit));
             } else if (!canvasWidgetInteractionTargetExists(layout, next_hovered_id)) {

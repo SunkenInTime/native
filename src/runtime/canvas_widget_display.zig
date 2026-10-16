@@ -40,8 +40,8 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             try validateViewLabel(label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-            if (!std.meta.eql(self.views[index].widget_tokens, tokens)) {
-                self.views[index].widget_tokens = tokens;
+            if (!std.meta.eql(self.views[index].widget_tokens.*, tokens)) {
+                self.views[index].widget_tokens = self.swapWidgetTokens(self.views[index].widget_tokens, tokens);
                 self.views[index].widget_revision += 1;
             }
 
@@ -332,7 +332,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             const suffix_count = self.views[view_index].canvas_widget_display_list_suffix_count;
             if (prefix_count > current.commands.len or suffix_count > current.commands.len - prefix_count) return error.InvalidCommand;
             for (current.commands[0..prefix_count]) |command| try chrome_storage.appendCopiedCommand(&builder, command);
-            try self.views[view_index].widgetLayoutTree().emitDisplayListWithState(&builder, self.views[view_index].widget_tokens, self.views[view_index].canvasWidgetRenderState());
+            try self.views[view_index].widgetLayoutTree().emitDisplayListWithState(&builder, self.views[view_index].widget_tokens.*, self.views[view_index].canvasWidgetRenderState());
             const suffix_start = current.commands.len - suffix_count;
             for (current.commands[suffix_start..current.commands.len]) |command| try chrome_storage.appendCopiedCommand(&builder, command);
 
@@ -433,11 +433,11 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                                 view.replaceCanvasRenderAnimation(.{
                                     .id = command_id,
                                     .start_ns = start_ns,
-                                    .duration_ms = spinnerPeriodMs(view.widget_tokens),
+                                    .duration_ms = spinnerPeriodMs(view.widget_tokens.*),
                                     .easing = .linear,
                                     .from_rotation = 0,
                                     .to_rotation = 360,
-                                    .rotation_center = canvas.spinnerWidgetRotationCenter(laid_out, view.widget_tokens),
+                                    .rotation_center = canvas.spinnerWidgetRotationCenter(laid_out, view.widget_tokens.*),
                                     .loop = .wrap,
                                 }) catch break;
                                 view.replaceCanvasRenderAnimationDirtyBounds(command_id, node.frame) catch {};
@@ -445,9 +445,9 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                                 desired_count += 1;
                             },
                             .segmented => {
-                                const count = canvas.spinnerWidgetSegmentCount(view.widget_tokens);
+                                const count = canvas.spinnerWidgetSegmentCount(view.widget_tokens.*);
                                 if (desired_count + count > desired_ids.len) break;
-                                const period_ms = spinnerPeriodMs(view.widget_tokens);
+                                const period_ms = spinnerPeriodMs(view.widget_tokens.*);
                                 const period_ns = @as(u64, period_ms) * std.time.ns_per_ms;
                                 const step_ns = period_ns / @as(u64, @intCast(count));
                                 // One shared anchor keeps every segment's loop
