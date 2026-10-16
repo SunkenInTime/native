@@ -74,6 +74,14 @@ pub const CanvasWidgetDisclosureMove = struct {
 /// the node sequence (accordion children are always laid out, open or
 /// closed); any rebuild that breaks that structure retires the tween
 /// and the new pose stands snapped — motion degrades, truth never does.
+/// The tokens a view without its own uses: a constant, so such a view
+/// carries no copy at all.
+pub const default_widget_tokens: canvas.DesignTokens = .{};
+
+/// A disclosure tween's header. The widgets it moves and reveals live in
+/// the view's `canvas_widget_disclosure_moves` and `..._revealing_ids`,
+/// touched only while a disclosure animates; here, a default value would
+/// write all 6 KiB of them into every view.
 pub const CanvasWidgetDisclosureTweenState = struct {
     active: bool = false,
     duration_ms: u32 = 0,
@@ -87,12 +95,9 @@ pub const CanvasWidgetDisclosureTweenState = struct {
     /// mid-tween rebuild can re-restore the exact pose the user is
     /// looking at instead of popping to the target for one frame.
     progress: f32 = 0,
-    /// The disclosure widgets this tween is moving — the render walk
-    /// keeps painting a CLOSING item's content (clipped) only while
-    /// its id is in here.
-    revealing_ids: [canvas_limits.max_canvas_widget_disclosure_flips_per_view]canvas.ObjectId = undefined,
+    /// Entries of the view's `canvas_widget_disclosure_revealing_ids`.
     revealing_id_count: usize = 0,
-    moves: [canvas_limits.max_canvas_widget_disclosure_moves_per_view]CanvasWidgetDisclosureMove = undefined,
+    /// Entries of the view's `canvas_widget_disclosure_moves`.
     move_count: usize = 0,
 };
 
@@ -278,7 +283,12 @@ pub const RuntimeView = struct {
     /// disclosure widget, advanced once per presented frame from the
     /// frame event's recorded timestamp. See
     /// `CanvasWidgetDisclosureTweenState`.
-    canvas_widget_disclosure_tween: CanvasWidgetDisclosureTweenState align(storage_align) = .{},
+    canvas_widget_disclosure_tween: CanvasWidgetDisclosureTweenState = .{},
+    /// The disclosure widgets the tween is moving: the render walk keeps
+    /// painting a CLOSING item's content (clipped) only while its id is in
+    /// here.
+    canvas_widget_disclosure_revealing_ids: [canvas_limits.max_canvas_widget_disclosure_flips_per_view]canvas.ObjectId align(storage_align) = undefined,
+    canvas_widget_disclosure_moves: [canvas_limits.max_canvas_widget_disclosure_moves_per_view]CanvasWidgetDisclosureMove align(storage_align) = undefined,
     /// Disclosure widgets whose open state the RUNTIME just toggled
     /// (pointer, keyboard, or automation echo): the optimistic echo
     /// flips the retained `selected` before the model's rebuild lands,
@@ -403,7 +413,10 @@ pub const RuntimeView = struct {
     /// post-present flush coming.
     gpu_canvas_frame_requested: bool = false,
     widget_revision: u64 = 0,
-    widget_tokens: canvas.DesignTokens align(storage_align) = .{},
+    /// Shared, never this view's own copy: `default_widget_tokens` or a set
+    /// the runtime interns (`Runtime.swapWidgetTokens`). A copy per view
+    /// was 9 KiB, the same for every view of an app.
+    widget_tokens: *const canvas.DesignTokens = &default_widget_tokens,
     widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState align(storage_align) = undefined,
     /// Scroll nodes whose offset changed since the last app dispatch
     /// (wheel, kinetic, keyboard, accessibility): drained into
@@ -703,7 +716,7 @@ pub const RuntimeView = struct {
     /// walk's revealing set (see `WidgetRenderState`).
     pub fn canvasWidgetRevealingDisclosureIds(self: *const RuntimeView) []const canvas.ObjectId {
         if (!self.canvas_widget_disclosure_tween.active) return &.{};
-        return self.canvas_widget_disclosure_tween.revealing_ids[0..self.canvas_widget_disclosure_tween.revealing_id_count];
+        return self.canvas_widget_disclosure_revealing_ids[0..self.canvas_widget_disclosure_tween.revealing_id_count];
     }
 
     /// Note a runtime-side disclosure toggle echo (idempotent per id;

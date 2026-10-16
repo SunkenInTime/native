@@ -616,6 +616,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn removeViewAt(self: *Runtime, index: usize) void {
             if (index >= self.view_count) return;
+            self.releaseWidgetTokens(self.views[index].widget_tokens);
             var cursor = index;
             while (cursor + 1 < self.view_count) : (cursor += 1) {
                 const next = &self.views[cursor + 1];
