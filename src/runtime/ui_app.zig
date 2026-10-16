@@ -2780,6 +2780,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn eventFn(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(context));
+            defer self.releaseInactiveTrees();
+            return self.handleEvent(runtime, event_value);
+        }
+
+        /// Each window rebuilds into one of two arenas and keeps the other
+        /// alive, because a Msg made from the previous tree can still be
+        /// dispatched after a rebuild within the same event. Once the event is
+        /// handled, nothing points into that previous tree, so its arena gives
+        /// its pages back instead of keeping a dead tree resident until the
+        /// next rebuild (a clock's is five pages per window).
+        fn releaseInactiveTrees(self: *Self) void {
+            _ = self.arenas[self.arena_index ^ 1].reset(.free_all);
+            for (self.window_slots[0..self.window_slot_count]) |*slot| {
+                _ = slot.arenas[slot.arena_index ^ 1].reset(.free_all);
+            }
+        }
+
+        fn handleEvent(self: *Self, runtime: *Runtime, event_value: Event) anyerror!void {
             switch (event_value) {
                 .command => |command| {
                     const map = self.options.on_command orelse return;

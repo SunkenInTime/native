@@ -465,7 +465,7 @@ test "patch presents carry only the change and the snapshot reports the mode" {
     try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, toggled.mode);
     try std.testing.expectEqual(canvas.binary_packet_load_action_patch, harness.null_platform.gpu_surface_packet_present_binary_load_action);
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_packet_present_binary_patch_count);
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
     try std.testing.expectEqual(platform.GpuPresentPacketMode.patch, view.gpu_present_packet_mode);
     try std.testing.expectEqual(@as(usize, 1), view.gpu_present_patch_upsert_count);
     try std.testing.expectEqual(@as(usize, 0), view.gpu_present_patch_evict_count);
@@ -496,7 +496,7 @@ test "reference screenshots preserve the retained baseline for a later patch pre
     });
     const baseline = try presentFrame(harness, &buffers, 30);
     try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, baseline.mode);
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
     try std.testing.expect(view.canvas_packet_baseline_valid);
     const generation = view.canvas_packet_generation;
     const baseline_count = view.canvas_packet_baseline_count;
@@ -671,7 +671,7 @@ test "a host that refuses patches gets a full resync in the same frame" {
     try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, resynced.mode);
     try std.testing.expectEqual(@as(u8, 2), harness.null_platform.gpu_surface_packet_present_binary_load_action);
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_present_count);
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
     try std.testing.expectEqual(platform.GpuPresentPacketMode.full, view.gpu_present_packet_mode);
     try std.testing.expectEqual(platform.GpuPresentFallbackReason.none, view.gpu_present_fallback_reason);
     try std.testing.expectEqual(@as(usize, 1), view.gpu_present_fallback_frame_count);
@@ -890,7 +890,7 @@ test "chat-transcript-shaped interactions ride small patches" {
     _ = try present.frame(harness, gpu_commands, packet_buffer, pixels, scratch, surface_width, surface_height, 60);
     const full_bytes = harness.null_platform.gpu_surface_packet_present_binary_len;
     try std.testing.expectEqual(@as(u8, 2), harness.null_platform.gpu_surface_packet_present_binary_load_action);
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
 
     // (a) One bubble toggled — a switch/hover-shaped frame.
     _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{

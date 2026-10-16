@@ -564,6 +564,7 @@ pub const MacPlatform = struct {
         const icon_path = if (dock_icon == .host_file) app_info.icon_path else "";
         if (!validPrimaryDisplayAnchor(window_options.primary_display_anchor)) return error.CreateFailed;
         const primary_anchor = primaryDisplayAnchorAbi(window_options.primary_display_anchor);
+        try hiddenUnsupported(window_options.show);
         const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), if (window_options.transparent) 1 else 0, windowLayerInt(window_options.layer), if (window_options.click_through) 1 else 0, if (window_options.no_activate) 1 else 0, primary_anchor.corner, primary_anchor.offset_x, primary_anchor.offset_y, showModeInt(window_options.show)) orelse return error.CreateFailed;
         switch (dock_icon) {
             .none => {},
@@ -1095,7 +1096,14 @@ fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
     return switch (mode) {
         .immediate => 0,
         .on_first_present => 1,
+        // Refused before the create call (`hiddenUnsupported`).
+        .hidden => 0,
     };
+}
+
+/// `.hidden` windows are Windows-only for now.
+fn hiddenUnsupported(mode: platform_mod.WindowShowMode) !void {
+    if (mode == .hidden) return error.UnsupportedWindowShowMode;
 }
 
 const PrimaryDisplayAnchorAbi = struct {
@@ -1141,6 +1149,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     const frame = options.default_frame;
     if (!validPrimaryDisplayAnchor(options.primary_display_anchor)) return error.CreateFailed;
     const primary_anchor = primaryDisplayAnchorAbi(options.primary_display_anchor);
+    try hiddenUnsupported(options.show);
     if (native_sdk_appkit_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), if (options.transparent) 1 else 0, windowLayerInt(options.layer), if (options.click_through) 1 else 0, if (options.no_activate) 1 else 0, primary_anchor.corner, primary_anchor.offset_x, primary_anchor.offset_y, showModeInt(options.show)) == 0) return error.CreateFailed;
     applyWindowContentMinSize(self.host, options.id, options.min_width, options.min_height);
     return .{

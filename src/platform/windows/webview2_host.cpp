@@ -384,6 +384,8 @@ struct Window {
     int layer = 0;
     bool click_through = false;
     bool no_activate = false;
+    /* Created hidden and never shown (WindowShowMode.hidden). */
+    bool hidden = false;
     /* Desktop-layer windows are parented to the shell's wallpaper WorkerW.
      * Z-order alone survives ordinary app activation but Show Desktop hides
      * unowned top-level popups. The shell-owned parent keeps both software
@@ -5719,7 +5721,7 @@ static bool createNativeWindow(Host *host, Window &window) {
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
     attachDesktopWindow(window);
-    ShowWindow(hwnd, window.no_activate ? SW_SHOWNOACTIVATE : SW_SHOW);
+    if (!window.hidden) ShowWindow(hwnd, window.no_activate ? SW_SHOWNOACTIVATE : SW_SHOW);
     if (window.layer == 1) {
         SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     } else if (window.layer == 2) {
@@ -5741,7 +5743,7 @@ size_t native_sdk_windows_clipboard_read_data(Host *host, const char *mime_type,
 int native_sdk_windows_clipboard_write_data(Host *host, const char *mime_type, size_t mime_type_len, const char *bytes, size_t bytes_len);
 void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id);
 
-Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, double min_width, double min_height) {
+Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int hidden, double min_width, double min_height) {
     (void)restore_frame;
     INITCOMMONCONTROLSEX controls = {};
     controls.dwSize = sizeof(controls);
@@ -5776,6 +5778,7 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     window.layer = window_layer;
     window.click_through = click_through != 0;
     window.no_activate = no_activate != 0;
+    window.hidden = hidden != 0;
     window.min_width = min_width;
     window.min_height = min_height;
     host->windows[window.id] = window;
@@ -6083,7 +6086,7 @@ void native_sdk_windows_set_shortcuts(Host *host, const char *const *ids, const 
     }
 }
 
-int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, double min_width, double min_height) {
+int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int hidden, double min_width, double min_height) {
     (void)restore_frame;
     if (!host || host->windows.find(window_id) != host->windows.end()) return 0;
     Window window;
@@ -6100,6 +6103,7 @@ int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char 
     window.layer = window_layer;
     window.click_through = click_through != 0;
     window.no_activate = no_activate != 0;
+    window.hidden = hidden != 0;
     window.min_width = min_width;
     window.min_height = min_height;
     /* Register BEFORE creating: createNativeWindow's post-create frame
