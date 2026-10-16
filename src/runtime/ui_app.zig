@@ -890,6 +890,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Scratch handed to `windows_fn`; on the app struct so returned
         /// descriptor slices outlive the apply.
         windows_scratch: WindowsScratch = .{},
+        /// Set while `applyWindows` runs; a nested call returns early
+        /// (see `applyWindows`).
+        applying_windows: bool = false,
 
         /// By-value construction. The Model parameter and the returned
         /// app both ride the caller's stack unless result-location
@@ -1722,6 +1725,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// failed window create never takes the render loop down.
         fn applyWindows(self: *Self, runtime: *Runtime) void {
             const windows_fn = self.options.windows_fn orelse return;
+            // Creating a window pumps platform messages (the Windows
+            // host gets WM_MOVE/WM_SIZE synchronously while it creates
+            // and shows the window) whose frame events dispatch Msgs,
+            // and each dispatch reconciles again — before this call has
+            // recorded the new window's slot. The nested pass would
+            // re-create the same label (a DuplicateWindowLabel warning)
+            // and overwrite `windows_scratch` under the `declared` slice
+            // this call is still walking. The outer call finishes the
+            // reconcile.
+            if (self.applying_windows) return;
+            self.applying_windows = true;
+            defer self.applying_windows = false;
             var declared = windows_fn(&self.model, &self.windows_scratch);
             if (declared.len > max_ui_windows) {
                 ui_app_log.warn(

@@ -567,3 +567,151 @@ test "window-action effects resolve labels to live windows and drive the real ve
     try app_state.dispatch(&harness.runtime, 1, .minimize_main);
     try std.testing.expectEqual(@as(u32, 3), app_state.effects.windowActionState().minimize_count);
 }
+
+// ------------------------------------ re-entrant reconcile fixture
+//
+// A real host delivers window messages synchronously while it creates a
+// window (the Windows host emits frame events from WM_MOVE/WM_SIZE), so
+// a frame Msg dispatches - and rebuilds - before `createWindow` returns.
+// The null platform's create hook replays that ordering.
+
+const ReentryModel = struct {
+    open: bool = false,
+    frames: u32 = 0,
+};
+
+const ReentryMsg = union(enum) {
+    open_window,
+    frame_reported,
+};
+
+const ReentryApp = ui_app_model.UiApp(ReentryModel, ReentryMsg);
+
+/// Counts `windows_fn` calls: each one is a window reconcile that ran.
+var reentry_reconciles: usize = 0;
+
+fn reentryUpdate(model: *ReentryModel, msg: ReentryMsg) void {
+    switch (msg) {
+        .open_window => model.open = true,
+        .frame_reported => model.frames += 1,
+    }
+}
+
+fn reentryView(ui: *ReentryApp.Ui, model: *const ReentryModel) ReentryApp.Ui.Node {
+    _ = model;
+    return ui.text(.{}, "main");
+}
+
+fn reentryWindows(model: *const ReentryModel, scratch: *ReentryApp.WindowsScratch) []const ReentryApp.WindowDescriptor {
+    reentry_reconciles += 1;
+    var count: usize = 0;
+    if (model.open) {
+        scratch.windows[count] = .{
+            .label = settings_window_label,
+            .canvas_label = settings_canvas_label,
+            .width = 320,
+            .height = 240,
+        };
+        count += 1;
+    }
+    return scratch.windows[0..count];
+}
+
+fn reentryWindowView(ui: *ReentryApp.Ui, model: *const ReentryModel, window_label: []const u8) ReentryApp.Ui.Node {
+    _ = model;
+    _ = window_label;
+    return ui.text(.{}, "settings");
+}
+
+fn reentryFrameMap(frame: core.WindowFrameEvent) ?ReentryMsg {
+    _ = frame;
+    return .frame_reported;
+}
+
+const ReentryHook = struct {
+    harness: *core.TestHarness(),
+    app: core.App,
+    creates: usize = 0,
+    nested_reconciles: usize = 0,
+
+    fn run(context: *anyopaque, info: support.platform.WindowInfo) anyerror!void {
+        const self: *ReentryHook = @ptrCast(@alignCast(context));
+        self.creates += 1;
+        const before = reentry_reconciles;
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .window_frame_changed = .{
+            .id = info.id,
+            .label = info.label,
+            .title = info.title,
+            .frame = info.frame,
+            .scale_factor = info.scale_factor,
+            .open = true,
+            .focused = false,
+        } });
+        self.nested_reconciles += reentry_reconciles - before;
+    }
+};
+
+test "a frame Msg dispatched while a declared window is being created does not reconcile again" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try ReentryApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-window-reentry",
+        .scene = panel_scene,
+        .canvas_label = canvas_label,
+        .update = reentryUpdate,
+        .view = reentryView,
+        .windows_fn = reentryWindows,
+        .window_view = reentryWindowView,
+        .on_window_frame = reentryFrameMap,
+    });
+    defer app_state.destroy();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    var hook: ReentryHook = .{ .harness = harness, .app = app };
+    harness.null_platform.create_window_hook = .{ .context = &hook, .run = ReentryHook.run };
+
+    try app_state.dispatch(&harness.runtime, 1, .open_window);
+
+    // The frame Msg really dispatched from inside the create...
+    try std.testing.expectEqual(@as(usize, 1), hook.creates);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.frames);
+    // ...and its rebuild left the window set to the reconcile already
+    // running: a nested pass would not find the slot yet and try to
+    // create the same label again (DuplicateWindowLabel).
+    try std.testing.expectEqual(@as(usize, 0), hook.nested_reconciles);
+    try std.testing.expectEqual(@as(usize, 1), app_state.window_slot_count);
+
+    // The outer reconcile recorded the window: a later frame Msg finds
+    // it live and creates nothing.
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var settings_windows: usize = 0;
+    var settings_id: support.platform.WindowId = 0;
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (std.mem.eql(u8, info.label, settings_window_label)) {
+            settings_windows += 1;
+            settings_id = info.id;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), settings_windows);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+        .id = settings_id,
+        .label = settings_window_label,
+        .title = "",
+        .frame = geometry.RectF.init(10, 10, 320, 240),
+        .scale_factor = 2,
+        .open = true,
+        .focused = false,
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.frames);
+    try std.testing.expectEqual(@as(usize, 1), hook.creates);
+}
