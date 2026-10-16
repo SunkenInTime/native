@@ -194,7 +194,14 @@ pub const Runtime = struct {
     appearance: platform.Appearance = .{},
     windows: [platform.max_windows]RuntimeWindow align(storage_align) = undefined,
     window_count: usize = 0,
-    views: [platform.max_views]RuntimeView align(storage_align) = undefined,
+    /// Where views live. A view keeps its slot for life, so removing one
+    /// never moves another: shifting the views themselves wrote every byte
+    /// of each 3.7 MiB view after it and made it all resident.
+    view_slots: [platform.max_views]RuntimeView align(storage_align) = undefined,
+    view_slot_used: std.StaticBitSet(platform.max_views) = .initEmpty(),
+    /// The live views, in order: the first `view_count` point into
+    /// `view_slots`.
+    views: [platform.max_views]*RuntimeView = undefined,
     view_count: usize = 0,
     /// Design token sets the views share; each live view holds at most one,
     /// so a slot per view always suffices. Slots are touched only as sets

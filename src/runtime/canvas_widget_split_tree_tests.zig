@@ -298,7 +298,7 @@ test "tree keymap walks visible rows, collapses, expands, and selects through re
     const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 400), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
 
     // Focus row A by pressing its header area (above its child rows).
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 10, .y = 10, .button = 0 } });
@@ -411,7 +411,7 @@ test "a virtual list declaring the tree role scopes the tree keymap over its row
     var nodes: [6]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(list, geometry.RectF.init(0, 0, 240, 100), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
 
     // Focus the first row by pressing it.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 10, .y = 10, .button = 0 } });

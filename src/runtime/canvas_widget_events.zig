@@ -464,7 +464,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             if (view_index >= self.view_count) return;
             if (self.views[view_index].kind != .gpu_surface) return;
             if (self.options.platform.services.set_window_drag_regions_fn == null) return;
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             var regions: [canvas_limits.max_canvas_widget_window_drag_regions_per_view]platform.WindowDragRegion = undefined;
             const count = collectCanvasWidgetWindowDragRegions(view.widgetLayoutTree(), &regions);
             if (view.canvas_widget_drag_regions_pushed) {
@@ -1020,7 +1020,7 @@ fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {
 }
 
 fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
-    for (self.views[0..self.view_count], 0..) |*view, index| {
+    for (self.views[0..self.view_count], 0..) |view, index| {
         if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
     }
     return null;
