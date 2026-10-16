@@ -1286,8 +1286,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         /// Rebuild the widget tree from the model and hand it to the
         /// runtime, which copies and reconciles it. The previous tree's
-        /// arena stays alive until the following rebuild so the handler
-        /// table remains valid between events. Apps with a `chrome` hook
+        /// arena stays alive until the event that rebuilt it is handled,
+        /// so a Msg made from that tree can still be dispatched; then its
+        /// pages go back (`releaseInactiveTrees`). Apps with a `chrome` hook
         /// also rebuild the retained display list (chrome prefix + widget
         /// commands + chrome suffix) here.
         ///
