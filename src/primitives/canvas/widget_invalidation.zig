@@ -186,12 +186,12 @@ fn findWidgetNodeById(layout: anytype, id: ObjectId) ?WidgetNodeRef {
 /// bound; small or oversized trees keep the linear scans.
 const diff_widget_id_index_slots = 2048;
 const DiffWidgetIdIndex = plan_key_index.HashSlots(diff_widget_id_index_slots);
-// Lazily heap-allocated per thread (16 KiB of probe tables): reset per
-// diff, so first-use init on the diffing thread is the only contract —
-// threads that never diff widget trees never allocate it.
+// Lazily heap-allocated per thread (up to 16 KiB of probe tables): each
+// diff resets the prefix it needs, so threads that never diff widget
+// trees never allocate it and small diffs never touch most of it.
 const DiffWidgetIdScratch = struct {
-    previous: DiffWidgetIdIndex = .{},
-    next: DiffWidgetIdIndex = .{},
+    previous: DiffWidgetIdIndex,
+    next: DiffWidgetIdIndex,
 };
 const diff_widget_id_scratch = @import("lazy_tls.zig").LazyTls(DiffWidgetIdScratch);
 
@@ -199,11 +199,11 @@ const diff_widget_id_scratch = @import("lazy_tls.zig").LazyTls(DiffWidgetIdScrat
 /// duplicate ids `validateUniqueWidgetIds` rejects — one pass does both
 /// jobs.
 fn buildDiffWidgetIdIndex(layout: anytype, table: *DiffWidgetIdIndex) Error!void {
-    table.reset();
+    table.reset(layout.nodes.len);
     for (layout.nodes, 0..) |node, index| {
         const id = node.widget.id;
         if (id == 0) continue;
-        var probe = DiffWidgetIdIndex.probe(plan_key_index.mixHash(id));
+        var probe = table.probe(plan_key_index.mixHash(id));
         while (table.next(&probe)) |candidate| {
             if (layout.nodes[candidate].widget.id == id) return error.DuplicateWidgetId;
         }
@@ -212,7 +212,7 @@ fn buildDiffWidgetIdIndex(layout: anytype, table: *DiffWidgetIdIndex) Error!void
 }
 
 fn findWidgetNodeByIdIndexed(layout: anytype, table: *const DiffWidgetIdIndex, id: ObjectId) ?WidgetNodeRef {
-    var probe = DiffWidgetIdIndex.probe(plan_key_index.mixHash(id));
+    var probe = table.probe(plan_key_index.mixHash(id));
     while (table.next(&probe)) |candidate| {
         if (layout.nodes[candidate].widget.id == id) return .{ .index = candidate, .node = layout.nodes[candidate] };
     }
@@ -808,4 +808,32 @@ fn unionOptionalBounds(a: ?geometry.RectF, b: ?geometry.RectF) ?geometry.RectF {
 
 fn nonNegative(value: f32) f32 {
     return @max(0, value);
+}
+
+
+test "widget diff large small large agrees with fresh tables" {
+    const a = std.testing.allocator;
+    const old = try a.alloc(WidgetLayoutNode, 1024); defer a.free(old);
+    const new = try a.alloc(WidgetLayoutNode, 1024); defer a.free(new);
+    const reused = try a.alloc(WidgetInvalidation, 2048); defer a.free(reused);
+    const fresh = try a.alloc(WidgetInvalidation, 2048); defer a.free(fresh);
+    for ([_]usize{1024,64,1024,63,0,1024}, 0..) |len, pass| {
+        for (old[0..len], new[0..len], 0..) |*p, *q, i| {
+            const rect = geometry.RectF.init(0, @floatFromInt(i * 24), 100, 24);
+            p.* = .{.widget = .{.id = @intCast(pass * 4096 + i + 1), .kind = .button, .text = "old"}, .frame = rect, .depth = 0};
+            q.* = p.*;
+            if (i % 3 == 0) q.widget.text = "new";
+            if (i % 7 == 0) q.widget.id += 200000;
+        }
+        const before = canvas.WidgetLayoutTree{.nodes = old[0..len]};
+        const after = canvas.WidgetLayoutTree{.nodes = new[0..len]};
+        const actual = try diffWidgetLayoutTrees(before, after, .{}, reused);
+        const shared = diff_widget_id_scratch.get();
+        const saved = shared.*;
+        @memset(std.mem.asBytes(shared), 0);
+        const expected = try diffWidgetLayoutTrees(before, after, .{}, fresh);
+        try std.testing.expectEqualDeep(expected, actual);
+        shared.* = saved;
+        if (len != 0) try std.testing.expect(actual.len != 0);
+    }
 }

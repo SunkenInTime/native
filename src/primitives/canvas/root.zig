@@ -772,4 +772,7 @@ pub const binary_packet_load_action_patch = serialization.binary_packet_load_act
 
 test {
     _ = @import("tests.zig");
+    _ = @import("commands.zig");
+    _ = @import("widget_invalidation.zig");
+    _ = @import("plan_key_index.zig");
 }

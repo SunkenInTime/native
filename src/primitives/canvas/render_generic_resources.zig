@@ -264,20 +264,20 @@ pub const RenderResourceCachePlanner = struct {
             plan_key_index.fitsHashSlots(resource_cache_index_slots, resource_plan.resources.len);
         const index_scratch: ?*ResourceCacheIndexScratch = if (use_index) resource_cache_index_scratch.get() else null;
         if (index_scratch) |scratch| {
-            scratch.previous.reset();
+            scratch.previous.reset(previous.len);
             for (previous, 0..) |entry, index| {
-                var p = ResourceCacheIndex.probe(renderResourceKeyHash(entry.key));
+                var p = scratch.previous.probe(renderResourceKeyHash(entry.key));
                 while (scratch.previous.next(&p)) |_| {}
                 scratch.previous.insert(p, @intCast(index));
             }
-            scratch.entry.reset();
+            scratch.entry.reset(resource_plan.resources.len);
         }
 
         for (resource_plan.resources, 0..) |resource, resource_index| {
             const key = renderResourceKey(resource);
             const key_hash = if (use_index) renderResourceKeyHash(key) else 0;
             if (index_scratch) |scratch| {
-                var p = ResourceCacheIndex.probe(key_hash);
+                var p = scratch.entry.probe(key_hash);
                 var duplicate = false;
                 while (scratch.entry.next(&p)) |candidate| {
                     if (renderResourceKeysEqual(self.entries[candidate].key, key)) {
@@ -317,7 +317,7 @@ pub const RenderResourceCachePlanner = struct {
 
         for (previous, 0..) |entry, cache_index| {
             if (index_scratch) |scratch| {
-                var p = ResourceCacheIndex.probe(renderResourceKeyHash(entry.key));
+                var p = scratch.entry.probe(renderResourceKeyHash(entry.key));
                 var kept = false;
                 while (scratch.entry.next(&p)) |candidate| {
                     if (renderResourceKeysEqual(self.entries[candidate].key, entry.key)) {
@@ -378,19 +378,19 @@ fn findRenderResourceCacheEntry(entries: []const RenderResourceCacheEntry, key: 
 /// half-full bound; bigger inputs fall back to the linear scans.
 const resource_cache_index_slots = 4096;
 const ResourceCacheIndex = plan_key_index.HashSlots(resource_cache_index_slots);
-// Lazily heap-allocated per thread (32 KiB of probe tables): reset per
-// build, so first-use init on the planning thread is the only contract —
-// threads that never plan resources never allocate it.
+// Lazily heap-allocated per thread (up to 32 KiB of probe tables): each
+// build resets the prefix it needs, so threads that never plan resources
+// never allocate it and small plans never touch most of it.
 const ResourceCacheIndexScratch = struct {
-    previous: ResourceCacheIndex = .{},
-    entry: ResourceCacheIndex = .{},
+    previous: ResourceCacheIndex,
+    entry: ResourceCacheIndex,
 };
 const resource_cache_index_scratch = @import("lazy_tls.zig").LazyTls(ResourceCacheIndexScratch);
 
 /// The chain's first equal candidate is the lowest-index equal entry —
 /// the exact value the linear scan returned.
 fn findRenderResourceCacheEntryIndexed(previous_index: *const ResourceCacheIndex, previous: []const RenderResourceCacheEntry, key: RenderResourceKey, key_hash: u64) ?usize {
-    var p = ResourceCacheIndex.probe(key_hash);
+    var p = previous_index.probe(key_hash);
     while (previous_index.next(&p)) |candidate| {
         if (renderResourceKeysEqual(previous[candidate].key, key)) return candidate;
     }

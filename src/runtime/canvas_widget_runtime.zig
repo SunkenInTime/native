@@ -47,19 +47,21 @@ pub fn CanvasWidgetIdIndex(comptime Entry: type) type {
         const Self = @This();
         const Slots = plan_key_index.HashSlots(widget_id_index_slots);
 
-        table: Slots = .{},
-        entries: []const Entry = &.{},
-        indexed: bool = false,
+        /// Written only by `build`, and only when `indexed`.
+        table: Slots,
+        entries: []const Entry,
+        indexed: bool,
 
+        /// Runs before any lookup on every reconcile pass.
         pub fn build(self: *Self, entries: []const Entry) void {
             self.entries = entries;
             self.indexed = entries.len >= plan_key_index.min_entries_for_index and
                 plan_key_index.fitsHashSlots(widget_id_index_slots, entries.len);
             if (!self.indexed) return;
-            self.table.reset();
+            self.table.reset(entries.len);
             for (entries, 0..) |entry, index| {
                 if (entry.id == 0) continue;
-                var probe = Slots.probe(plan_key_index.mixHash(entry.id));
+                var probe = self.table.probe(plan_key_index.mixHash(entry.id));
                 while (self.table.next(&probe)) |_| {}
                 self.table.insert(probe, @intCast(index));
             }
@@ -77,7 +79,7 @@ pub fn CanvasWidgetIdIndex(comptime Entry: type) type {
                 }
                 return null;
             }
-            var probe = Slots.probe(plan_key_index.mixHash(id));
+            var probe = self.table.probe(plan_key_index.mixHash(id));
             while (self.table.next(&probe)) |candidate| {
                 if (self.entries[candidate].id == id) return &self.entries[candidate];
             }
@@ -96,7 +98,7 @@ pub fn CanvasWidgetIdIndex(comptime Entry: type) type {
                 }
                 return null;
             }
-            var probe = Slots.probe(plan_key_index.mixHash(id));
+            var probe = self.table.probe(plan_key_index.mixHash(id));
             while (self.table.next(&probe)) |candidate| {
                 const entry = &self.entries[candidate];
                 if (entry.id == id and entry.kind == kind) return entry;
@@ -111,21 +113,25 @@ pub const CanvasWidgetSourceControlEntryIndex = CanvasWidgetIdIndex(CanvasWidget
 pub const CanvasWidgetTextEntryIndex = CanvasWidgetIdIndex(CanvasWidgetTextReconcileEntry);
 pub const CanvasWidgetSemanticsIndex = CanvasWidgetIdIndex(canvas.WidgetSemanticsNode);
 
-/// Shared per-pass index scratch (~8 KiB of slots per table). The two
-/// reconcile passes per rebuild (the staged reconcile, then the retained
-/// copy) run back-to-back on the single-threaded event loop and each
-/// rebuilds every table it uses, so one per-thread set serves both —
-/// the same pattern as the planners' probe-table scratch. Lazily
-/// heap-allocated (~32 KiB) on a thread's first reconcile, so threads
-/// that never reconcile widgets never carry it in their static TLS
-/// block.
+/// Shared per-pass index scratch (up to 8 KiB of slots per table). The
+/// two reconcile passes per rebuild (the staged reconcile, then the
+/// retained copy) run back-to-back on the single-threaded event loop and
+/// each builds all four indexes before its first lookup, so one
+/// per-thread set serves both — the same pattern as the planners'
+/// probe-table scratch. Lazily heap-allocated (~32 KiB) on a thread's
+/// first reconcile, so threads that never reconcile widgets never carry
+/// it in their static TLS block. The fields have no defaults: a default
+/// image would be copied whole, writing every page. `build` writes each
+/// index's few header bytes and, only for an index of at least
+/// `plan_key_index.min_entries_for_index` entries, the table prefix that
+/// index uses.
 pub const canvas_widget_reconcile_index_scratch = canvas.lazy_tls.LazyTls(CanvasWidgetReconcileIndexScratch);
 
 pub const CanvasWidgetReconcileIndexScratch = struct {
-    controls: CanvasWidgetControlEntryIndex = .{},
-    source_controls: CanvasWidgetSourceControlEntryIndex = .{},
-    texts: CanvasWidgetTextEntryIndex = .{},
-    semantics: CanvasWidgetSemanticsIndex = .{},
+    controls: CanvasWidgetControlEntryIndex,
+    source_controls: CanvasWidgetSourceControlEntryIndex,
+    texts: CanvasWidgetTextEntryIndex,
+    semantics: CanvasWidgetSemanticsIndex,
 };
 
 pub const WidgetTextStorageRange = struct {
@@ -1355,4 +1361,44 @@ pub fn canvasWidgetGroupFocusEdgeTarget(layout: canvas.WidgetLayoutTree, focused
         },
     }
     return null;
+}
+
+
+test "reconcile large small large agrees with fresh indexes" {
+    const a = std.testing.allocator;
+    const n = 1024;
+    const previous = try a.alloc(canvas.WidgetLayoutNode, n); defer a.free(previous);
+    const next = try a.alloc(canvas.WidgetLayoutNode, n); defer a.free(next);
+    const reused = try a.alloc(canvas.WidgetLayoutNode, n); defer a.free(reused);
+    const fresh = try a.alloc(canvas.WidgetLayoutNode, n); defer a.free(fresh);
+    const scratch = try a.create(CanvasWidgetCopyScratch); defer a.destroy(scratch);
+    const scrolls = try a.alloc(CanvasWidgetSourceScrollEntry, n); defer a.free(scrolls);
+    const saved = try a.create(CanvasWidgetReconcileIndexScratch); defer a.destroy(saved);
+    const source = try a.alloc(CanvasWidgetSourceControlEntry, n); defer a.free(source);
+    for ([_]usize{1024,128,1024,63,0,1024}, 0..) |len, pass| {
+        for (previous[0..len], next[0..len], 0..) |*old, *new, i| {
+            const id: u64 = @intCast(pass * 4096 + i + 1);
+            const rect = geometry.RectF.init(0, @floatFromInt(i * 24), 100, 24);
+            old.* = .{.widget = .{.id = id, .kind = if (i % 2 == 0) .slider else .text_field, .value = 0.75, .text = "retained"}, .frame = rect, .depth = 0};
+            new.* = old.*;
+            new.widget.value = 0.25;
+            new.widget.text = "source";
+            if (i % 7 == 0) new.widget.id += 200000; // misses amid hits
+            source[i] = .{.id = id, .kind = old.widget.kind, .value = 0.25};
+            scratch.source_semantics[i] = .{.id = id, .role = .button, .label = "label", .bounds = rect, .state = .{}};
+        }
+        const H = struct {
+            fn run(old: []const canvas.WidgetLayoutNode, new: []const canvas.WidgetLayoutNode, src: []const CanvasWidgetSourceControlEntry, out: []canvas.WidgetLayoutNode, s: *CanvasWidgetCopyScratch, scroll: []CanvasWidgetSourceScrollEntry) !canvas.WidgetLayoutTree {
+                return canvasWidgetLayoutTreeWithRuntimeReconcileState(.{.nodes = old}, .{.nodes = new}, s.source_semantics[0..old.len], &.{}, &.{}, src, out, &s.control_entries, scroll, &s.text_entries, &s.text_bytes, .{}, &.{}, 0);
+            }
+        };
+        const actual = try H.run(previous[0..len], next[0..len], source[0..len], reused, scratch, scrolls);
+        const shared = canvas_widget_reconcile_index_scratch.get();
+        saved.* = shared.*;
+        @memset(std.mem.asBytes(shared), 0); // fresh, fully cleared reference
+        const expected = try H.run(previous[0..len], next[0..len], source[0..len], fresh, scratch, scrolls);
+        try std.testing.expectEqualDeep(expected.nodes, actual.nodes);
+        shared.* = saved.*; // preserve the actual large/small history
+        if (len > 2) try std.testing.expectEqual(@as(f32, 0.75), actual.nodes[2].widget.value);
+    }
 }

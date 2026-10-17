@@ -888,7 +888,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// declarable window; a build declaring more variable lists than
         /// slots drops the excess to estimate-only math with a debug
         /// warning.
-        virtual_extent_tables: [canvas.max_virtual_windows]canvas.VirtualExtentTable = [_]canvas.VirtualExtentTable{.{}} ** canvas.max_virtual_windows,
+        ///
+        /// Only `virtual_extent_tables[0..virtual_extent_table_count]`
+        /// is initialized: a table is reset when a list first claims it.
+        /// Resetting all of them up front wrote 16 pages (64 KiB) in
+        /// every app, since each ~48 KiB table keeps fields on both
+        /// sides of its arrays; an app without variable-extent lists
+        /// now writes none.
+        virtual_extent_tables: [canvas.max_virtual_windows]canvas.VirtualExtentTable = undefined,
+        virtual_extent_table_count: usize = 0,
         /// Live model-declared secondary windows (`Options.windows_fn`),
         /// keyed by window label.
         window_slots: [max_ui_windows]WindowSlot,
@@ -976,16 +984,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 },
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
-                // Both set in place below. A by-value `Effects.init` and the
-                // tables' default image each write every page of their
-                // undefined arrays (the effect rings, the extent caches),
-                // ~650 KiB that most apps never use, and `Effects.init`
-                // also routes its 493 KiB through the caller's stack.
+                // Set in place below. A by-value `Effects.init` writes every
+                // page of its undefined rings, which most apps never use,
+                // and routes its 493 KiB through the caller's stack.
                 .effects = undefined,
-                .virtual_extent_tables = undefined,
             };
             self.effects.initInPlace(backing);
-            for (&self.virtual_extent_tables) |*table| table.reset();
         }
 
         fn assertOptions(options: Options) void {
@@ -1557,7 +1561,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn virtualExtentTableForId(self: *const Self, id: canvas.ObjectId) ?*canvas.VirtualExtentTable {
             if (id == 0) return null;
-            for (&self.virtual_extent_tables) |*table| {
+            for (self.virtual_extent_tables[0..self.virtual_extent_table_count]) |*table| {
                 if (table.id == id) return @constCast(table);
             }
             return null;
@@ -1565,11 +1569,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn claimVirtualExtentTable(self: *Self, id: canvas.ObjectId) ?*canvas.VirtualExtentTable {
             if (id == 0) return null;
-            for (&self.virtual_extent_tables) |*table| {
+            const claimed = self.virtual_extent_tables[0..self.virtual_extent_table_count];
+            for (claimed) |*table| {
                 if (table.id == id) return table;
             }
-            for (&self.virtual_extent_tables) |*table| {
+            for (claimed) |*table| {
                 if (table.id == 0) return table;
+            }
+            if (self.virtual_extent_table_count < self.virtual_extent_tables.len) {
+                const table = &self.virtual_extent_tables[self.virtual_extent_table_count];
+                table.reset();
+                self.virtual_extent_table_count += 1;
+                return table;
             }
             // All slots busy: recycle one whose list the LAST build no
             // longer declared (per-document lists come and go; their
@@ -3487,4 +3498,50 @@ fn effectsMinimizeWindowByLabel(context: *anyopaque, window_label: []const u8) b
     const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
     runtime.minimizeWindow(window_id) catch return false;
     return true;
+}
+
+
+test "extent claims reset released and recycled tables" {
+    const ReviewApp = UiApp(struct {}, enum { noop });
+    const app = try std.testing.allocator.create(ReviewApp);
+    defer std.testing.allocator.destroy(app);
+    // Only fields used by the claim/lookup methods; poison all table bytes.
+    @memset(std.mem.sliceAsBytes(&app.virtual_extent_tables), 0xa5);
+    app.virtual_extent_table_count = 0;
+    app.virtual_window_count = 0;
+    try std.testing.expect(app.virtualExtentTableForId(1) == null);
+    const first = app.claimVirtualExtentTable(1).?;
+    try std.testing.expectEqual(@as(usize, 1), app.virtual_extent_table_count);
+    _ = first.sync(.{.id = 1, .item_count = 1000, .uniform_estimate = 10});
+    first.beginCorrections(2, null);
+    first.recordMeasured(0, 300);
+    first.endCorrections();
+    try std.testing.expect(first.totalExtent() > 10000);
+    try std.testing.expectEqual(first, app.claimVirtualExtentTable(1).?);
+    // Release and claim with both a new and the original list identity.
+    first.reset();
+    for ([_]u64{2,1}) |id| {
+        const table = app.claimVirtualExtentTable(id).?;
+        try std.testing.expectEqual(first, table);
+        _ = table.sync(.{.id = id, .item_count = 3, .uniform_estimate = 7});
+        try std.testing.expectEqual(@as(f32,21), table.totalExtent());
+        try std.testing.expectEqual(@as(usize,0), table.measured_count);
+        try std.testing.expectEqual(@as(f32,0), table.pending_offset_delta);
+        table.reset();
+    }
+    // Fill all slots, with poisoned old measurements, then force recycling.
+    for (0..canvas.max_virtual_windows) |i| {
+        const table = app.claimVirtualExtentTable(@intCast(10+i)).?;
+        _ = table.sync(.{.id = @intCast(10+i), .item_count = 1000, .uniform_estimate = 10});
+        table.beginCorrections(2, null);
+        table.recordMeasured(0, 300);
+        table.endCorrections();
+    }
+    try std.testing.expectEqual(canvas.max_virtual_windows, app.virtual_extent_table_count);
+    const recycled = app.claimVirtualExtentTable(100).?;
+    try std.testing.expectEqual(first, recycled);
+    _ = recycled.sync(.{.id = 100, .item_count = 3, .uniform_estimate = 7});
+    try std.testing.expectEqual(@as(f32,21), recycled.totalExtent());
+    try std.testing.expectEqual(@as(usize,0), recycled.measured_count);
+    try std.testing.expectEqual(@as(f32,0), recycled.pending_offset_delta);
 }
