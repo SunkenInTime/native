@@ -40,6 +40,8 @@ pub const max_reservations = 256;
 /// Each slot's reservation, `base` 0 when free. Written under `table_lock`
 /// held exclusively, read under it held shared (the fault handler), so a
 /// reader never pairs one reservation's base with another's length.
+/// Nothing that runs under the lock may touch lazily committed memory: the
+/// fault would wait on the lock its own thread holds.
 var bases: [max_reservations]usize = @splat(0);
 var lengths: [max_reservations]usize = @splat(0);
 var table_lock: windows.SRWLOCK = .{};
@@ -76,24 +78,30 @@ pub fn commit(bytes: []u8) error{OutOfMemory}!void {
 }
 
 fn track(base: usize, length: usize) bool {
+    const outcome = trackLocked(base, length);
+    // Logged once the lock is released: a logger that touches a lazily
+    // committed page faults into `onFault`, which takes the lock shared.
+    if (outcome == .first_full) std.log.warn("lazy_commit: max_reservations={d} reached; further fixed tables are committed whole", .{max_reservations});
+    return outcome == .tracked;
+}
+
+fn trackLocked(base: usize, length: usize) enum { tracked, no_handler, full, first_full } {
     AcquireSRWLockExclusive(&table_lock);
     defer ReleaseSRWLockExclusive(&table_lock);
     if (handler == null) {
         // First in line: Zig's segfault handler, where installed, is last.
         handler = windows.ntdll.RtlAddVectoredExceptionHandler(1, onFault);
-        if (handler == null) return false;
+        if (handler == null) return .no_handler;
     }
     for (&bases, &lengths) |*slot, *slot_length| {
         if (slot.* != 0) continue;
         slot.* = base;
         slot_length.* = length;
-        return true;
+        return .tracked;
     }
-    if (!warned_full) {
-        warned_full = true;
-        std.log.warn("lazy_commit: max_reservations={d} reached; further fixed tables are committed whole", .{max_reservations});
-    }
-    return false;
+    if (warned_full) return .full;
+    warned_full = true;
+    return .first_full;
 }
 
 fn untrack(base: usize) bool {
