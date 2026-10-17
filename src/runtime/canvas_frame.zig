@@ -741,7 +741,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             // has the frame (the keyed list is at most the frame's commands).
             if (self.options.pixel_present_retained_baseline) {
                 if (runtimeFindViewIndex(self, window_id, label)) |index| {
-                    try reserveCanvasPacketBaseline(self.views[index], @min(record_frame.render_plan.commands.len, max_canvas_retained_packet_commands_per_view));
+                    try reserveCanvasPacketBaselineBeforePresent(self.views[index], @min(record_frame.render_plan.commands.len, max_canvas_retained_packet_commands_per_view));
                 }
             }
             try self.options.platform.services.presentGpuSurfacePixels(.{
@@ -897,7 +897,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 const current = if (view_index != null) gatherCanvasPacketCurrentCommands(canvas_frame) else null;
                 // Room for the baseline before any present, so adopting it
                 // cannot fail once the host holds the frame.
-                if (current) |current_commands| try reserveCanvasPacketBaseline(self.views[view_index.?], current_commands.len);
+                if (current) |current_commands| try reserveCanvasPacketBaselineBeforePresent(self.views[view_index.?], current_commands.len);
                 // Patch derivation runs eagerly with the gather (one
                 // profile stage, one scratch fill the encoder below
                 // reads); null when the view holds no usable baseline.
@@ -1490,7 +1490,13 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 .budget = frame_options.budget,
             };
             if (record) {
-                try self.views[index].reserveCanvasFrameRecord(canvas_frame, frame_options.render_overrides.len);
+                // The keyed list a present adopts as its baseline is at most
+                // the frame's commands; only hosts that keep one need room.
+                const baseline_count = if (self.options.pixel_present_retained_baseline or self.options.platform.services.present_gpu_surface_packet_binary_fn != null)
+                    @min(canvas_frame.render_plan.commands.len, max_canvas_retained_packet_commands_per_view)
+                else
+                    0;
+                try self.views[index].reserveCanvasFrameRecord(canvas_frame, frame_options.render_overrides.len, baseline_count);
                 try self.views[index].copyCanvasFramePipelineCache(canvas_frame.pipeline_cache_plan.entries);
                 try self.views[index].copyCanvasFramePathGeometryCache(canvas_frame.path_geometry_cache_plan.entries);
                 try self.views[index].copyCanvasFrameImageCache(canvas_frame.image_cache_plan.entries);
@@ -1942,7 +1948,13 @@ fn adoptCanvasPixelPresentBaseline(view: anytype, current: []const CanvasPacketC
     view.canvas_packet_baseline_pixels = true;
 }
 
-fn reserveCanvasPacketBaseline(view: anytype, count: usize) !void {
+/// Room for the baseline a present is about to adopt. Recording a frame
+/// reserves it already (`reserveCanvasFrameRecord`), so this allocates only
+/// for a frame that was not recorded. If that fails, the frame never reaches
+/// the platform, so the presented summary stops claiming it did and the next
+/// plan repaints in full.
+fn reserveCanvasPacketBaselineBeforePresent(view: anytype, count: usize) !void {
+    errdefer view.presented_canvas_valid = false;
     try view.canvas_packet_baseline_keys.ensureCapacity(storage_allocator, count);
     try view.canvas_packet_baseline_fingerprints.ensureCapacity(storage_allocator, count);
     try view.canvas_packet_baseline_bounds.ensureCapacity(storage_allocator, count);

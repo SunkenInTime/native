@@ -625,12 +625,13 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             try self.canvas_frame_text_layout_cache.replace(storage_allocator, entries[0..count]);
         }
 
-        /// Room for everything recording `frame` copies into the view,
+        /// Room for everything recording `frame` copies into the view, and
+        /// for the `baseline_count` packet baseline its present may adopt,
         /// taken before any of it is committed: a failed allocation leaves
         /// the previous caches, summary and frame state standing, so the
         /// frame does not read as presented. Each copy still answers its
         /// own limit.
-        pub fn reserveCanvasFrameRecord(self: *RuntimeView, frame: canvas.CanvasFrame, render_override_count: usize) anyerror!void {
+        pub fn reserveCanvasFrameRecord(self: *RuntimeView, frame: canvas.CanvasFrame, render_override_count: usize, baseline_count: usize) anyerror!void {
             try self.canvas_frame_path_geometry_cache.ensureCapacity(storage_allocator, @min(frame.path_geometry_cache_plan.entries.len, max_canvas_path_geometries_per_view));
             try self.canvas_frame_image_cache.ensureCapacity(storage_allocator, @min(frame.image_cache_plan.entries.len, max_canvas_images_per_view));
             try self.canvas_frame_layer_cache.ensureCapacity(storage_allocator, @min(frame.layer_cache_plan.entries.len, max_canvas_layers_per_view));
@@ -640,6 +641,9 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             try self.canvas_frame_text_layout_cache.ensureCapacity(storage_allocator, @min(frame.text_layout_cache_plan.entries.len, max_canvas_text_layouts_per_view));
             try self.presented_canvas_commands.ensureCapacity(storage_allocator, @min(frame.display_list.commands.len, max_canvas_commands_per_view));
             try self.canvas_frame_render_overrides.ensureCapacity(storage_allocator, @min(render_override_count, max_canvas_render_overrides_per_view));
+            try self.canvas_packet_baseline_keys.ensureCapacity(storage_allocator, baseline_count);
+            try self.canvas_packet_baseline_fingerprints.ensureCapacity(storage_allocator, baseline_count);
+            try self.canvas_packet_baseline_bounds.ensureCapacity(storage_allocator, baseline_count);
         }
 
         pub fn recordCanvasFrame(self: *RuntimeView, frame: canvas.CanvasFrame) void {
