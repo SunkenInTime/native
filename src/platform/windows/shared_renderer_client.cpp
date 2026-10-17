@@ -225,6 +225,13 @@ static bool connectRenderer(NativeSdkSharedRendererClient *client) {
     return true;
 }
 
+/* dcomp.dll loads with the first GPU surface, not at process start
+ * (lazy_dll.h). Null when it cannot load; already reported. */
+static decltype(&DCompositionCreateDevice2) compositionCreateDevice() {
+    static const auto create_device = NATIVE_SDK_LAZY_PROC(kNativeSdkDComp, DCompositionCreateDevice2, "GPU surfaces");
+    return create_device;
+}
+
 NativeSdkSharedRendererClient *nativeSdkSharedRendererClientCreate(HWND window) {
     if (!window) return nullptr;
     wchar_t pipe_name[512] = {};
@@ -234,6 +241,10 @@ NativeSdkSharedRendererClient *nativeSdkSharedRendererClientCreate(HWND window) 
     wchar_t forced[8] = {};
     if (GetEnvironmentVariableW(L"WEAVER_FORCE_SOFTWARE", forced, ARRAYSIZE(forced)) > 0 &&
         wcscmp(forced, L"1") == 0) return nullptr;
+    /* Without DirectComposition the renderer's surface can never be shown:
+     * no client, so the view presents through the software path from its
+     * first frame and is never promoted to a backend that cannot present. */
+    if (!compositionCreateDevice()) return nullptr;
     NativeSdkSharedRendererClient *client = new NativeSdkSharedRendererClient();
     client->window = window;
     client->pipe_name.assign(pipe_name, length);
@@ -393,12 +404,8 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
     }
     if (reply.surface_handle != 0) {
         HANDLE replacement = reinterpret_cast<HANDLE>(reply.surface_handle);
-        /* dcomp.dll loads with the first GPU surface, not at process
-         * start (lazy_dll.h). */
-        static const auto create_device = NATIVE_SDK_LAZY_PROC(kNativeSdkDComp, DCompositionCreateDevice2, "GPU surfaces");
         if (!client->composition &&
-            (!create_device ||
-             FAILED(create_device(nullptr, IID_PPV_ARGS(&client->composition))) ||
+            (FAILED(compositionCreateDevice()(nullptr, IID_PPV_ARGS(&client->composition))) ||
              FAILED(client->composition->CreateTargetForHwnd(client->window, TRUE, &client->target)) ||
              FAILED(client->composition->CreateVisual(&client->visual)))) {
             client->composition.Reset();
