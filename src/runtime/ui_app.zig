@@ -1735,8 +1735,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // slot (and its runtime window label) before creations run.
             var index: usize = 0;
             while (index < self.window_slot_count) {
-                if (declaredWindowIndex(declared, self.window_slots[index].label()) == null) {
-                    self.closeWindowSlot(runtime, index);
+                if (declaredWindowIndex(declared, self.window_slots[index].label()) == null and
+                    self.closeWindowSlot(runtime, index))
+                {
+                    // The last slot moved into `index`; check it next.
                     continue;
                 }
                 index += 1;
@@ -1868,11 +1870,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return view;
         }
 
-        /// Remove the slot and close its runtime window (the reconcile
-        /// close: the model stopped declaring it, so no `on_close` Msg —
-        /// the model already knows).
-        fn closeWindowSlot(self: *Self, runtime: *Runtime, index: usize) void {
-            const window_id = self.window_slots[index].window_id;
+        /// Close the slot's runtime window, then remove the slot (the
+        /// reconcile close: the model stopped declaring it, so no
+        /// `on_close` Msg — the model already knows). Returns whether the
+        /// slot was removed. If the platform refuses the close, the
+        /// runtime keeps the window open with its retained layout, which
+        /// can point into the slot's arenas, so the slot stays as it is
+        /// and the next reconcile tries again.
+        fn closeWindowSlot(self: *Self, runtime: *Runtime, index: usize) bool {
+            runtime.closeWindow(self.window_slots[index].window_id) catch |err| {
+                ui_app_log.warn("declared window '{s}' close failed: {s}; it stays open and the next rebuild retries the close", .{ self.window_slots[index].label(), @errorName(err) });
+                return false;
+            };
             const last = self.window_slot_count - 1;
             var removed = self.window_slots[index];
             self.window_slots[index] = self.window_slots[last];
@@ -1880,9 +1889,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.window_slot_count = last;
             removed.arenas[0].deinit();
             removed.arenas[1].deinit();
-            runtime.closeWindow(window_id) catch |err| {
-                ui_app_log.warn("declared window close failed: {s}", .{@errorName(err)});
-            };
+            return true;
         }
 
         /// Drop a slot whose runtime window is ALREADY gone (the user
