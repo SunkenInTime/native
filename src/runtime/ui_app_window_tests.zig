@@ -652,6 +652,7 @@ const ReentryHook = struct {
 };
 
 test "a frame Msg dispatched while a declared window is being created does not reconcile again" {
+    if (comptime support.platform.max_windows < 2) return error.SkipZigTest;
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
