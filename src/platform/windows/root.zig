@@ -452,14 +452,7 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
         .shutdown => state.emit(.app_shutdown),
         .app_activated => state.emit(.app_activated),
         .app_deactivated => state.emit(.app_deactivated),
-        .files_dropped => {
-            var paths_buffer: [platform_mod.max_drop_paths][]const u8 = undefined;
-            const paths = platform_mod.splitDropPaths(event.drop_paths[0..event.drop_paths_len], paths_buffer[0..]);
-            state.emit(.{ .files_dropped = .{
-                .window_id = event.window_id,
-                .paths = paths,
-            } });
-        },
+        .files_dropped => emitFilesDropped(state, event),
         .resize => {
             const surface: platform_mod.Surface = .{
                 .id = event.window_id,
@@ -554,6 +547,20 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .bands = event.audio_bands,
         } }),
     }
+}
+
+// noinline: its 64 KiB path table would otherwise be inlined into
+// windowsCallback, which every platform event (each frame and timer tick)
+// enters. The Windows stack probe touches every page of a frame on entry,
+// so the table kept 64 KiB of the main thread's stack resident for apps
+// that never see a drop.
+noinline fn emitFilesDropped(state: *RunState, event: *const WindowsEvent) void {
+    var paths_buffer: [platform_mod.max_drop_paths][]const u8 = undefined;
+    const paths = platform_mod.splitDropPaths(event.drop_paths[0..event.drop_paths_len], paths_buffer[0..]);
+    state.emit(.{ .files_dropped = .{
+        .window_id = event.window_id,
+        .paths = paths,
+    } });
 }
 
 /// Ordinals match the audio report kinds in webview2_host.cpp (the same
