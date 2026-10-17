@@ -16,13 +16,46 @@ const builtin = @import("builtin");
 /// libc is linked (every desktop host build links it); otherwise Zig's
 /// general-purpose `smp_allocator` (the null-platform tests, the no-libc
 /// Android library), or the wasm allocator on wasm, where `smp_allocator`
-/// has no threads to serve.
-pub const storage_allocator: std.mem.Allocator = if (builtin.link_libc)
+/// has no threads to serve. Test builds allocate through `testing_faults`.
+pub const storage_allocator: std.mem.Allocator = if (builtin.is_test)
+    testing_faults.allocator
+else if (builtin.link_libc)
     std.heap.c_allocator
 else if (builtin.cpu.arch.isWasm())
     std.heap.wasm_allocator
 else
     std.heap.smp_allocator;
+
+/// Out-of-memory injection for tests: set `allocations_before_failure` to n
+/// and view storage's next n allocations succeed, then every one fails until
+/// it is reset to null. Backed by `std.testing.allocator`, so a test that
+/// leaks view storage fails.
+pub const testing_faults = struct {
+    pub var allocations_before_failure: ?usize = null;
+
+    const allocator: std.mem.Allocator = .{ .ptr = undefined, .vtable = &vtable };
+    const vtable: std.mem.Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
+
+    fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
+        if (allocations_before_failure) |remaining| {
+            if (remaining == 0) return null;
+            allocations_before_failure = remaining - 1;
+        }
+        return std.testing.allocator.rawAlloc(len, alignment, return_address);
+    }
+
+    fn resize(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) bool {
+        return std.testing.allocator.rawResize(memory, alignment, new_len, return_address);
+    }
+
+    fn remap(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) ?[*]u8 {
+        return std.testing.allocator.rawRemap(memory, alignment, new_len, return_address);
+    }
+
+    fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
+        std.testing.allocator.rawFree(memory, alignment, return_address);
+    }
+};
 
 pub fn GrownArray(comptime T: type, comptime max_len: usize) type {
     return struct {

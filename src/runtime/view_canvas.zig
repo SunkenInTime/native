@@ -490,6 +490,30 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             try self.canvas_render_animations.append(storage_allocator, animation);
         }
 
+        /// Room to arm an animation and its dirty bounds for each of `ids`
+        /// without allocating (ids already present need none). A caller
+        /// that records what it armed reserves first, so a failed
+        /// allocation cannot land between arming and recording. Capped at
+        /// the limits: past them the writers answer `RenderAnimationListFull`
+        /// exactly as before.
+        pub fn reserveCanvasRenderAnimations(self: *RuntimeView, ids: []const canvas.ObjectId) anyerror!void {
+            var new_animations: usize = 0;
+            var new_dirty_bounds: usize = 0;
+            for (ids) |id| {
+                if (!canvasRenderAnimationsHaveId(self.canvas_render_animations.slice(), id)) new_animations += 1;
+                if (!canvasRenderAnimationsHaveId(self.canvas_render_animation_dirty_bounds.slice(), id)) new_dirty_bounds += 1;
+            }
+            try self.canvas_render_animations.ensureCapacity(storage_allocator, @min(self.canvas_render_animations.len + new_animations, max_canvas_render_animations_per_view));
+            try self.canvas_render_animation_dirty_bounds.ensureCapacity(storage_allocator, @min(self.canvas_render_animation_dirty_bounds.len + new_dirty_bounds, max_canvas_render_animation_dirty_bounds_per_view));
+        }
+
+        fn canvasRenderAnimationsHaveId(entries: anytype, id: canvas.ObjectId) bool {
+            for (entries) |entry| {
+                if (entry.id == id) return true;
+            }
+            return false;
+        }
+
         pub fn removeCanvasRenderAnimation(self: *RuntimeView, id: canvas.ObjectId) void {
             var len: usize = 0;
             for (self.canvasRenderAnimations()) |animation| {
@@ -599,6 +623,23 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         pub fn copyCanvasFrameTextLayoutCache(self: *RuntimeView, entries: []const canvas.TextLayoutCacheEntry) anyerror!void {
             const count = @min(entries.len, max_canvas_text_layouts_per_view);
             try self.canvas_frame_text_layout_cache.replace(storage_allocator, entries[0..count]);
+        }
+
+        /// Room for everything recording `frame` copies into the view,
+        /// taken before any of it is committed: a failed allocation leaves
+        /// the previous caches, summary and frame state standing, so the
+        /// frame does not read as presented. Each copy still answers its
+        /// own limit.
+        pub fn reserveCanvasFrameRecord(self: *RuntimeView, frame: canvas.CanvasFrame, render_override_count: usize) anyerror!void {
+            try self.canvas_frame_path_geometry_cache.ensureCapacity(storage_allocator, @min(frame.path_geometry_cache_plan.entries.len, max_canvas_path_geometries_per_view));
+            try self.canvas_frame_image_cache.ensureCapacity(storage_allocator, @min(frame.image_cache_plan.entries.len, max_canvas_images_per_view));
+            try self.canvas_frame_layer_cache.ensureCapacity(storage_allocator, @min(frame.layer_cache_plan.entries.len, max_canvas_layers_per_view));
+            try self.canvas_frame_resource_cache.ensureCapacity(storage_allocator, @min(frame.resource_cache_plan.entries.len, max_canvas_resources_per_view));
+            try self.canvas_frame_visual_effect_cache.ensureCapacity(storage_allocator, @min(frame.visual_effect_cache_plan.entries.len, max_canvas_visual_effects_per_view));
+            try self.canvas_frame_glyph_atlas_cache.ensureCapacity(storage_allocator, @min(frame.glyph_atlas_cache_plan.entries.len, max_canvas_glyphs_per_view));
+            try self.canvas_frame_text_layout_cache.ensureCapacity(storage_allocator, @min(frame.text_layout_cache_plan.entries.len, max_canvas_text_layouts_per_view));
+            try self.presented_canvas_commands.ensureCapacity(storage_allocator, @min(frame.display_list.commands.len, max_canvas_commands_per_view));
+            try self.canvas_frame_render_overrides.ensureCapacity(storage_allocator, @min(render_override_count, max_canvas_render_overrides_per_view));
         }
 
         pub fn recordCanvasFrame(self: *RuntimeView, frame: canvas.CanvasFrame) void {

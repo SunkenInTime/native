@@ -17,6 +17,7 @@ test {
     _ = @import("canvas_font_tests.zig");
     _ = @import("storage_layout_tests.zig");
     _ = @import("grown_array.zig");
+    _ = @import("view_storage_oom_tests.zig");
     _ = @import("effects_tests.zig");
     _ = @import("effects_fetch_tests.zig");
     _ = @import("effects_file_tests.zig");

@@ -473,9 +473,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             } else if (count == 0) {
                 return;
             }
+            // Room for the mirror before the platform sees the regions, so
+            // the mirror always says what the platform holds.
+            try view.canvas_widget_drag_regions.ensureCapacity(storage_allocator, count);
             try self.options.platform.services.setWindowDragRegions(view.window_id, view.label, regions[0..count]);
-            // A failed allocation leaves the old mirror, so the next sync
-            // pushes again.
             try view.canvas_widget_drag_regions.replace(storage_allocator, regions[0..count]);
             view.canvas_widget_drag_regions_pushed = true;
         }

@@ -93,6 +93,10 @@ fn validateWidgetLayoutPoolBudgets(
     if (text_len > max_canvas_widget_text_bytes_per_view) return error.WidgetTextTooLarge;
 }
 
+fn canvasWidgetHasSourceTextEntry(node: canvas.WidgetLayoutNode) bool {
+    return node.widget.id != 0 and canvasWidgetEditableTextKind(node.widget.kind);
+}
+
 pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
     return struct {
         pub fn widgetLayoutTree(self: *const RuntimeView) canvas.WidgetLayoutTree {
@@ -111,10 +115,38 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return self.widget_source_scroll_entries.slice();
         }
 
+        /// Room for all three source mirrors of `layout`. Taken before the
+        /// retained tree is replaced: a tree installed without its mirrors
+        /// would be reconciled against the previous source on the next
+        /// rebuild.
+        pub fn reserveCanvasWidgetSourceMirrors(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
+            try self.widget_source_text_entries.ensureCapacity(storage_allocator, sourceTextEntryCount(layout.nodes));
+            try self.widget_source_scroll_entries.ensureCapacity(storage_allocator, sourceScrollEntryCount(layout.nodes));
+            try self.widget_source_control_entries.ensureCapacity(storage_allocator, sourceControlEntryCount(layout.nodes));
+        }
+
+        // The mirrors keep the first entries up to their budgets, as their
+        // fixed arrays did.
+        fn sourceTextEntryCount(nodes: []const canvas.WidgetLayoutNode) usize {
+            var count: usize = 0;
+            for (nodes) |node| {
+                if (canvasWidgetHasSourceTextEntry(node)) count += 1;
+            }
+            return @min(count, max_canvas_widget_source_text_entries_per_view);
+        }
+
+        fn sourceScrollEntryCount(nodes: []const canvas.WidgetLayoutNode) usize {
+            return @min(canvas_widget_runtime.countCanvasWidgetScrollOffsetEntries(nodes), max_canvas_widget_nodes_per_view);
+        }
+
+        fn sourceControlEntryCount(nodes: []const canvas.WidgetLayoutNode) usize {
+            return @min(canvas_widget_runtime.countCanvasWidgetSourceControlEntries(nodes), max_canvas_widget_nodes_per_view);
+        }
+
         pub fn copyCanvasWidgetSourceScroll(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
             // Count, then size, then fill: a failed allocation leaves the
             // previous mirror whole.
-            try self.widget_source_scroll_entries.resize(storage_allocator, canvas_widget_runtime.countCanvasWidgetScrollOffsetEntries(layout.nodes));
+            try self.widget_source_scroll_entries.resize(storage_allocator, sourceScrollEntryCount(layout.nodes));
             _ = canvas_widget_runtime.collectCanvasWidgetScrollOffsetEntries(layout.nodes, self.widget_source_scroll_entries.sliceMut());
         }
 
@@ -155,7 +187,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
 
         pub fn copyCanvasWidgetSourceControls(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
             // Count, then size, then fill, as for the scroll mirror.
-            try self.widget_source_control_entries.resize(storage_allocator, canvas_widget_runtime.countCanvasWidgetSourceControlEntries(layout.nodes));
+            try self.widget_source_control_entries.resize(storage_allocator, sourceControlEntryCount(layout.nodes));
             _ = canvas_widget_runtime.collectCanvasWidgetSourceControlEntries(layout.nodes, self.widget_source_control_entries.sliceMut());
         }
 
@@ -164,7 +196,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             var entry_count: usize = 0;
 
             for (layout.nodes) |node| {
-                if (node.widget.id == 0 or !canvasWidgetEditableTextKind(node.widget.kind)) continue;
+                if (!canvasWidgetHasSourceTextEntry(node)) continue;
                 if (entry_count >= entries.len) break;
                 const source_text = canvasWidgetSourceTextFingerprint(node.widget.text);
                 entries[entry_count] = .{

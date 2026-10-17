@@ -587,6 +587,8 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 .retained_dirty_rects = retained_dirty,
                 .retained_rgba8 = if (retained_changed) pixels[0..pixel_size.byte_len] else "",
             };
+            // Room for the presented summary before the host has the frame.
+            try view.presented_canvas_commands.ensureCapacity(storage_allocator, @min(display_list.commands.len, max_canvas_commands_per_view));
             const present_begin = self.frame_profile.begin();
             services.presentGpuSurfacePacketBinary(base) catch |err| {
                 self.frame_profile.end(.present, present_begin);
@@ -735,6 +737,13 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const present_begin = self.frame_profile.begin();
             defer self.frame_profile.end(.present, present_begin);
             try surface.renderPass(canvas_frame.renderPass(), clear_color);
+            // Room for the pixel-adopted baseline below before the platform
+            // has the frame (the keyed list is at most the frame's commands).
+            if (self.options.pixel_present_retained_baseline) {
+                if (runtimeFindViewIndex(self, window_id, label)) |index| {
+                    try reserveCanvasPacketBaseline(self.views[index], @min(record_frame.render_plan.commands.len, max_canvas_retained_packet_commands_per_view));
+                }
+            }
             try self.options.platform.services.presentGpuSurfacePixels(.{
                 .window_id = window_id,
                 .label = label,
@@ -886,6 +895,9 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 // or carries duplicate keys — those frames present
                 // through the non-retained encoding below.
                 const current = if (view_index != null) gatherCanvasPacketCurrentCommands(canvas_frame) else null;
+                // Room for the baseline before any present, so adopting it
+                // cannot fail once the host holds the frame.
+                if (current) |current_commands| try reserveCanvasPacketBaseline(self.views[view_index.?], current_commands.len);
                 // Patch derivation runs eagerly with the gather (one
                 // profile stage, one scratch fill the encoder below
                 // reads); null when the view holds no usable baseline.
@@ -1478,6 +1490,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 .budget = frame_options.budget,
             };
             if (record) {
+                try self.views[index].reserveCanvasFrameRecord(canvas_frame, frame_options.render_overrides.len);
                 try self.views[index].copyCanvasFramePipelineCache(canvas_frame.pipeline_cache_plan.entries);
                 try self.views[index].copyCanvasFramePathGeometryCache(canvas_frame.path_geometry_cache_plan.entries);
                 try self.views[index].copyCanvasFrameImageCache(canvas_frame.image_cache_plan.entries);
@@ -1927,6 +1940,12 @@ fn adoptCanvasPacketBaseline(view: anytype, current: []const CanvasPacketCurrent
 fn adoptCanvasPixelPresentBaseline(view: anytype, current: []const CanvasPacketCurrentCommand, surface_size: geometry.SizeF, scale: f32) !void {
     try adoptCanvasBaselineEntries(view, current, surface_size, scale);
     view.canvas_packet_baseline_pixels = true;
+}
+
+fn reserveCanvasPacketBaseline(view: anytype, count: usize) !void {
+    try view.canvas_packet_baseline_keys.ensureCapacity(storage_allocator, count);
+    try view.canvas_packet_baseline_fingerprints.ensureCapacity(storage_allocator, count);
+    try view.canvas_packet_baseline_bounds.ensureCapacity(storage_allocator, count);
 }
 
 /// The baseline is invalid until all three mirrors hold `current`, so a
