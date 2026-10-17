@@ -1184,7 +1184,7 @@ test "runtime dispatches automation canvas widget actions" {
     try std.testing.expectEqual(@as(f32, 16), app_state.last_drag_dx);
 
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 3, .action = .toggle });
-    try std.testing.expectEqual(@as(?f32, 1), runtimeViewWidgetSemantics(&harness.runtime.views[0])[2].value);
+    try std.testing.expectEqual(@as(?f32, 1), runtimeViewWidgetSemantics(harness.runtime.views[0])[2].value);
     try std.testing.expectError(error.InvalidCommand, dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 3, .action = .drag }));
 
     // The accessibility toggle is the same space-key toggle: the
@@ -1192,12 +1192,12 @@ test "runtime dispatches automation canvas widget actions" {
     // echo-only flip would leave the model behind and revert on the
     // next rebuild.
     _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 3, .action = .toggle });
-    try std.testing.expectEqual(@as(?f32, 0), runtimeViewWidgetSemantics(&harness.runtime.views[0])[2].value);
+    try std.testing.expectEqual(@as(?f32, 0), runtimeViewWidgetSemantics(harness.runtime.views[0])[2].value);
     try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_keyboard_target_id);
     try std.testing.expectEqualStrings("space", app_state.last_keyboard_key);
 
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 4, .action = .increment });
-    try std.testing.expectApproxEqAbs(@as(f32, 0.55), runtimeViewWidgetSemantics(&harness.runtime.views[0])[3].value.?, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.55), runtimeViewWidgetSemantics(harness.runtime.views[0])[3].value.?, 0.001);
     try std.testing.expectEqual(@as(canvas.ObjectId, 4), app_state.last_keyboard_target_id);
     try std.testing.expectEqualStrings("arrowright", app_state.last_keyboard_key);
 
@@ -1205,12 +1205,12 @@ test "runtime dispatches automation canvas widget actions" {
     // the automation verb dispatches: value moves through the keyboard
     // intent and the app hears the arrow key on the slider.
     _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{ .id = 4, .action = .increment });
-    try std.testing.expectApproxEqAbs(@as(f32, 0.6), runtimeViewWidgetSemantics(&harness.runtime.views[0])[3].value.?, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), runtimeViewWidgetSemantics(harness.runtime.views[0])[3].value.?, 0.001);
     try std.testing.expectEqual(@as(canvas.ObjectId, 4), app_state.last_keyboard_target_id);
     try std.testing.expectEqualStrings("arrowright", app_state.last_keyboard_key);
 
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 6, .action = .select });
-    try std.testing.expectEqual(@as(?f32, 1), runtimeViewWidgetSemantics(&harness.runtime.views[0])[5].value);
+    try std.testing.expectEqual(@as(?f32, 1), runtimeViewWidgetSemantics(harness.runtime.views[0])[5].value);
 
     // A lone menu item in an ACTIONS group (no sibling declares a
     // committed row): the select action focuses it but mints no
@@ -1268,26 +1268,26 @@ test "runtime dispatches automation canvas widget actions" {
     try std.testing.expectError(error.InvalidCommand, dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 3, .action = .drop_files, .value = "/tmp/report.csv" }));
 
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 5, .action = .set_text, .value = "Hello world" });
-    try std.testing.expectEqualStrings("Hello world", runtimeViewWidgetSemantics(&harness.runtime.views[0])[4].label);
+    try std.testing.expectEqualStrings("Hello world", runtimeViewWidgetSemantics(harness.runtime.views[0])[4].label);
 
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 5, .action = .set_composition, .value = "!" });
-    try std.testing.expectEqualStrings("Hello world!", runtimeViewWidgetSemantics(&harness.runtime.views[0])[4].text_value);
-    try std.testing.expectEqualDeep(canvas.TextRange.init(11, 12), runtimeViewWidgetSemantics(&harness.runtime.views[0])[4].text_composition.?);
+    try std.testing.expectEqualStrings("Hello world!", runtimeViewWidgetSemantics(harness.runtime.views[0])[4].text_value);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(11, 12), runtimeViewWidgetSemantics(harness.runtime.views[0])[4].text_composition.?);
 
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 5, .action = .commit_composition });
-    try std.testing.expectEqualStrings("Hello world!", runtimeViewWidgetSemantics(&harness.runtime.views[0])[4].text_value);
-    try std.testing.expect(runtimeViewWidgetSemantics(&harness.runtime.views[0])[4].text_composition == null);
+    try std.testing.expectEqualStrings("Hello world!", runtimeViewWidgetSemantics(harness.runtime.views[0])[4].text_value);
+    try std.testing.expect(runtimeViewWidgetSemantics(harness.runtime.views[0])[4].text_composition == null);
 
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 5, .action = .set_composition, .value = " draft" });
-    try std.testing.expectEqualStrings("Hello world! draft", runtimeViewWidgetSemantics(&harness.runtime.views[0])[4].text_value);
-    try std.testing.expectEqualDeep(canvas.TextRange.init(12, 18), runtimeViewWidgetSemantics(&harness.runtime.views[0])[4].text_composition.?);
+    try std.testing.expectEqualStrings("Hello world! draft", runtimeViewWidgetSemantics(harness.runtime.views[0])[4].text_value);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(12, 18), runtimeViewWidgetSemantics(harness.runtime.views[0])[4].text_composition.?);
 
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 5, .action = .cancel_composition });
-    try std.testing.expectEqualStrings("Hello world!", runtimeViewWidgetSemantics(&harness.runtime.views[0])[4].text_value);
-    try std.testing.expect(runtimeViewWidgetSemantics(&harness.runtime.views[0])[4].text_composition == null);
+    try std.testing.expectEqualStrings("Hello world!", runtimeViewWidgetSemantics(harness.runtime.views[0])[4].text_value);
+    try std.testing.expect(runtimeViewWidgetSemantics(harness.runtime.views[0])[4].text_composition == null);
 
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 5, .action = .set_selection, .value = "0 5" });
-    try std.testing.expectEqualDeep(canvas.TextRange.init(0, 5), runtimeViewWidgetSemantics(&harness.runtime.views[0])[4].text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(0, 5), runtimeViewWidgetSemantics(harness.runtime.views[0])[4].text_selection.?);
     const selection_snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expect(selection_snapshot.widgets[4].actions.set_selection);
     try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 0, .end = 5 }, selection_snapshot.widgets[4].text_selection.?);

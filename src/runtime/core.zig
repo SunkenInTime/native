@@ -93,6 +93,13 @@ pub const canvasSurfacePixelSize = canvas_frame_helpers.canvasSurfacePixelSize;
 pub const canvasFramePixelSize = canvas_frame_helpers.canvasFramePixelSize;
 
 const RuntimeView = runtime_view.RuntimeView;
+
+/// One design token set shared by the views holding it.
+pub const WidgetTokenSet = struct {
+    tokens: canvas.DesignTokens,
+    /// Views holding this set; at zero the slot is free for another.
+    views: u32,
+};
 const nowNanoseconds = runtime_clock.nowNanoseconds;
 const timestampToU64 = runtime_clock.timestampToU64;
 const RuntimeWindow = runtime_state.RuntimeWindow;
@@ -187,8 +194,20 @@ pub const Runtime = struct {
     appearance: platform.Appearance = .{},
     windows: [platform.max_windows]RuntimeWindow align(storage_align) = undefined,
     window_count: usize = 0,
-    views: [platform.max_views]RuntimeView align(storage_align) = undefined,
+    /// Where views live. A view keeps its slot for life, so removing one
+    /// never moves another: shifting the views themselves wrote every byte
+    /// of each 3.7 MiB view after it and made it all resident.
+    view_slots: [platform.max_views]RuntimeView align(storage_align) = undefined,
+    view_slot_used: std.StaticBitSet(platform.max_views) = .initEmpty(),
+    /// The live views, in order: the first `view_count` point into
+    /// `view_slots`.
+    views: [platform.max_views]*RuntimeView = undefined,
     view_count: usize = 0,
+    /// Design token sets the views share; each live view holds at most one,
+    /// so a slot per view always suffices. Slots are touched only as sets
+    /// are first used: an app whose views share one set pays for one.
+    widget_token_sets: [platform.max_views]WidgetTokenSet align(storage_align) = undefined,
+    widget_token_set_count: usize = 0,
     webviews: [platform.max_webviews]RuntimeWebView align(storage_align) = undefined,
     webview_count: usize = 0,
     tray_items: [platform.max_tray_items]RuntimeTrayItem align(storage_align) = undefined,
@@ -313,6 +332,11 @@ pub const Runtime = struct {
     canvas_widget_reconcile_text_bytes: [canvas_limits.max_canvas_widget_text_bytes_per_view]u8 align(storage_align) = undefined,
     canvas_widget_invalidations_scratch: [canvas_limits.max_canvas_widget_invalidations_per_view]canvas.WidgetInvalidation align(storage_align) = undefined,
     canvas_widget_copy_scratch: runtime_canvas_widget_runtime.CanvasWidgetCopyScratch align(storage_align) = undefined,
+    /// The loop animations a display refresh wants, collected before any is
+    /// armed (canvas_widget_display.zig): 9.5 KiB kept off the stack, which
+    /// is 1 MiB on a mobile main thread. Touched only by views showing a
+    /// spinner or skeleton.
+    canvas_widget_loop_animation_scratch: [canvas_limits.max_canvas_widget_loop_animations_per_view]runtime_canvas_widget_display.DesiredLoopAnimation align(storage_align) = undefined,
     canvas_widget_display_list_refresh_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
     canvas_widget_accessibility_publish_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
     canvas_frame_render_commands: [max_canvas_commands_per_view]canvas.RenderCommand align(storage_align) = undefined,
@@ -374,6 +398,36 @@ pub const Runtime = struct {
     /// storage; by-value construction materializes a stack temporary in Debug
     /// builds that overflows default thread stacks, so every embedding
     /// constructs through a pointer.
+    /// The shared copy of `tokens` for a view moving off `previous`: the
+    /// built-in default, an equal set another view holds, or a free slot.
+    pub fn swapWidgetTokens(self: *Runtime, previous: *const canvas.DesignTokens, tokens: canvas.DesignTokens) *const canvas.DesignTokens {
+        self.releaseWidgetTokens(previous);
+        if (std.meta.eql(tokens, runtime_view.default_widget_tokens)) return &runtime_view.default_widget_tokens;
+        var free: ?usize = null;
+        for (self.widget_token_sets[0..self.widget_token_set_count], 0..) |*set, index| {
+            if (set.views == 0) {
+                if (free == null) free = index;
+            } else if (std.meta.eql(set.tokens, tokens)) {
+                set.views += 1;
+                return &set.tokens;
+            }
+        }
+        const index = free orelse index: {
+            self.widget_token_set_count += 1;
+            break :index self.widget_token_set_count - 1;
+        };
+        self.widget_token_sets[index] = .{ .tokens = tokens, .views = 1 };
+        return &self.widget_token_sets[index].tokens;
+    }
+
+    /// A view stops holding `tokens` (it is removed, or takes others).
+    pub fn releaseWidgetTokens(self: *Runtime, tokens: *const canvas.DesignTokens) void {
+        if (tokens == &runtime_view.default_widget_tokens) return;
+        const set: *WidgetTokenSet = @fieldParentPtr("tokens", @constCast(tokens));
+        std.debug.assert(@intFromPtr(set) >= @intFromPtr(&self.widget_token_sets) and set.views > 0);
+        set.views -= 1;
+    }
+
     pub fn initAt(self: *Runtime, options: Options) void {
         inline for (@typeInfo(Runtime).@"struct".fields) |field| {
             if (comptime fieldHasSmallDefault(field)) {
@@ -400,6 +454,14 @@ pub const Runtime = struct {
         // (tests do constantly): bump the generation so nothing measured
         // against a previous runtime's provider can be served to this one.
         canvas.bumpTextMeasureGeneration();
+    }
+
+    /// Free what the runtime's views allocated as they grew (removing a view
+    /// frees its own). The runtime is unusable afterward; the memory holding
+    /// it stays the caller's to free.
+    pub fn deinit(self: *Runtime) void {
+        for (self.views[0..self.view_count]) |view| view.deinit();
+        self.view_count = 0;
     }
 
     fn fieldHasSmallDefault(comptime field: std.builtin.Type.StructField) bool {
@@ -817,6 +879,7 @@ pub fn TestHarness() type {
         }
 
         pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
+            self.runtime.deinit();
             gpa.destroy(self);
         }
 

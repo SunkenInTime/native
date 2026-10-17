@@ -169,7 +169,7 @@ test "driver offsets scroll retained scroll views and pass through overscroll" {
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
     // The driver owns physics: no engine velocity was introduced.
-    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states.slice()[0].velocity);
 
     // Rubber-band overscroll passes through so the bounce is visible;
     // the engine performs no kinetic recovery of its own.

@@ -146,7 +146,7 @@ test "runtime dismisses nearest canvas floating surface with escape" {
     try std.testing.expectEqual(platform.Cursor.arrow, harness.runtime.views[0].canvas_widget_cursor);
     try std.testing.expect(harness.runtime.invalidated);
 
-    for (runtimeViewWidgetSemantics(&harness.runtime.views[0])) |node| {
+    for (runtimeViewWidgetSemantics(harness.runtime.views[0])) |node| {
         try std.testing.expect(node.id != 2);
         try std.testing.expect(node.id != 3);
     }
@@ -299,8 +299,8 @@ test "runtime dismisses canvas floating surfaces from automation and accessibili
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 2, .action = .dismiss });
     var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(retained.findById(2).?.widget.semantics.hidden);
-    try std.testing.expect(canvasWidgetSemanticsById(runtimeViewWidgetSemantics(&harness.runtime.views[0]), 2) == null);
-    try std.testing.expect(canvasWidgetSemanticsById(runtimeViewWidgetSemantics(&harness.runtime.views[0]), 3) == null);
+    try std.testing.expect(canvasWidgetSemanticsById(runtimeViewWidgetSemantics(harness.runtime.views[0]), 2) == null);
+    try std.testing.expect(canvasWidgetSemanticsById(runtimeViewWidgetSemantics(harness.runtime.views[0]), 3) == null);
     snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expect(Fixture.snapshotWidget(snapshot, 2) == null);
     try std.testing.expect(Fixture.snapshotWidget(snapshot, 3) == null);
@@ -314,8 +314,8 @@ test "runtime dismisses canvas floating surfaces from automation and accessibili
     } });
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(retained.findById(2).?.widget.semantics.hidden);
-    try std.testing.expect(canvasWidgetSemanticsById(runtimeViewWidgetSemantics(&harness.runtime.views[0]), 2) == null);
-    try std.testing.expect(canvasWidgetSemanticsById(runtimeViewWidgetSemantics(&harness.runtime.views[0]), 3) == null);
+    try std.testing.expect(canvasWidgetSemanticsById(runtimeViewWidgetSemantics(harness.runtime.views[0]), 2) == null);
+    try std.testing.expect(canvasWidgetSemanticsById(runtimeViewWidgetSemantics(harness.runtime.views[0]), 3) == null);
 }
 
 test "runtime dismisses focused canvas floating surface from outside pointer down" {
@@ -402,7 +402,7 @@ test "runtime dismisses focused canvas floating surface from outside pointer dow
     try std.testing.expectEqual(platform.Cursor.arrow, harness.runtime.views[0].canvas_widget_cursor);
     try std.testing.expect(harness.runtime.invalidated);
 
-    for (runtimeViewWidgetSemantics(&harness.runtime.views[0])) |node| {
+    for (runtimeViewWidgetSemantics(harness.runtime.views[0])) |node| {
         try std.testing.expect(node.id != 2);
         try std.testing.expect(node.id != 3);
     }
