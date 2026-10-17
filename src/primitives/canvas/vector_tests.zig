@@ -175,6 +175,46 @@ test "fill covers an axis aligned rect with exact partial coverage" {
     try std.testing.expectEqual(@as(u8, 0), grid.at(1, 3));
 }
 
+test "a sink that rasterizes from inside a fill gets the same pixels" {
+    // fillPath and strokePath share one per-thread rasterizer; a sink that
+    // fills another path while the outer sweep runs must get its own and
+    // leave the outer sweep's edges alone.
+    var inner_builder = vector.PathBuilder(8){};
+    try rectPath(&inner_builder, 2, 2, 7.5, 9);
+    var outer_builder = vector.PathBuilder(8){};
+    try rectPath(&outer_builder, 0.5, 0.5, 12.5, 6.5);
+
+    var expected_outer = Grid{};
+    try vector.fillPath(outer_builder.slice(), identity, .nonzero, 0.25, fullClip(), &expected_outer);
+    var expected_inner = Grid{};
+    try vector.fillPath(inner_builder.slice(), identity, .nonzero, 0.25, fullClip(), &expected_inner);
+    var expected_stroke = Grid{};
+    try vector.strokePath(inner_builder.slice(), identity, .{ .width = 1.5 }, 0.25, fullClip(), &expected_stroke);
+
+    const NestingSink = struct {
+        outer: Grid = .{},
+        inner: Grid = .{},
+        stroke: Grid = .{},
+        inner_path: []const PathElement,
+        nested: bool = false,
+
+        pub fn pixel(self: *@This(), x: i32, y: i32, coverage: f32) void {
+            self.outer.pixel(x, y, coverage);
+            if (self.nested) return;
+            self.nested = true;
+            vector.fillPath(self.inner_path, identity, .nonzero, 0.25, fullClip(), &self.inner) catch unreachable;
+            vector.strokePath(self.inner_path, identity, .{ .width = 1.5 }, 0.25, fullClip(), &self.stroke) catch unreachable;
+        }
+    };
+    var sink = NestingSink{ .inner_path = inner_builder.slice() };
+    try vector.fillPath(outer_builder.slice(), identity, .nonzero, 0.25, fullClip(), &sink);
+
+    try std.testing.expect(sink.nested);
+    try std.testing.expectEqualSlices(u8, &expected_outer.data, &sink.outer.data);
+    try std.testing.expectEqualSlices(u8, &expected_inner.data, &sink.inner.data);
+    try std.testing.expectEqualSlices(u8, &expected_stroke.data, &sink.stroke.data);
+}
+
 test "fill rules diverge where same winding contours overlap" {
     var builder = vector.PathBuilder(16){};
     try rectPath(&builder, 1, 1, 6, 6);

@@ -680,7 +680,10 @@ pub const ReferenceRenderSurface = struct {
         self.memoStore(probe, pixel_rect);
     }
 
-    fn drawBlur(self: ReferenceRenderSurface, command: RenderCommand, value: Blur, draw_bounds: geometry.RectF) Error!void {
+    // noinline: its 16 KiB kernel would otherwise sit in renderCommand's
+    // frame for every command, and the Windows stack probe touches every
+    // page of a frame on entry.
+    noinline fn drawBlur(self: ReferenceRenderSurface, command: RenderCommand, value: Blur, draw_bounds: geometry.RectF) Error!void {
         const scratch = self.scratch orelse return error.ReferenceRenderUnsupportedCommand;
         const radius = nonNegative(value.radius) * referenceTransformScale(command.transform);
         if (radius <= 0) return;
@@ -763,7 +766,10 @@ pub const ReferenceRenderSurface = struct {
         try self.drawTextCore(command, value, draw_bounds);
     }
 
-    fn drawTextCore(self: ReferenceRenderSurface, command: RenderCommand, value: DrawText, draw_bounds: geometry.RectF) Error!void {
+    // noinline: drawText calls this twice (shadow passes and the run
+    // itself); inlined, each call site kept its own 5.5 KiB line table in
+    // renderCommand's frame.
+    noinline fn drawTextCore(self: ReferenceRenderSurface, command: RenderCommand, value: DrawText, draw_bounds: geometry.RectF) Error!void {
         if (value.size <= 0) return;
 
         if (value.text_layout) |options| {
