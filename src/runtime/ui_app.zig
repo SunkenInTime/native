@@ -698,6 +698,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             pixel_snap_scale: f32 = 1,
             tree: ?Ui.Tree = null,
             arena_index: usize = 0,
+            /// Same rule as `Self.inactive_tree_published`, for this
+            /// window's arena pair.
+            inactive_tree_published: bool = false,
             arenas: [2]std.heap.ArenaAllocator,
 
             fn init(backing: std.mem.Allocator) WindowSlot {
@@ -726,6 +729,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         options: Options,
         arenas: [2]std.heap.ArenaAllocator,
         arena_index: usize = 0,
+        /// Set while the runtime may hold pointers into the inactive
+        /// arena: a rebuild sets it just before handing the new tree's
+        /// layout to the runtime and clears it once that arena becomes
+        /// the active one. A rebuild that fails in between leaves it set,
+        /// so `releaseInactiveTrees` keeps the arena the runtime still
+        /// reads from.
+        inactive_tree_published: bool = false,
+        /// How many app callbacks (`eventFn`, `frameRequestedFn`) are on
+        /// the stack. A platform call made during a rebuild can deliver
+        /// another event synchronously (Windows `SetFocus` sends
+        /// WM_KILLFOCUS), so callbacks nest; only the outermost one
+        /// releases the inactive trees.
+        callback_depth: usize = 0,
         tree: ?Ui.Tree = null,
         canvas_size: geometry.SizeF = .{ .width = 1, .height = 1 },
         canvas_window_id: platform.WindowId = 1,
@@ -1026,6 +1042,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn frameRequestedFn(context: *anyopaque, runtime: *Runtime) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(context));
+            self.callback_depth += 1;
+            defer self.leaveCallback();
             const map = self.options.on_frame_requested orelse return;
             if (map(&self.model)) |msg| {
                 try self.dispatch(runtime, self.canvas_window_id, msg);
@@ -1268,8 +1286,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         /// Rebuild the widget tree from the model and hand it to the
         /// runtime, which copies and reconciles it. The previous tree's
-        /// arena stays alive until the following rebuild so the handler
-        /// table remains valid between events. Apps with a `chrome` hook
+        /// arena stays alive until the event that rebuilt it is handled,
+        /// so a Msg made from that tree can still be dispatched; then its
+        /// pages go back (`releaseInactiveTrees`). Apps with a `chrome` hook
         /// also rebuild the retained display list (chrome prefix + widget
         /// commands + chrome suffix) here.
         ///
@@ -1365,6 +1384,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             launch_timing.lapOnce("first_view_built");
 
+            // From here the runtime may hold pointers into the new arena,
+            // even if a later step fails before it becomes the active one.
+            self.inactive_tree_published = true;
             if (self.options.chrome) |chrome| {
                 try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
             } else {
@@ -1376,6 +1398,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
             self.tree = tree;
             self.arena_index = next_index;
+            self.inactive_tree_published = false;
             // The fallback menu's target vanished from this build (the
             // model dropped the row, or its menu emptied): the open state
             // has nothing to present, so it closes.
@@ -1838,6 +1861,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             slot.pixel_snap_scale = self.pixel_snap_scale;
             slot.tree = null;
             slot.arena_index = 0;
+            slot.inactive_tree_published = false;
             self.window_slot_count += 1;
         }
 
@@ -1930,12 +1954,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
                 return err;
             };
+            slot.inactive_tree_published = true;
             _ = try runtime.setCanvasWidgetLayout(slot.window_id, slot.canvasLabel(), layout);
             if (slot.installed and self.rebuildEmitsTokens(runtime, slot.window_id, slot.canvasLabel(), tokens)) {
                 _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
             }
             slot.tree = tree;
             slot.arena_index = next_index;
+            slot.inactive_tree_published = false;
             // Same close-on-vanish rule as the main canvas rebuild.
             if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
                 self.clearContextMenuFallback();
@@ -2649,6 +2675,43 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn eventFn(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(context));
+            self.callback_depth += 1;
+            defer self.leaveCallback();
+            return self.handleEvent(runtime, event_value);
+        }
+
+        fn leaveCallback(self: *Self) void {
+            self.callback_depth -= 1;
+            if (self.callback_depth == 0) self.releaseInactiveTrees();
+        }
+
+        /// Each window rebuilds into one of two arenas and keeps the other
+        /// alive, because a Msg made from the previous tree can still be
+        /// dispatched after a rebuild within the same event. Once the event is
+        /// handled, nothing points into that previous tree, so its arena gives
+        /// its pages back instead of keeping a dead tree resident until the
+        /// next rebuild (a clock's is five pages per window).
+        ///
+        /// Two rules keep this from freeing memory that is still in use.
+        /// It runs only when the outermost app callback returns: a platform
+        /// call inside a rebuild can deliver a nested event (Windows
+        /// `SetFocus` sends WM_KILLFOCUS during autofocus), and the outer
+        /// rebuild is still writing into the arena that looks inactive. And
+        /// it skips an arena whose tree was handed to the runtime by a
+        /// rebuild that then failed: the runtime keeps pointers into it
+        /// (placeholders, immediate commands), so that arena is kept, as
+        /// before this release existed, until the next rebuild replaces it.
+        fn releaseInactiveTrees(self: *Self) void {
+            if (!self.inactive_tree_published) {
+                _ = self.arenas[self.arena_index ^ 1].reset(.free_all);
+            }
+            for (self.window_slots[0..self.window_slot_count]) |*slot| {
+                if (slot.inactive_tree_published) continue;
+                _ = slot.arenas[slot.arena_index ^ 1].reset(.free_all);
+            }
+        }
+
+        fn handleEvent(self: *Self, runtime: *Runtime, event_value: Event) anyerror!void {
             switch (event_value) {
                 .command => |command| {
                     const map = self.options.on_command orelse return;
