@@ -186,12 +186,12 @@ fn findWidgetNodeById(layout: anytype, id: ObjectId) ?WidgetNodeRef {
 /// bound; small or oversized trees keep the linear scans.
 const diff_widget_id_index_slots = 2048;
 const DiffWidgetIdIndex = plan_key_index.HashSlots(diff_widget_id_index_slots);
-// Lazily heap-allocated per thread (16 KiB of probe tables): reset per
-// diff, so first-use init on the diffing thread is the only contract —
-// threads that never diff widget trees never allocate it.
+// Lazily heap-allocated per thread (up to 16 KiB of probe tables): each
+// diff resets the prefix it needs, so threads that never diff widget
+// trees never allocate it and small diffs never touch most of it.
 const DiffWidgetIdScratch = struct {
-    previous: DiffWidgetIdIndex = .{},
-    next: DiffWidgetIdIndex = .{},
+    previous: DiffWidgetIdIndex,
+    next: DiffWidgetIdIndex,
 };
 const diff_widget_id_scratch = @import("lazy_tls.zig").LazyTls(DiffWidgetIdScratch);
 
@@ -199,11 +199,11 @@ const diff_widget_id_scratch = @import("lazy_tls.zig").LazyTls(DiffWidgetIdScrat
 /// duplicate ids `validateUniqueWidgetIds` rejects — one pass does both
 /// jobs.
 fn buildDiffWidgetIdIndex(layout: anytype, table: *DiffWidgetIdIndex) Error!void {
-    table.reset();
+    table.reset(layout.nodes.len);
     for (layout.nodes, 0..) |node, index| {
         const id = node.widget.id;
         if (id == 0) continue;
-        var probe = DiffWidgetIdIndex.probe(plan_key_index.mixHash(id));
+        var probe = table.probe(plan_key_index.mixHash(id));
         while (table.next(&probe)) |candidate| {
             if (layout.nodes[candidate].widget.id == id) return error.DuplicateWidgetId;
         }
@@ -212,7 +212,7 @@ fn buildDiffWidgetIdIndex(layout: anytype, table: *DiffWidgetIdIndex) Error!void
 }
 
 fn findWidgetNodeByIdIndexed(layout: anytype, table: *const DiffWidgetIdIndex, id: ObjectId) ?WidgetNodeRef {
-    var probe = DiffWidgetIdIndex.probe(plan_key_index.mixHash(id));
+    var probe = table.probe(plan_key_index.mixHash(id));
     while (table.next(&probe)) |candidate| {
         if (layout.nodes[candidate].widget.id == id) return .{ .index = candidate, .node = layout.nodes[candidate] };
     }
