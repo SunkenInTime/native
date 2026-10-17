@@ -1070,8 +1070,16 @@ test "threads that rasterize share one rasterizer and leave none behind" {
     var grids: [8]TestGrid = @splat(.{});
     var ok: [8]bool = @splat(false);
     var threads: [8]std.Thread = undefined;
-    for (&threads, &grids, &ok) |*thread, *grid, *done| thread.* = try std.Thread.spawn(.{}, Worker.run, .{ grid, done });
-    for (threads) |thread| thread.join();
+    var started: usize = 0;
+    {
+        // Join whatever started, even if a later spawn fails, before the
+        // cleanup above frees the rasterizer the workers draw with.
+        defer for (threads[0..started]) |thread| thread.join();
+        for (&threads, &grids, &ok) |*thread, *grid, *done| {
+            thread.* = try std.Thread.spawn(.{}, Worker.run, .{ grid, done });
+            started += 1;
+        }
+    }
 
     for (grids, ok) |grid, done| {
         try std.testing.expect(done);
