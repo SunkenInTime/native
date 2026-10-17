@@ -2,8 +2,9 @@
 //! draw commands, real font glyphs, and SVG icons.
 //!
 //! Design constraints:
-//! - std-only and allocation-free: fixed-capacity buffers on the caller's
-//!   stack, no allocator anywhere.
+//! - std-only and fixed-capacity, with no allocator in the API: small
+//!   buffers live on the caller's stack; the ~112 KiB `Rasterizer` is one
+//!   per-thread instance, allocated once on a thread's first path.
 //! - Deterministic across platforms: the raster core uses only `+ - * /`
 //!   and `@sqrt` (all IEEE-754 correctly rounded). Round caps/joins and
 //!   arcs are lowered to cubic Beziers via the quarter-circle kappa
@@ -460,10 +461,15 @@ const Edge = struct {
 };
 
 /// Fixed-capacity edge accumulator plus the anti-aliased scanline sweep.
-/// Instantiate on the stack (`var raster: Rasterizer = .{};`); it holds
-/// no pointers and is reusable via `resetEdges`.
+/// It holds no pointers and is reusable via `resetEdges`. At ~112 KiB it
+/// is too big for a stack frame on a per-frame path (the Windows stack
+/// probe touches every page of a frame on entry): `fillPath` and
+/// `strokePath` use one per-thread instance, where only the edges and
+/// row pixels a path writes ever become resident.
 pub const Rasterizer = struct {
     edges: [max_edges]Edge = undefined,
+    /// One pixel row of coverage for `sweep`.
+    row: [max_raster_width]f32 = undefined,
     edge_count: usize = 0,
     min_x: f32 = 0,
     min_y: f32 = 0,
@@ -521,7 +527,7 @@ pub const Rasterizer = struct {
     /// Sweep the accumulated edges, emitting `sink.pixel(x, y, coverage)`
     /// for every pixel inside `clip` with coverage > 0. Coverage is in
     /// (0, 1]; `sub_samples` vertical subsamples, exact horizontal spans.
-    pub fn sweep(self: *const Rasterizer, rule: FillRule, clip: ClipRect, sink: anytype) Error!void {
+    pub fn sweep(self: *Rasterizer, rule: FillRule, clip: ClipRect, sink: anytype) Error!void {
         if (self.edge_count == 0) return;
         const y_begin = @max(clip.y0, floorI(self.min_y));
         const y_end = @min(clip.y1, ceilI(self.max_y));
@@ -533,7 +539,7 @@ pub const Rasterizer = struct {
 
         const x_origin = @as(f32, @floatFromInt(x_begin));
         const weight = 1.0 / @as(f32, @floatFromInt(sub_samples));
-        var row: [max_raster_width]f32 = undefined;
+        const row = &self.row;
 
         var y = y_begin;
         while (y < y_end) : (y += 1) {
@@ -643,10 +649,40 @@ pub fn fillPath(
     clip: ClipRect,
     sink: anytype,
 ) Error!void {
+    const scratch = raster_scratch.get();
+    // A sink that itself rasterizes would find this thread's scratch in
+    // use; give that inner path its own.
+    if (scratch.in_use) return fillPathOwnRasterizer(elements, transform, rule, tolerance, clip, sink);
+    scratch.in_use = true;
+    defer scratch.in_use = false;
+    const raster = &scratch.raster;
+    raster.resetEdges();
+    try accumulateFillEdges(raster, elements, transform, tolerance);
+    try raster.sweep(rule, clip, sink);
+}
+
+noinline fn fillPathOwnRasterizer(
+    elements: []const PathElement,
+    transform: Affine,
+    rule: FillRule,
+    tolerance: f32,
+    clip: ClipRect,
+    sink: anytype,
+) Error!void {
     var raster: Rasterizer = .{};
     try accumulateFillEdges(&raster, elements, transform, tolerance);
     try raster.sweep(rule, clip, sink);
 }
+
+/// The per-thread rasterizer behind `fillPath` and `strokePath`, heap
+/// allocated on a thread's first path (see lazy_tls.zig). `raster` has no
+/// default so creating it writes none of its pages; each use starts with
+/// `resetEdges`, which is all the state a sweep reads before writing.
+const RasterScratch = struct {
+    raster: Rasterizer,
+    in_use: bool = false,
+};
+const raster_scratch = @import("lazy_tls.zig").LazyTls(RasterScratch);
 
 /// Accumulate a filled path's edges into an existing rasterizer (lets a
 /// caller union several paths — e.g. all glyph contours of one text run —
@@ -699,6 +735,24 @@ pub fn strokePath(
     sink: anytype,
 ) Error!void {
     if (!(style.width > 0)) return;
+    const scratch = raster_scratch.get();
+    if (scratch.in_use) return strokePathOwnRasterizer(elements, transform, style, tolerance, clip, sink);
+    scratch.in_use = true;
+    defer scratch.in_use = false;
+    const raster = &scratch.raster;
+    raster.resetEdges();
+    try accumulateStrokeEdges(raster, elements, transform, style, tolerance);
+    try raster.sweep(.nonzero, clip, sink);
+}
+
+noinline fn strokePathOwnRasterizer(
+    elements: []const PathElement,
+    transform: Affine,
+    style: StrokeStyle,
+    tolerance: f32,
+    clip: ClipRect,
+    sink: anytype,
+) Error!void {
     var raster: Rasterizer = .{};
     try accumulateStrokeEdges(&raster, elements, transform, style, tolerance);
     try raster.sweep(.nonzero, clip, sink);

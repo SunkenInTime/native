@@ -790,7 +790,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             try server.publish(automationSnapshot(self, server.title));
         }
 
-        fn consumeAutomationCommand(self: *Runtime, app: App) anyerror!void {
+        // noinline: the command buffer would otherwise sit in the frame of
+        // every frame_requested dispatch, automation server or not.
+        noinline fn consumeAutomationCommand(self: *Runtime, app: App) anyerror!void {
             const server = self.options.automation orelse return;
             var buffer: [automation.protocol.max_command_bytes]u8 = undefined;
             // Automation command errors ALWAYS degrade, regardless of
@@ -1123,7 +1125,9 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             }
         }
 
-        fn emitFileDropEvent(self: *Runtime, drop: platform.FileDropEvent) anyerror!void {
+        // noinline: keeps the detail buffer out of the per-event
+        // dispatcher's frame (see consumeAutomationCommand).
+        noinline fn emitFileDropEvent(self: *Runtime, drop: platform.FileDropEvent) anyerror!void {
             var buffer: [platform.max_window_event_detail_bytes]u8 = undefined;
             var writer = std.Io.Writer.fixed(&buffer);
             try writer.print("{{\"windowId\":{d}", .{drop.window_id});
