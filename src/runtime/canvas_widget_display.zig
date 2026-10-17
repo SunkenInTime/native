@@ -10,6 +10,7 @@ const canvas_frame_helpers = @import("canvas_frame.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const launch_timing = @import("launch_timing.zig");
 const widget_bridge = @import("widget_bridge.zig");
+const storage_allocator = @import("grown_array.zig").storage_allocator;
 
 const CanvasWidgetDisplayListChrome = runtime_api.CanvasWidgetDisplayListChrome;
 const CanvasWidgetToggleAnimation = runtime_view.CanvasWidgetToggleAnimation;
@@ -193,7 +194,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                 error.RenderAnimationListFull => return,
                 else => return err,
             };
-            self.views[view_index].replaceCanvasRenderAnimationDirtyBounds(render_animation.id, animation.dirty_bounds) catch {};
+            self.views[view_index].replaceCanvasRenderAnimationDirtyBounds(render_animation.id, animation.dirty_bounds) catch |err| if (err == error.OutOfMemory) return err;
         }
 
         pub fn publishCanvasWidgetAccessibility(self: *Runtime, view_index: usize) anyerror!void {
@@ -343,8 +344,8 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             var canvas_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined;
             const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &canvas_changes);
             try self.views[view_index].copyCanvasDisplayList(display_list);
-            reconcileCanvasWidgetCaretBlink(self, view_index);
-            reconcileCanvasWidgetLoopAnimations(self, view_index);
+            try reconcileCanvasWidgetCaretBlink(self, view_index);
+            try reconcileCanvasWidgetLoopAnimations(self, view_index);
             canvas_frame_helpers.RuntimeCanvasFrames(Runtime).invalidateForCanvasChanges(self, self.views[view_index].frame, changes);
             if (changes.len > 0) {
                 try canvas_frame_helpers.RuntimeCanvasFrames(Runtime).requestCanvasFrameForView(self, view_index);
@@ -360,7 +361,9 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// activity — every refresh re-arms the phase, so the caret
         /// holds steady while the user types or moves it). When no caret
         /// is showing the animation is removed so the view goes idle.
-        fn reconcileCanvasWidgetCaretBlink(self: *Runtime, view_index: usize) void {
+        /// A full animation list skips the blink, as it always has; a failed
+        /// allocation is returned.
+        fn reconcileCanvasWidgetCaretBlink(self: *Runtime, view_index: usize) !void {
             const view = self.views[view_index];
             const desired = canvasWidgetCaretBlinkTarget(view);
             const previous = view.canvas_widget_caret_blink_id;
@@ -378,8 +381,11 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                 .from_opacity = 1,
                 .to_opacity = 0,
                 .loop = .ping_pong,
-            }) catch return;
-            view.replaceCanvasRenderAnimationDirtyBounds(target.command_id, target.bounds) catch {};
+            }) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                return;
+            };
+            view.replaceCanvasRenderAnimationDirtyBounds(target.command_id, target.bounds) catch |err| if (err == error.OutOfMemory) return err;
             view.canvas_widget_caret_blink_id = target.command_id;
         }
 
@@ -405,7 +411,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// instead of pumping frames forever. Reduced motion arms
         /// nothing: arcs, dials, and placeholder blocks render as
         /// static poses (the segmented emitter bakes its trail then).
-        fn reconcileCanvasWidgetLoopAnimations(self: *Runtime, view_index: usize) void {
+        fn reconcileCanvasWidgetLoopAnimations(self: *Runtime, view_index: usize) !void {
             const view = self.views[view_index];
             var desired_ids: [canvas_limits.max_canvas_widget_loop_animations_per_view]canvas.ObjectId = undefined;
             var desired_count: usize = 0;
@@ -439,8 +445,11 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                                     .to_rotation = 360,
                                     .rotation_center = canvas.spinnerWidgetRotationCenter(laid_out, view.widget_tokens.*),
                                     .loop = .wrap,
-                                }) catch break;
-                                view.replaceCanvasRenderAnimationDirtyBounds(command_id, node.frame) catch {};
+                                }) catch |err| {
+                                    if (err == error.OutOfMemory) return err;
+                                    break;
+                                };
+                                view.replaceCanvasRenderAnimationDirtyBounds(command_id, node.frame) catch |err| if (err == error.OutOfMemory) return err;
                                 desired_ids[desired_count] = command_id;
                                 desired_count += 1;
                             },
@@ -475,11 +484,12 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                                         .from_opacity = 1,
                                         .to_opacity = std.math.clamp(view.widget_tokens.metrics.spinner_tail_opacity, 0, 1),
                                         .loop = .wrap,
-                                    }) catch {
+                                    }) catch |err| {
+                                        if (err == error.OutOfMemory) return err;
                                         armed = false;
                                         break;
                                     };
-                                    view.replaceCanvasRenderAnimationDirtyBounds(command_id, node.frame) catch {};
+                                    view.replaceCanvasRenderAnimationDirtyBounds(command_id, node.frame) catch |err| if (err == error.OutOfMemory) return err;
                                     desired_ids[desired_count] = command_id;
                                     desired_count += 1;
                                 }
@@ -497,8 +507,11 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                                 .from_opacity = 1,
                                 .to_opacity = skeleton_pulse_min_opacity,
                                 .loop = .ping_pong,
-                            }) catch break;
-                            view.replaceCanvasRenderAnimationDirtyBounds(command_id, node.frame) catch {};
+                            }) catch |err| {
+                                if (err == error.OutOfMemory) return err;
+                                break;
+                            };
+                            view.replaceCanvasRenderAnimationDirtyBounds(command_id, node.frame) catch |err| if (err == error.OutOfMemory) return err;
                             desired_ids[desired_count] = command_id;
                             desired_count += 1;
                         },
@@ -507,8 +520,11 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                 }
             }
 
+            // Room for the new set before the old one is retired, so the
+            // tracked set and the removals below stay in step.
+            try view.canvas_widget_loop_animation_ids.ensureCapacity(storage_allocator, desired_count);
             // Remove animations of widgets no longer visible.
-            for (view.canvas_widget_loop_animation_ids[0..view.canvas_widget_loop_animation_count]) |previous_id| {
+            for (view.canvas_widget_loop_animation_ids.slice()) |previous_id| {
                 var still_desired = false;
                 for (desired_ids[0..desired_count]) |desired_id| {
                     if (desired_id == previous_id) {
@@ -518,8 +534,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                 }
                 if (!still_desired) view.removeCanvasRenderAnimation(previous_id);
             }
-            @memcpy(view.canvas_widget_loop_animation_ids[0..desired_count], desired_ids[0..desired_count]);
-            view.canvas_widget_loop_animation_count = desired_count;
+            try view.canvas_widget_loop_animation_ids.replace(storage_allocator, desired_ids[0..desired_count]);
         }
 
         fn existingCanvasRenderAnimationStartNs(view: anytype, id: canvas.ObjectId) ?u64 {

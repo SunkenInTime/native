@@ -408,9 +408,9 @@ test "runtime batches pointer widget display list refreshes" {
     try std.testing.expectApproxEqAbs(-travel, animations[0].from_transform.?.tx, 0.001);
     try std.testing.expectEqual(canvas.Affine.identity(), animations[0].to_transform.?);
     const expected_toggle_dirty = runtimeViewCanvasWidgetDirtyBounds(harness.runtime.views[0], 1, retained.nodes[1].widget.frame).?;
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_render_animation_dirty_bounds_count);
-    try std.testing.expectEqual(canvas.toggleWidgetKnobCommandId(4), harness.runtime.views[0].canvas_render_animation_dirty_bounds[0].id);
-    try std.testing.expectEqualDeep(expected_toggle_dirty, harness.runtime.views[0].canvas_render_animation_dirty_bounds[0].bounds.?);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_render_animation_dirty_bounds.len);
+    try std.testing.expectEqual(canvas.toggleWidgetKnobCommandId(4), harness.runtime.views[0].canvas_render_animation_dirty_bounds.slice()[0].id);
+    try std.testing.expectEqualDeep(expected_toggle_dirty, harness.runtime.views[0].canvas_render_animation_dirty_bounds.slice()[0].bounds.?);
 
     var overrides: [1]canvas.CanvasRenderOverride = undefined;
     const sampled = try canvas.sampleCanvasRenderAnimations(animations, 110 + 60_000_000, &overrides);

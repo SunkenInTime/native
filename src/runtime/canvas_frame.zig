@@ -37,6 +37,7 @@ const runtime_clock = @import("clock.zig");
 const validation = @import("validation.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const runtime_view = @import("view.zig");
+const storage_allocator = @import("grown_array.zig").storage_allocator;
 
 const CanvasPresentationResult = runtime_api.CanvasPresentationResult;
 const max_canvas_diff_changes_per_view = canvas_limits.max_canvas_diff_changes_per_view;
@@ -278,8 +279,8 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             // Replacing NOTHING with NOTHING is a no-op: a rebuild that
             // never declared animations must not schedule work.
             if (animations.len == 0 and
-                self.views[index].canvas_render_animation_count == 0 and
-                self.views[index].canvas_frame_render_override_count == 0)
+                self.views[index].canvas_render_animations.len == 0 and
+                self.views[index].canvas_frame_render_overrides.len == 0)
             {
                 return self.views[index].info();
             }
@@ -299,7 +300,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 } else {
                     self.invalidateFor(.state, self.views[index].frame);
                 }
-            } else if (animations.len == 0 and self.views[index].canvas_frame_render_override_count == 0) {
+            } else if (animations.len == 0 and self.views[index].canvas_frame_render_overrides.len == 0) {
                 // Cleared an inert set (no applied overrides on screen):
                 // nothing painted from it, nothing to repaint.
                 self.invalidateFor(.state, null);
@@ -317,13 +318,15 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             try validateViewLabel(label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-            if (self.views[index].canvas_render_animation_count == 0 and self.views[index].canvas_frame_render_override_count == 0) return self.views[index].info();
-            self.views[index].canvas_render_animation_count = 0;
+            if (self.views[index].canvas_render_animations.len == 0 and self.views[index].canvas_frame_render_overrides.len == 0) return self.views[index].info();
+            self.views[index].canvas_render_animations.clear();
             self.invalidateFor(.state, self.views[index].frame);
             try requestCanvasFrameForView(self, index);
             return self.views[index].info();
         }
 
+        /// Borrowed from the view: valid until its animations next change
+        /// (the storage grows, and moves, as animations are added).
         pub fn canvasRenderAnimations(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror![]const canvas.CanvasRenderAnimation {
             try validateRuntimeViewParent(self, window_id);
             try validateViewLabel(label);
@@ -758,7 +761,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 var baseline_adopted = false;
                 if (self.options.pixel_present_retained_baseline) {
                     if (gatherCanvasPacketCurrentCommands(record_frame)) |current| {
-                        adoptCanvasPixelPresentBaseline(self.views[index], current, record_frame.surface_size, record_frame.scale);
+                        try adoptCanvasPixelPresentBaseline(self.views[index], current, record_frame.surface_size, record_frame.scale);
                         baseline_adopted = true;
                     }
                 }
@@ -935,7 +938,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                         else => return err,
                     };
                     self.frame_profile.end(.present, present_begin);
-                    adoptCanvasPacketBaseline(view, current_commands, packet);
+                    try adoptCanvasPacketBaseline(view, current_commands, packet);
                     view.gpu_present_packet_mode = .patch;
                     view.gpu_present_patch_bytes = base.binary.len;
                     view.gpu_present_patch_upsert_count = stats.upsert_count;
@@ -979,7 +982,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     };
                     self.frame_profile.end(.present, present_begin);
                     view.canvas_packet_generation = generation;
-                    adoptCanvasPacketBaseline(view, current_commands, packet);
+                    try adoptCanvasPacketBaseline(view, current_commands, packet);
                     view.gpu_present_packet_mode = .full;
                     view.gpu_present_patch_bytes = 0;
                     view.gpu_present_patch_upsert_count = 0;
@@ -1702,9 +1705,9 @@ fn findCanvasPacketBaselineIndex(keys: []const u64, sorted: []const u32, key: u6
 /// encoder reads) and returns the edit counts, so callers can decide
 /// patch-vs-full BEFORE paying for the encode.
 fn computeCanvasPacketPatchStats(view: anytype, current: []const CanvasPacketCurrentCommand) CanvasPacketPatchStats {
-    const baseline_count = view.canvas_packet_baseline_count;
-    const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
-    const baseline_fingerprints = view.canvas_packet_baseline_fingerprints[0..baseline_count];
+    const baseline_keys = view.canvas_packet_baseline_keys.slice();
+    const baseline_fingerprints = view.canvas_packet_baseline_fingerprints.slice();
+    const baseline_count = baseline_keys.len;
 
     const scratch = canvas_frame_scratch.get();
     const baseline_sorted = scratch.packet_baseline_sort[0..baseline_count];
@@ -1780,10 +1783,10 @@ const CanvasPacketPatchDirty = struct {
 };
 
 fn canvasPacketPatchDirtyBounds(view: anytype, current: []const CanvasPacketCurrentCommand) ?CanvasPacketPatchDirty {
-    const baseline_count = view.canvas_packet_baseline_count;
-    const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
-    const baseline_fingerprints = view.canvas_packet_baseline_fingerprints[0..baseline_count];
-    const baseline_bounds = view.canvas_packet_baseline_bounds[0..baseline_count];
+    const baseline_keys = view.canvas_packet_baseline_keys.slice();
+    const baseline_fingerprints = view.canvas_packet_baseline_fingerprints.slice();
+    const baseline_bounds = view.canvas_packet_baseline_bounds.slice();
+    const baseline_count = baseline_keys.len;
 
     const scratch = canvas_frame_scratch.get();
     const baseline_sorted = scratch.packet_baseline_sort[0..baseline_count];
@@ -1842,8 +1845,8 @@ fn writeCanvasPacketPatchBinary(
     stats: CanvasPacketPatchStats,
     writer: *std.Io.Writer,
 ) !void {
-    const baseline_count = view.canvas_packet_baseline_count;
-    const baseline_keys = view.canvas_packet_baseline_keys[0..baseline_count];
+    const baseline_keys = view.canvas_packet_baseline_keys.slice();
+    const baseline_count = baseline_keys.len;
     const scratch = canvas_frame_scratch.get();
     const matched = scratch.packet_baseline_matched[0..baseline_count];
     const upserts = scratch.packet_upsert[0..current.len];
@@ -1911,8 +1914,8 @@ fn canvasPacketFullBinaryByteSize(
 
 /// A successful retained present (full or patch) makes `current` the
 /// view's baseline: the engine-side mirror of what the host now retains.
-fn adoptCanvasPacketBaseline(view: anytype, current: []const CanvasPacketCurrentCommand, packet: canvas.CanvasGpuPacket) void {
-    adoptCanvasBaselineEntries(view, current, packet.surface_size, packet.scale);
+fn adoptCanvasPacketBaseline(view: anytype, current: []const CanvasPacketCurrentCommand, packet: canvas.CanvasGpuPacket) !void {
+    try adoptCanvasBaselineEntries(view, current, packet.surface_size, packet.scale);
     view.canvas_packet_baseline_pixels = false;
 }
 
@@ -1921,18 +1924,29 @@ fn adoptCanvasPacketBaseline(view: anytype, current: []const CanvasPacketCurrent
 /// describes what the presented PIXEL buffer shows. Marked so the packet
 /// patch gate refuses it — only the frame planner's dirty-bounds
 /// refinement may consume a pixel-adopted baseline.
-fn adoptCanvasPixelPresentBaseline(view: anytype, current: []const CanvasPacketCurrentCommand, surface_size: geometry.SizeF, scale: f32) void {
-    adoptCanvasBaselineEntries(view, current, surface_size, scale);
+fn adoptCanvasPixelPresentBaseline(view: anytype, current: []const CanvasPacketCurrentCommand, surface_size: geometry.SizeF, scale: f32) !void {
+    try adoptCanvasBaselineEntries(view, current, surface_size, scale);
     view.canvas_packet_baseline_pixels = true;
 }
 
-fn adoptCanvasBaselineEntries(view: anytype, current: []const CanvasPacketCurrentCommand, surface_size: geometry.SizeF, scale: f32) void {
-    for (current, 0..) |entry, index| {
-        view.canvas_packet_baseline_keys[index] = entry.key;
-        view.canvas_packet_baseline_fingerprints[index] = entry.fingerprint;
-        view.canvas_packet_baseline_bounds[index] = entry.bounds;
+/// The baseline is invalid until all three mirrors hold `current`, so a
+/// failed allocation costs the next present a FULL resync and surfaces as
+/// `error.OutOfMemory`; the mirrors never disagree on their count.
+fn adoptCanvasBaselineEntries(view: anytype, current: []const CanvasPacketCurrentCommand, surface_size: geometry.SizeF, scale: f32) !void {
+    view.canvas_packet_baseline_valid = false;
+    errdefer {
+        view.canvas_packet_baseline_keys.clear();
+        view.canvas_packet_baseline_fingerprints.clear();
+        view.canvas_packet_baseline_bounds.clear();
     }
-    view.canvas_packet_baseline_count = current.len;
+    try view.canvas_packet_baseline_keys.resize(storage_allocator, current.len);
+    try view.canvas_packet_baseline_fingerprints.resize(storage_allocator, current.len);
+    try view.canvas_packet_baseline_bounds.resize(storage_allocator, current.len);
+    for (current, view.canvas_packet_baseline_keys.sliceMut(), view.canvas_packet_baseline_fingerprints.sliceMut(), view.canvas_packet_baseline_bounds.sliceMut()) |entry, *key, *fingerprint, *bounds| {
+        key.* = entry.key;
+        fingerprint.* = entry.fingerprint;
+        bounds.* = entry.bounds;
+    }
     view.canvas_packet_baseline_surface_size = surface_size;
     view.canvas_packet_baseline_scale = scale;
     view.canvas_packet_baseline_valid = true;
@@ -2077,7 +2091,7 @@ fn canvasRenderAnimationScheduleDirtyBounds(view: anytype, animations: []const c
     var bounds: ?geometry.RectF = null;
     var found_any = false;
 
-    for (view.canvas_frame_render_overrides[0..view.canvas_frame_render_override_count]) |override| {
+    for (view.canvasFrameRenderOverrides()) |override| {
         const rect = canvasCommandBoundsById(display_list, override.id) orelse continue;
         found_any = true;
         bounds = unionRects(bounds, rect);

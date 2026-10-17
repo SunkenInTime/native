@@ -451,6 +451,14 @@ pub const Runtime = struct {
         canvas.bumpTextMeasureGeneration();
     }
 
+    /// Free what the runtime's views allocated as they grew (removing a view
+    /// frees its own). The runtime is unusable afterward; the memory holding
+    /// it stays the caller's to free.
+    pub fn deinit(self: *Runtime) void {
+        for (self.views[0..self.view_count]) |view| view.deinit();
+        self.view_count = 0;
+    }
+
     fn fieldHasSmallDefault(comptime field: std.builtin.Type.StructField) bool {
         // Large fixed-capacity arrays default to undefined; skip writing
         // them so construction touches kilobytes, not megabytes.
@@ -866,6 +874,7 @@ pub fn TestHarness() type {
         }
 
         pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
+            self.runtime.deinit();
             gpa.destroy(self);
         }
 

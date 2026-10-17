@@ -1103,6 +1103,7 @@ fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, 
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
+    defer runtime.deinit();
     const run_result: anyerror!void = if (request.session_journal_path) |journal_path|
         runCaptureJournal(&driver, runtime, app, init.io, journal_path)
     else
@@ -1252,6 +1253,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
+    defer runtime.deinit();
 
     try runtime.run(app);
     finishSessionRecorder(session_recorder);
@@ -1307,6 +1309,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
+    defer runtime.deinit();
     native_sdk.runtime.launch_timing.lap("runtime_ready");
 
     try runtime.run(app);
@@ -1359,6 +1362,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
+    defer runtime.deinit();
 
     try runtime.run(app);
     finishSessionRecorder(session_recorder);
@@ -1416,6 +1420,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
+    defer runtime.deinit();
 
     try runtime.run(app);
     finishSessionRecorder(session_recorder);
@@ -1525,6 +1530,7 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
         .security = options.security,
         .menus = options.menus,
     });
+    defer runtime.deinit();
 
     const verify = if (init.environ_map.get("NATIVE_SDK_SESSION_VERIFY")) |value|
         !std.mem.eql(u8, value, "0")

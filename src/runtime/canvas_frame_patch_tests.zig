@@ -499,11 +499,11 @@ test "reference screenshots preserve the retained baseline for a later patch pre
     const view = harness.runtime.views[0];
     try std.testing.expect(view.canvas_packet_baseline_valid);
     const generation = view.canvas_packet_generation;
-    const baseline_count = view.canvas_packet_baseline_count;
+    const baseline_count = view.canvas_packet_baseline_keys.len;
     var baseline_keys: [40]u64 = undefined;
     var baseline_fingerprints: [40]u64 = undefined;
-    @memcpy(baseline_keys[0..baseline_count], view.canvas_packet_baseline_keys[0..baseline_count]);
-    @memcpy(baseline_fingerprints[0..baseline_count], view.canvas_packet_baseline_fingerprints[0..baseline_count]);
+    @memcpy(baseline_keys[0..baseline_count], view.canvas_packet_baseline_keys.slice());
+    @memcpy(baseline_fingerprints[0..baseline_count], view.canvas_packet_baseline_fingerprints.slice());
     const present_count = harness.null_platform.gpu_surface_packet_present_binary_count;
 
     const screenshot = try harness.runtime.renderCanvasScreenshot(1, "canvas", null, buffers.pixels, buffers.scratch);
@@ -512,9 +512,9 @@ test "reference screenshots preserve the retained baseline for a later patch pre
     try std.testing.expectEqual(present_count, harness.null_platform.gpu_surface_packet_present_binary_count);
     try std.testing.expect(view.canvas_packet_baseline_valid);
     try std.testing.expectEqual(generation, view.canvas_packet_generation);
-    try std.testing.expectEqual(baseline_count, view.canvas_packet_baseline_count);
-    try std.testing.expectEqualSlices(u64, baseline_keys[0..baseline_count], view.canvas_packet_baseline_keys[0..baseline_count]);
-    try std.testing.expectEqualSlices(u64, baseline_fingerprints[0..baseline_count], view.canvas_packet_baseline_fingerprints[0..baseline_count]);
+    try std.testing.expectEqual(baseline_count, view.canvas_packet_baseline_keys.len);
+    try std.testing.expectEqualSlices(u64, baseline_keys[0..baseline_count], view.canvas_packet_baseline_keys.slice());
+    try std.testing.expectEqualSlices(u64, baseline_fingerprints[0..baseline_count], view.canvas_packet_baseline_fingerprints.slice());
 
     _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{
         .commands = buildScriptScene(1, 6, 0, &text_storage, &commands),
