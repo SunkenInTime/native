@@ -350,6 +350,11 @@ pub const Runtime = struct {
     canvas_widget_reconcile_text_bytes: [canvas_limits.max_canvas_widget_text_bytes_per_view]u8 align(storage_align) = undefined,
     canvas_widget_invalidations_scratch: [canvas_limits.max_canvas_widget_invalidations_per_view]canvas.WidgetInvalidation align(storage_align) = undefined,
     canvas_widget_copy_scratch: runtime_canvas_widget_runtime.CanvasWidgetCopyScratch align(storage_align) = undefined,
+    /// The loop animations a display refresh wants, collected before any is
+    /// armed (canvas_widget_display.zig): 9.5 KiB kept off the stack, which
+    /// is 1 MiB on a mobile main thread. Touched only by views showing a
+    /// spinner or skeleton.
+    canvas_widget_loop_animation_scratch: [canvas_limits.max_canvas_widget_loop_animations_per_view]runtime_canvas_widget_display.DesiredLoopAnimation align(storage_align) = undefined,
     canvas_widget_display_list_refresh_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
     canvas_widget_accessibility_publish_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
     canvas_frame_render_commands: [max_canvas_commands_per_view]canvas.RenderCommand align(storage_align) = undefined,
@@ -476,13 +481,16 @@ pub const Runtime = struct {
     }
 
     /// Release what the runtime allocated beyond its own memory: the
-    /// registered images' pixels and fonts' bytes. Call before freeing the
-    /// Runtime.
+    /// registered images' pixels, fonts' bytes, and what its views
+    /// allocated as they grew (removing a view frees its own). Call before
+    /// freeing the Runtime; it is unusable afterward.
     pub fn deinit(self: *Runtime) void {
         for (self.canvas_image_pixels[0..self.canvas_image_count]) |pixels| std.heap.page_allocator.free(pixels);
         self.canvas_image_count = 0;
         for (self.canvas_font_bytes[0..self.canvas_font_count]) |bytes| std.heap.page_allocator.free(bytes);
         self.canvas_font_count = 0;
+        for (self.views[0..self.view_count]) |view| view.deinit();
+        self.view_count = 0;
     }
 
     fn fieldHasSmallDefault(comptime field: std.builtin.Type.StructField) bool {

@@ -819,6 +819,7 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     const runtime = try std.testing.allocator.create(Runtime);
     defer std.testing.allocator.destroy(runtime);
     Runtime.initAt(runtime, .{ .platform = platform_state.platformValue() });
+    defer runtime.deinit();
     var app_state: TestApp = .{};
     try runtime.dispatchPlatformEvent(app_state.app(), .app_start);
     _ = try runtime.createView(.{

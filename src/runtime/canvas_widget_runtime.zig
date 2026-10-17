@@ -175,13 +175,27 @@ pub fn canvasWidgetSourceValueKind(kind: canvas.WidgetKind) bool {
     return kind == .scroll_view or kind == .split;
 }
 
+fn canvasWidgetHasSourceScrollEntry(node: canvas.WidgetLayoutNode) bool {
+    return canvasWidgetSourceValueKind(node.widget.kind) and node.widget.id != 0;
+}
+
+/// How many entries `collectCanvasWidgetScrollOffsetEntries` writes for
+/// `nodes` given room for all of them.
+pub fn countCanvasWidgetScrollOffsetEntries(nodes: []const canvas.WidgetLayoutNode) usize {
+    var count: usize = 0;
+    for (nodes) |node| {
+        if (canvasWidgetHasSourceScrollEntry(node)) count += 1;
+    }
+    return count;
+}
+
 pub fn collectCanvasWidgetScrollOffsetEntries(
     nodes: []const canvas.WidgetLayoutNode,
     output: []CanvasWidgetSourceScrollEntry,
 ) []const CanvasWidgetSourceScrollEntry {
     var len: usize = 0;
     for (nodes) |node| {
-        if (!canvasWidgetSourceValueKind(node.widget.kind) or node.widget.id == 0) continue;
+        if (!canvasWidgetHasSourceScrollEntry(node)) continue;
         if (len >= output.len) break;
         output[len] = .{ .id = node.widget.id, .value = node.widget.value };
         len += 1;
@@ -252,13 +266,27 @@ pub fn canvasWidgetSourceControlKind(kind: canvas.WidgetKind) bool {
     return kind == .toggle_button or kind == .slider or kind == .accordion or canvasWidgetSelectionClearsSiblings(kind);
 }
 
+fn canvasWidgetHasSourceControlEntry(node: canvas.WidgetLayoutNode) bool {
+    return node.widget.id != 0 and canvasWidgetSourceControlKind(node.widget.kind);
+}
+
+/// How many entries `collectCanvasWidgetSourceControlEntries` writes for
+/// `nodes` given room for all of them.
+pub fn countCanvasWidgetSourceControlEntries(nodes: []const canvas.WidgetLayoutNode) usize {
+    var count: usize = 0;
+    for (nodes) |node| {
+        if (canvasWidgetHasSourceControlEntry(node)) count += 1;
+    }
+    return count;
+}
+
 pub fn collectCanvasWidgetSourceControlEntries(
     nodes: []const canvas.WidgetLayoutNode,
     output: []CanvasWidgetSourceControlEntry,
 ) []const CanvasWidgetSourceControlEntry {
     var len: usize = 0;
     for (nodes) |node| {
-        if (node.widget.id == 0 or !canvasWidgetSourceControlKind(node.widget.kind)) continue;
+        if (!canvasWidgetHasSourceControlEntry(node)) continue;
         if (len >= output.len) break;
         output[len] = .{
             .id = node.widget.id,

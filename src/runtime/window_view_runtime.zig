@@ -620,6 +620,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn removeViewAt(self: *Runtime, index: usize) void {
             if (index >= self.view_count) return;
+            self.views[index].deinit();
             self.releaseWidgetTokens(self.views[index].widget_tokens);
             self.view_slot_used.unset((@intFromPtr(self.views[index]) - @intFromPtr(&self.view_slots)) / @sizeOf(@TypeOf(self.view_slots[0])));
             std.mem.copyForwards(*@TypeOf(self.view_slots[0]), self.views[index .. self.view_count - 1], self.views[index + 1 .. self.view_count]);
