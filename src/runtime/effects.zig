@@ -1452,6 +1452,21 @@ pub fn Effects(comptime Msg: type) type {
             return .{ .allocator = allocator };
         }
 
+        /// `init` in place: every field from its default except the two
+        /// rings, which are written before they are read. Returning `Self`
+        /// by value builds all of it, rings included, and copies it, so
+        /// every ring page becomes resident in every app.
+        pub fn initInPlace(self: *Self, allocator: std.mem.Allocator) void {
+            inline for (std.meta.fields(Self)) |field| {
+                if (comptime std.mem.eql(u8, field.name, "queue") or std.mem.eql(u8, field.name, "pending_exits")) continue;
+                if (comptime std.mem.eql(u8, field.name, "allocator")) {
+                    self.allocator = allocator;
+                } else {
+                    @field(self, field.name) = field.defaultValue().?;
+                }
+            }
+        }
+
         /// Kill every running effect, wait for the workers to finish
         /// (draining their final queue posts), and release the executor
         /// io. Bounded: gives up waiting after ~5s.

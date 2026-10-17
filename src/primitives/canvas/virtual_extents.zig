@@ -159,8 +159,16 @@ pub const VirtualExtentTable = struct {
     anchor_physical: usize = 0,
     anchor_offset_before: f32 = 0,
 
+    /// Field by field, skipping the arrays: they are declared `undefined`
+    /// and `sync` writes every entry it later reads (including the
+    /// `chunk_prefix[chunk_count]` total) before any read. `self.* = .{}`
+    /// compiled to a copy of the whole default image, which made every
+    /// page of them resident.
     pub fn reset(self: *VirtualExtentTable) void {
-        self.* = .{};
+        inline for (std.meta.fields(VirtualExtentTable)) |field| {
+            if (comptime @typeInfo(field.type) == .array) continue;
+            @field(self, field.name) = field.defaultValue().?;
+        }
     }
 
     fn estimateAt(self: *const VirtualExtentTable, physical: usize) f32 {

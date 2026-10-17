@@ -180,7 +180,25 @@ pub const DispatchError = automation.snapshot.DispatchError;
 /// always degrades, regardless of policy.
 pub const DispatchErrorPolicy = enum { degrade, propagate };
 
+/// Scratch for regenerating a view's widget display list. It lives in the
+/// heap-allocated Runtime rather than on the stack: as locals these arrays
+/// made a ~1 MiB frame, and the Windows stack probe touches every page of a
+/// frame on entry, so they were resident in every app on every refresh.
+/// Here only the pages a refresh actually writes become resident. One
+/// scratch serves every view because a refresh must not start while
+/// another is using it; `display_list_refresh_active` enforces that (a
+/// nested refresh, e.g. from a text-measurement callback, fails with
+/// `error.DisplayListRefreshReentered` instead of overwriting the outer
+/// refresh's commands).
+pub const DisplayListRefreshScratch = struct {
+    commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand,
+    copied: runtime_view.CanvasDisplayListScratch,
+    changes: [canvas_limits.max_canvas_diff_changes_per_view]canvas.DiffChange,
+};
+
 pub const Runtime = struct {
+    display_list_refresh_scratch: DisplayListRefreshScratch = undefined,
+    display_list_refresh_active: bool = false,
     options: Options,
     surface: platform.Surface,
     appearance: platform.Appearance = .{},
