@@ -182,6 +182,15 @@ extern fn native_sdk_windows_audio_seek(host: *WindowsHost, position_ms: u64) c_
 extern fn native_sdk_windows_audio_set_volume(host: *WindowsHost, volume: f64) c_int;
 extern fn native_sdk_windows_audio_spectrum_supported(host: *WindowsHost) c_int;
 
+/// The host loads some system DLLs on first use (lazy_dll.h). When one
+/// cannot load, the host calls this with a message naming the feature, the
+/// DLL, the function and the Windows error; the feature's call then fails
+/// the way it already fails. std.log so a host's logFn (the widget runtime
+/// routes it to the per-widget log file) keeps the line.
+export fn native_sdk_windows_report_library_failure(message: [*]const u8, message_len: usize) void {
+    std.log.err("{s}", .{message[0..message_len]});
+}
+
 const WindowsOpenDialogOpts = extern struct {
     title: [*]const u8,
     title_len: usize,
@@ -1238,7 +1247,9 @@ fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyer
 }
 
 /// Map the audio host's synchronous load result: 0 loaded, 1 the file is
-/// missing/unreadable, anything else a decode failure. The asynchronous
+/// missing/unreadable, 3 Media Foundation itself is unavailable (the host
+/// has logged which DLL and what to install), anything else a decode
+/// failure. The asynchronous
 /// `.loaded` acknowledgment (with the decoded duration) follows as an
 /// `.audio` event on the message loop.
 fn audioLoad(context: ?*anyopaque, path: []const u8) anyerror!void {
@@ -1247,14 +1258,16 @@ fn audioLoad(context: ?*anyopaque, path: []const u8) anyerror!void {
     return switch (native_sdk_windows_audio_load(self.host, path.ptr, path.len)) {
         0 => {},
         1 => error.AudioSourceNotFound,
+        3 => error.AudioPlaybackUnavailable,
         else => error.AudioDecodeFailed,
     };
 }
 
 /// Map the streaming host's synchronous result: 1 a verified cache entry
 /// is playing locally, 0 a progressive stream started (the `.loaded`
-/// acknowledgment follows when the topology is ready), anything else the
-/// URL itself was unusable. Network failures after this point are
+/// acknowledgment follows when the topology is ready), 3 Media
+/// Foundation is unavailable (the cache entry is left alone), anything
+/// else the URL itself was unusable. Network failures after this point are
 /// asynchronous and arrive as `.audio`/`.failed` events.
 fn audioLoadUrl(context: ?*anyopaque, url: []const u8, cache_path: []const u8, expected_bytes: u64) anyerror!platform_mod.AudioLoadResolution {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
@@ -1262,6 +1275,7 @@ fn audioLoadUrl(context: ?*anyopaque, url: []const u8, cache_path: []const u8, e
     return switch (native_sdk_windows_audio_load_url(self.host, url.ptr, url.len, cache_path.ptr, cache_path.len, expected_bytes)) {
         0 => .stream,
         1 => .cache,
+        3 => error.AudioPlaybackUnavailable,
         else => error.InvalidAudioOptions,
     };
 }
