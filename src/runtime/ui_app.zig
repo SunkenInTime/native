@@ -3499,3 +3499,49 @@ fn effectsMinimizeWindowByLabel(context: *anyopaque, window_label: []const u8) b
     runtime.minimizeWindow(window_id) catch return false;
     return true;
 }
+
+
+test "extent claims reset released and recycled tables" {
+    const ReviewApp = UiApp(struct {}, enum { noop });
+    const app = try std.testing.allocator.create(ReviewApp);
+    defer std.testing.allocator.destroy(app);
+    // Only fields used by the claim/lookup methods; poison all table bytes.
+    @memset(std.mem.sliceAsBytes(&app.virtual_extent_tables), 0xa5);
+    app.virtual_extent_table_count = 0;
+    app.virtual_window_count = 0;
+    try std.testing.expect(app.virtualExtentTableForId(1) == null);
+    const first = app.claimVirtualExtentTable(1).?;
+    try std.testing.expectEqual(@as(usize, 1), app.virtual_extent_table_count);
+    _ = first.sync(.{.id = 1, .item_count = 1000, .uniform_estimate = 10});
+    first.beginCorrections(2, null);
+    first.recordMeasured(0, 300);
+    first.endCorrections();
+    try std.testing.expect(first.totalExtent() > 10000);
+    try std.testing.expectEqual(first, app.claimVirtualExtentTable(1).?);
+    // Release and claim with both a new and the original list identity.
+    first.reset();
+    for ([_]u64{2,1}) |id| {
+        const table = app.claimVirtualExtentTable(id).?;
+        try std.testing.expectEqual(first, table);
+        _ = table.sync(.{.id = id, .item_count = 3, .uniform_estimate = 7});
+        try std.testing.expectEqual(@as(f32,21), table.totalExtent());
+        try std.testing.expectEqual(@as(usize,0), table.measured_count);
+        try std.testing.expectEqual(@as(f32,0), table.pending_offset_delta);
+        table.reset();
+    }
+    // Fill all slots, with poisoned old measurements, then force recycling.
+    for (0..canvas.max_virtual_windows) |i| {
+        const table = app.claimVirtualExtentTable(@intCast(10+i)).?;
+        _ = table.sync(.{.id = @intCast(10+i), .item_count = 1000, .uniform_estimate = 10});
+        table.beginCorrections(2, null);
+        table.recordMeasured(0, 300);
+        table.endCorrections();
+    }
+    try std.testing.expectEqual(canvas.max_virtual_windows, app.virtual_extent_table_count);
+    const recycled = app.claimVirtualExtentTable(100).?;
+    try std.testing.expectEqual(first, recycled);
+    _ = recycled.sync(.{.id = 100, .item_count = 3, .uniform_estimate = 7});
+    try std.testing.expectEqual(@as(f32,21), recycled.totalExtent());
+    try std.testing.expectEqual(@as(usize,0), recycled.measured_count);
+    try std.testing.expectEqual(@as(f32,0), recycled.pending_offset_delta);
+}

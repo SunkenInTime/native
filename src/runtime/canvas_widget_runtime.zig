@@ -1362,3 +1362,43 @@ pub fn canvasWidgetGroupFocusEdgeTarget(layout: canvas.WidgetLayoutTree, focused
     }
     return null;
 }
+
+
+test "reconcile large small large agrees with fresh indexes" {
+    const a = std.testing.allocator;
+    const n = 1024;
+    const previous = try a.alloc(canvas.WidgetLayoutNode, n); defer a.free(previous);
+    const next = try a.alloc(canvas.WidgetLayoutNode, n); defer a.free(next);
+    const reused = try a.alloc(canvas.WidgetLayoutNode, n); defer a.free(reused);
+    const fresh = try a.alloc(canvas.WidgetLayoutNode, n); defer a.free(fresh);
+    const scratch = try a.create(CanvasWidgetCopyScratch); defer a.destroy(scratch);
+    const scrolls = try a.alloc(CanvasWidgetSourceScrollEntry, n); defer a.free(scrolls);
+    const saved = try a.create(CanvasWidgetReconcileIndexScratch); defer a.destroy(saved);
+    const source = try a.alloc(CanvasWidgetSourceControlEntry, n); defer a.free(source);
+    for ([_]usize{1024,128,1024,63,0,1024}, 0..) |len, pass| {
+        for (previous[0..len], next[0..len], 0..) |*old, *new, i| {
+            const id: u64 = @intCast(pass * 4096 + i + 1);
+            const rect = geometry.RectF.init(0, @floatFromInt(i * 24), 100, 24);
+            old.* = .{.widget = .{.id = id, .kind = if (i % 2 == 0) .slider else .text_field, .value = 0.75, .text = "retained"}, .frame = rect, .depth = 0};
+            new.* = old.*;
+            new.widget.value = 0.25;
+            new.widget.text = "source";
+            if (i % 7 == 0) new.widget.id += 200000; // misses amid hits
+            source[i] = .{.id = id, .kind = old.widget.kind, .value = 0.25};
+            scratch.source_semantics[i] = .{.id = id, .role = .button, .label = "label", .bounds = rect, .state = .{}};
+        }
+        const H = struct {
+            fn run(old: []const canvas.WidgetLayoutNode, new: []const canvas.WidgetLayoutNode, src: []const CanvasWidgetSourceControlEntry, out: []canvas.WidgetLayoutNode, s: *CanvasWidgetCopyScratch, scroll: []CanvasWidgetSourceScrollEntry) !canvas.WidgetLayoutTree {
+                return canvasWidgetLayoutTreeWithRuntimeReconcileState(.{.nodes = old}, .{.nodes = new}, s.source_semantics[0..old.len], &.{}, &.{}, src, out, &s.control_entries, scroll, &s.text_entries, &s.text_bytes, .{}, &.{}, 0);
+            }
+        };
+        const actual = try H.run(previous[0..len], next[0..len], source[0..len], reused, scratch, scrolls);
+        const shared = canvas_widget_reconcile_index_scratch.get();
+        saved.* = shared.*;
+        @memset(std.mem.asBytes(shared), 0); // fresh, fully cleared reference
+        const expected = try H.run(previous[0..len], next[0..len], source[0..len], fresh, scratch, scrolls);
+        try std.testing.expectEqualDeep(expected.nodes, actual.nodes);
+        shared.* = saved.*; // preserve the actual large/small history
+        if (len > 2) try std.testing.expectEqual(@as(f32, 0.75), actual.nodes[2].widget.value);
+    }
+}

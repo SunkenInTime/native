@@ -809,3 +809,31 @@ fn unionOptionalBounds(a: ?geometry.RectF, b: ?geometry.RectF) ?geometry.RectF {
 fn nonNegative(value: f32) f32 {
     return @max(0, value);
 }
+
+
+test "widget diff large small large agrees with fresh tables" {
+    const a = std.testing.allocator;
+    const old = try a.alloc(WidgetLayoutNode, 1024); defer a.free(old);
+    const new = try a.alloc(WidgetLayoutNode, 1024); defer a.free(new);
+    const reused = try a.alloc(WidgetInvalidation, 2048); defer a.free(reused);
+    const fresh = try a.alloc(WidgetInvalidation, 2048); defer a.free(fresh);
+    for ([_]usize{1024,64,1024,63,0,1024}, 0..) |len, pass| {
+        for (old[0..len], new[0..len], 0..) |*p, *q, i| {
+            const rect = geometry.RectF.init(0, @floatFromInt(i * 24), 100, 24);
+            p.* = .{.widget = .{.id = @intCast(pass * 4096 + i + 1), .kind = .button, .text = "old"}, .frame = rect, .depth = 0};
+            q.* = p.*;
+            if (i % 3 == 0) q.widget.text = "new";
+            if (i % 7 == 0) q.widget.id += 200000;
+        }
+        const before = canvas.WidgetLayoutTree{.nodes = old[0..len]};
+        const after = canvas.WidgetLayoutTree{.nodes = new[0..len]};
+        const actual = try diffWidgetLayoutTrees(before, after, .{}, reused);
+        const shared = diff_widget_id_scratch.get();
+        const saved = shared.*;
+        @memset(std.mem.asBytes(shared), 0);
+        const expected = try diffWidgetLayoutTrees(before, after, .{}, fresh);
+        try std.testing.expectEqualDeep(expected, actual);
+        shared.* = saved;
+        if (len != 0) try std.testing.expect(actual.len != 0);
+    }
+}

@@ -651,3 +651,29 @@ pub const Builder = struct {
         try self.append(.{ .blur = value });
     }
 };
+
+
+test "display diff large small large agrees with fresh tables" {
+    const a = std.testing.allocator;
+    const old = try a.alloc(CanvasCommand, 2048); defer a.free(old);
+    const new = try a.alloc(CanvasCommand, 2048); defer a.free(new);
+    const reused = try a.alloc(DiffChange, 4096); defer a.free(reused);
+    const fresh = try a.alloc(DiffChange, 4096); defer a.free(fresh);
+    for ([_]usize{2048,64,2048,63,0,2048}, 0..) |len, pass| {
+        for (old[0..len], new[0..len], 0..) |*p, *q, i| {
+            p.* = .{.fill_rect = .{.id = @intCast(pass * 8192 + i + 1), .rect = geometry.RectF.init(0, @floatFromInt(i), 10, 10), .fill = .{.color = .{.r=1,.g=0,.b=0,.a=1}}}};
+            q.* = p.*;
+            if (i % 3 == 0) q.fill_rect.rect.width += 1;
+            if (i % 7 == 0) q.fill_rect.id += 200000;
+        }
+        const before = DisplayList{.commands = old[0..len]};
+        const after = DisplayList{.commands = new[0..len]};
+        const actual = try before.diff(after, reused);
+        const shared = diff_id_scratch.get();
+        const saved = shared.*;
+        @memset(std.mem.asBytes(shared), 0);
+        const expected = try before.diff(after, fresh);
+        try std.testing.expectEqualDeep(expected, actual);
+        shared.* = saved;
+    }
+}

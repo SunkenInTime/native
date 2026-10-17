@@ -183,3 +183,27 @@ test "hash slots size each build to its entries and read only that prefix" {
     var empty = table.probe(mixHash(11));
     try std.testing.expectEqual(@as(?u32, null), table.next(&empty));
 }
+
+test "colliding probes wrap inside each reset prefix at half full" {
+    var table: HashSlots(4096) = undefined;
+    @memset(&table.slots, 0xdeadbeef);
+    for ([_]usize{2048,64,2048,65,1,0,1023,1024,2048}) |count| {
+        table.reset(count);
+        // Start at the last slot so every nonempty chain wraps around.
+        const hash: u64 = @intCast(table.capacity - 1);
+        for (0..count) |i| {
+            var p = table.probe(hash);
+            while (table.next(&p)) |_| {}
+            table.insert(p, @intCast(i));
+        }
+        var p = table.probe(hash);
+        var seen: usize = 0;
+        while (table.next(&p)) |candidate| {
+            try std.testing.expectEqual(@as(u32, @intCast(seen)), candidate);
+            seen += 1;
+            try std.testing.expect(p.pos < table.capacity);
+        }
+        try std.testing.expectEqual(count, seen);
+        try std.testing.expect(table.len <= table.capacity / 2);
+    }
+}
