@@ -1570,7 +1570,7 @@ test "runtime click focus shows caret, ring, and blink; blur drops them" {
     view.focused = false;
     _ = try harness.runtime.emitCanvasWidgetDisplayListWithStoredTokens(1, "canvas");
     try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvas_widget_caret_blink_id);
-    try std.testing.expectEqual(@as(usize, 0), view.canvas_render_animation_count);
+    try std.testing.expectEqual(@as(usize, 0), view.canvas_render_animations.len);
     saw_caret = false;
     saw_ring = false;
     display_list = try harness.runtime.canvasDisplayList(1, "canvas");

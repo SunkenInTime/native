@@ -101,7 +101,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
         }
 
         pub fn canvasWidgetScrollState(self: *const RuntimeView, scroll_index: usize, scroll_node: canvas.WidgetLayoutNode, viewport: geometry.RectF) canvas.ScrollState {
-            const retained = self.widget_scroll_states[scroll_index];
+            const retained = self.widget_scroll_states.slice()[scroll_index];
             return .{
                 .offset = scroll_node.widget.value,
                 .velocity = retained.velocity,
@@ -166,7 +166,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     break :discrete state.clamped();
                 },
             };
-            self.widget_scroll_states[scroll_index] = next;
+            self.widget_scroll_states.sliceMut()[scroll_index] = next;
             if (next.offset == current.offset) return null;
 
             const offset_delta = next.offset - current.offset;
@@ -223,7 +223,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             var next = current;
             next.offset = offset;
             next.velocity = 0;
-            self.widget_scroll_states[scroll_index] = next;
+            self.widget_scroll_states.sliceMut()[scroll_index] = next;
             if (next.offset == current.offset) return null;
 
             const offset_delta = next.offset - current.offset;
@@ -252,7 +252,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             };
             next.velocity = 0;
             next = next.clamped();
-            self.widget_scroll_states[scroll_index] = next;
+            self.widget_scroll_states.sliceMut()[scroll_index] = next;
             if (next.offset == current.offset) return null;
 
             const offset_delta = next.offset - current.offset;
@@ -276,19 +276,19 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
 
                 const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
                 if (viewport.isEmpty()) {
-                    self.widget_scroll_states[scroll_index].velocity = 0;
+                    self.widget_scroll_states.sliceMut()[scroll_index].velocity = 0;
                     continue;
                 }
 
                 const physics = canvas.widgetScrollPhysics(scroll_node.widget, self.widget_tokens.scroll);
                 const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport);
                 if (!current.needsKineticStep(physics)) {
-                    self.widget_scroll_states[scroll_index].velocity = 0;
+                    self.widget_scroll_states.sliceMut()[scroll_index].velocity = 0;
                     continue;
                 }
 
                 const next = current.stepKinetic(dt_ms, physics);
-                self.widget_scroll_states[scroll_index] = next;
+                self.widget_scroll_states.sliceMut()[scroll_index] = next;
                 if (next.offset == current.offset) continue;
 
                 const offset_delta = next.offset - current.offset;

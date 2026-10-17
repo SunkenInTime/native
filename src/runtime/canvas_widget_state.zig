@@ -112,10 +112,11 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const disclosure_plan = planCanvasWidgetDisclosureTween(self, index, previous_layout, reconciled_layout);
             const previous_cursor = self.views[index].canvas_widget_cursor;
             const previous_widget_revision = self.views[index].widget_revision;
+            try self.views[index].reserveCanvasWidgetSourceMirrors(layout);
             try self.views[index].copyWidgetLayoutTree(reconciled_layout, &self.canvas_widget_copy_scratch);
             try self.views[index].copyCanvasWidgetSourceText(layout);
-            self.views[index].copyCanvasWidgetSourceScroll(layout);
-            self.views[index].copyCanvasWidgetSourceControls(layout);
+            try self.views[index].copyCanvasWidgetSourceScroll(layout);
+            try self.views[index].copyCanvasWidgetSourceControls(layout);
             // Push the reconciled regions (frames, content extents,
             // diverged offsets) to the native scroll drivers.
             ScrollDriverMethods(Runtime).syncCanvasWidgetScrollDriversForView(self, index);
