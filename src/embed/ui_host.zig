@@ -172,9 +172,9 @@ pub fn UiAppHost(comptime AppDef: type) type {
 
         pub fn destroy(self: *Self) void {
             host.disableAutomation(self);
+            self.embedded.runtime.deinit();
             self.render_memo.deinit();
             self.ui.deinit();
-            self.embedded.runtime.deinit();
             std.heap.page_allocator.destroy(self);
         }
 

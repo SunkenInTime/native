@@ -1072,6 +1072,7 @@ fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, 
     }
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     var driver: CaptureDriver = .{
         .io = init.io,
         .null_platform = &null_platform,
@@ -1103,7 +1104,6 @@ fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, 
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
-    defer runtime.deinit();
     const run_result: anyerror!void = if (request.session_journal_path) |journal_path|
         runCaptureJournal(&driver, runtime, app, init.io, journal_path)
     else
@@ -1236,6 +1236,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = null_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1253,7 +1254,6 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
-    defer runtime.deinit();
 
     try runtime.run(app);
     finishSessionRecorder(session_recorder);
@@ -1292,6 +1292,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = mac_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1309,7 +1310,6 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
-    defer runtime.deinit();
     native_sdk.runtime.launch_timing.lap("runtime_ready");
 
     try runtime.run(app);
@@ -1345,6 +1345,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = linux_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1362,7 +1363,6 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
-    defer runtime.deinit();
 
     try runtime.run(app);
     finishSessionRecorder(session_recorder);
@@ -1397,6 +1397,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = windows_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1420,7 +1421,6 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
-    defer runtime.deinit();
 
     try runtime.run(app);
     finishSessionRecorder(session_recorder);
@@ -1517,6 +1517,7 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
     }
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     // Bridge policy and security must match what the recording ran
     // under (they gate replayed bridge_message dispatch); automation,
     // window-state restore, and tracing stay off — replay consumes only
@@ -1530,7 +1531,6 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
         .security = options.security,
         .menus = options.menus,
     });
-    defer runtime.deinit();
 
     const verify = if (init.environ_map.get("NATIVE_SDK_SESSION_VERIFY")) |value|
         !std.mem.eql(u8, value, "0")
