@@ -28,6 +28,9 @@
 struct NativeSdkLazyDll {
     const wchar_t *file;
     const char *name;
+    /* What a user can do when the DLL is missing, appended to the
+     * report; null when there is nothing to suggest. */
+    const char *remedy = nullptr;
     std::once_flag once;
     HMODULE module = nullptr;
     DWORD load_error = 0;
@@ -37,8 +40,10 @@ struct NativeSdkLazyDll {
     std::atomic<const char *> load_failure_reported_for{ nullptr };
 };
 
-inline NativeSdkLazyDll kNativeSdkMf{ L"mf.dll", "MF.dll" };
-inline NativeSdkLazyDll kNativeSdkMfPlat{ L"mfplat.dll", "MFPlat.dll" };
+inline constexpr const char *kNativeSdkMediaFeaturePackRemedy =
+    "Windows N and KN editions ship without Media Foundation; install the Media Feature Pack (Settings > Apps > Optional features)";
+inline NativeSdkLazyDll kNativeSdkMf{ L"mf.dll", "MF.dll", kNativeSdkMediaFeaturePackRemedy };
+inline NativeSdkLazyDll kNativeSdkMfPlat{ L"mfplat.dll", "MFPlat.dll", kNativeSdkMediaFeaturePackRemedy };
 inline NativeSdkLazyDll kNativeSdkWinHttp{ L"winhttp.dll", "WINHTTP.dll" };
 inline NativeSdkLazyDll kNativeSdkShell32{ L"shell32.dll", "SHELL32.dll" };
 inline NativeSdkLazyDll kNativeSdkDComp{ L"dcomp.dll", "dcomp.dll" };
@@ -51,9 +56,11 @@ inline void nativeSdkReportLazyDllFailure(const NativeSdkLazyDll &dll, const cha
     char reason[256] = "unknown error";
     DWORD reason_len = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, error, 0, reason, sizeof(reason), nullptr);
     while (reason_len > 0 && (reason[reason_len - 1] == '\r' || reason[reason_len - 1] == '\n' || reason[reason_len - 1] == ' ' || reason[reason_len - 1] == '.')) reason[--reason_len] = '\0';
-    char message[512];
+    char message[768];
+    const char *remedy_separator = load_failed && dll.remedy ? ". " : "";
+    const char *remedy = load_failed && dll.remedy ? dll.remedy : "";
     int len = load_failed
-        ? snprintf(message, sizeof(message), "%s unavailable: %s could not be loaded from System32 (needed for %s): %s (Windows error %lu)", feature, dll.name, proc, reason, (unsigned long)error)
+        ? snprintf(message, sizeof(message), "%s unavailable: %s could not be loaded from System32 (needed for %s): %s (Windows error %lu)%s%s", feature, dll.name, proc, reason, (unsigned long)error, remedy_separator, remedy)
         : snprintf(message, sizeof(message), "%s unavailable: %s has no export %s: %s (Windows error %lu)", feature, dll.name, proc, reason, (unsigned long)error);
     if (len < 0) return;
     native_sdk_windows_report_library_failure(message, strnlen(message, sizeof(message)));

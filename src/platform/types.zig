@@ -66,6 +66,10 @@ pub const Error = error{
     AudioPathTooLarge,
     AudioSourceNotFound,
     AudioDecodeFailed,
+    /// The platform's audio stack is missing on this machine (Windows N
+    /// editions without the Media Feature Pack); the platform logs which
+    /// library and what to install.
+    AudioPlaybackUnavailable,
     InvalidGpuSurfacePixels,
     InvalidGpuSurfacePacket,
     InvalidGpuSurfaceImage,
