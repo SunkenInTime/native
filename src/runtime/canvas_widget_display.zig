@@ -333,9 +333,13 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // so `first_view_built` -> this = reconcile + emit.
             defer launch_timing.lapOnce("first_display_list_emitted");
 
-            var commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
-            var chrome_storage = CanvasDisplayListScratch{};
-            var builder = canvas.Builder.init(&commands);
+            if (self.display_list_refresh_active) return error.DisplayListRefreshReentered;
+            self.display_list_refresh_active = true;
+            defer self.display_list_refresh_active = false;
+            const scratch = &self.display_list_refresh_scratch;
+            const chrome_storage = &scratch.copied;
+            chrome_storage.reset();
+            var builder = canvas.Builder.init(&scratch.commands);
             const current = self.views[view_index].canvasDisplayList();
             const prefix_count = self.views[view_index].canvas_widget_display_list_prefix_count;
             const suffix_count = self.views[view_index].canvas_widget_display_list_suffix_count;
@@ -349,8 +353,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             if (display_list.commands.len + self.views[view_index].canvas_widget_display_list_reserved_count > max_canvas_commands_per_view) {
                 return error.CanvasCommandLimitReached;
             }
-            var canvas_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined;
-            const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &canvas_changes);
+            const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &scratch.changes);
             try self.views[view_index].copyCanvasDisplayList(display_list);
             try reconcileCanvasWidgetCaretBlink(self, view_index);
             try reconcileCanvasWidgetLoopAnimations(self, view_index);

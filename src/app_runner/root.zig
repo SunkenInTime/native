@@ -1062,7 +1062,12 @@ fn validateCaptureCommandValue(value: []const u8) !void {
     if (std.mem.indexOfAny(u8, value, "\r\n") != null) return error.CaptureActionContainsLineBreak;
 }
 
-fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, request: CaptureRequest) !void {
+// noinline, like runSessionReplay: each mode's ~665 KiB frame would
+// otherwise be inlined into runWithOptions, which stays at the base of a
+// live app's stack for its whole life. The Windows stack probe touches
+// every page of a frame on entry, so a live widget kept both resident
+// without ever running either mode.
+noinline fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, request: CaptureRequest) !void {
     var buffers: StateBuffers = undefined;
     const app_info = options.appInfo(&buffers);
     const session_recorder = setupSessionRecorder(init, app_info);
@@ -1499,7 +1504,8 @@ fn finishSessionRecorder(recorder: ?*native_sdk.runtime.SessionRecorder) void {
 /// the world), verify fingerprint and screenshot checkpoints unless
 /// `NATIVE_SDK_SESSION_VERIFY=0`, print the report, and exit non-zero
 /// on any mismatch.
-fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.Init, journal_path: []const u8) !void {
+/// noinline for the same reason as runCapture.
+noinline fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.Init, journal_path: []const u8) !void {
     const journal_bytes = readSessionJournal(init.io, journal_path) catch |err| {
         std.debug.print("session replay: cannot read {s}: {s}\n", .{ journal_path, @errorName(err) });
         return err;

@@ -11,6 +11,7 @@
 #include <dwmapi.h>
 #include "shared_renderer_client.h"
 #include "shared_renderer_policy.h"
+#include "gpu_emission_policy.h"
 #include "dpi_geometry.h"
 #include "dpi_diagnostic.h"
 
@@ -130,13 +131,25 @@ static UINT dpiDiagnosticOverride() {
     return g_dpi_diagnostic_override.load();
 }
 
+/* An environment-named file path, or empty when the variable is unset.
+ * Sized from the variable itself: a 32K-character stack buffer here put
+ * 64 KiB in the frame of every caller, and the stack probe makes all of it
+ * resident even when the variable is unset. */
+static std::wstring environmentPath(const wchar_t *name) {
+    const DWORD needed = GetEnvironmentVariableW(name, nullptr, 0);
+    if (needed == 0) return {};
+    std::wstring value(needed, L'\0');
+    const DWORD length = GetEnvironmentVariableW(name, value.data(), needed);
+    if (length == 0 || length >= needed) return {};
+    value.resize(length);
+    return value;
+}
+
 static void appendDpiDiagnosticLine(const char *line, size_t length) {
-    wchar_t path[32768] = {};
-    const DWORD path_length = GetEnvironmentVariableW(L"WEAVER_DPI_LOG", path,
-        ARRAYSIZE(path));
-    if (!line || length == 0 || path_length == 0 ||
-        path_length >= ARRAYSIZE(path)) return;
-    HANDLE file = CreateFileW(path, FILE_APPEND_DATA,
+    if (!line || length == 0) return;
+    const std::wstring path = environmentPath(L"WEAVER_DPI_LOG");
+    if (path.empty()) return;
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA,
         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
         FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
@@ -196,15 +209,19 @@ constexpr UINT kAudioSessionMessage = WM_APP + 45;
  * loop starves it far below the contract cadence, while posted messages
  * keep their place in the queue. */
 constexpr UINT kAudioSpectrumMessage = WM_APP + 46;
+/* A scheduled GPU-surface frame emission arriving from a deadline timer or
+ * a direct post: WPARAM is its generation, LPARAM its source (see
+ * gpu_emission_policy.h). WM_TIMER cannot carry these: DispatchMessage
+ * calls a non-zero WM_TIMER LPARAM as a timer procedure. */
+constexpr UINT kGpuEmitMessage = WM_APP + 47;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
 static void reportWeaverBackend(const char *backend) {
     static std::string reported;
     if (reported == backend) return;
-    WCHAR path[32768] = {};
-    const DWORD length = GetEnvironmentVariableW(L"WEAVER_BACKEND_FILE", path, (DWORD)(sizeof(path) / sizeof(path[0])));
-    if (length == 0 || length >= sizeof(path) / sizeof(path[0])) return;
-    HANDLE file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    const std::wstring path = environmentPath(L"WEAVER_BACKEND_FILE");
+    if (path.empty()) return;
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
     DWORD written = 0;
@@ -383,19 +400,31 @@ struct Window {
      * behind the button cluster matches the app's header). */
     COLORREF hidden_caption_color = 0;
     bool hidden_caption_color_set = false;
-    /* UpdateLayeredWindow requires a selected 32-bpp DIB. Keep that backing
-     * store for the lifetime of one surface size: animation frames update
-     * only their dirty rows, while the compositor still receives the full
-     * cached bitmap required by the layered-window API. */
-    HDC layered_memory_dc = nullptr;
-    HBITMAP layered_bitmap = nullptr;
-    HGDIOBJ layered_previous_bitmap = nullptr;
-    void *layered_bits = nullptr;
+    /* The client size and view destination this layered window last
+     * presented at. The compositor holds the window's pixels; a change in
+     * either means the next present repaints the whole window rather
+     * than its dirty rows (see `LayeredScratch`). */
     int layered_width = 0;
     int layered_height = 0;
     WeaverPhysicalRectI layered_gpu_frame = {};
     bool layered_gpu_frame_valid = false;
     bool dpi_transition = false;
+};
+
+/* UpdateLayeredWindow reads its pixels from a selected 32-bpp DIB, but only
+ * during the call: the compositor keeps its own copy of every layered
+ * window's surface, and UpdateLayeredWindowIndirect's dirty rect replaces
+ * just the rows a frame changed. So one DIB, grown to the largest layered
+ * window, serves every window of the process; a present writes only the
+ * rows it names. A DIB per window kept a second full copy of every
+ * window's pixels resident (a 240x110 widget is 103 KiB). */
+struct LayeredScratch {
+    HDC memory_dc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ previous_bitmap = nullptr;
+    uint8_t *bits = nullptr;
+    int width = 0;
+    int height = 0;
 };
 
 static BOOL CALLBACK findWallpaperWorkerWindow(HWND top, LPARAM output_param) {
@@ -511,7 +540,7 @@ struct NativeView {
      * retires the placeholder pump — from then on frames are
      * demand-driven, so an idle surface emits ZERO frame events (the
      * idle law the macOS host enforces). */
-    bool gpu_emission_scheduled = false;
+    WeaverGpuEmission gpu_emission;
     bool gpu_presented = false;
     /* One-shot: the next scheduled emission must fire at grid
      * promptness even while minimized. Two producers set it — an input
@@ -695,6 +724,7 @@ struct Host {
     void *bridge_context = nullptr;
     bool running = false;
     std::map<uint64_t, Window> windows;
+    LayeredScratch layered_scratch;
     std::map<std::string, ChildWebView> webviews;
     std::map<std::string, NativeView> native_views;
     uint64_t next_child_order = 1;
@@ -1969,8 +1999,7 @@ constexpr uint64_t kGpuFrameIntervalNs = 16666667ull;
 constexpr uint64_t kGpuOccludedHeartbeatNs = 1000000000ull;
 /* Placeholder pump timer (repeating, retired by the first present). */
 constexpr UINT_PTR kGpuFrameTimerId = 1;
-/* The one-shot scheduled-emission timer (the single frame-event gate). */
-constexpr UINT_PTR kGpuEmitTimerId = 2;
+static_assert(sizeof(UINT_PTR) == 8, "GPU emission timer ids carry a 32-bit generation above a tag bit");
 
 static uint64_t gpuTimestampNs() {
     static LARGE_INTEGER frequency = {};
@@ -2631,8 +2660,10 @@ using TimeSetEventFn = UINT (WINAPI *)(UINT, UINT,
 
 static void CALLBACK gpuSurfaceDeadlineCallback(UINT, UINT, DWORD_PTR user,
     DWORD_PTR, DWORD_PTR) {
-    HWND hwnd = reinterpret_cast<HWND>(user);
-    if (hwnd) PostMessageW(hwnd, WM_TIMER, kGpuEmitTimerId, 0);
+    HWND hwnd = reinterpret_cast<HWND>(
+        static_cast<uintptr_t>(weaverGpuDeadlineHwnd((uint64_t)user)));
+    if (hwnd) PostMessageW(hwnd, kGpuEmitMessage,
+        weaverGpuDeadlineGeneration((uint64_t)user), kWeaverGpuEmissionDeadline);
 }
 
 /* Animated shared surfaces need a deadline timer, not SetTimer's UI timer
@@ -2641,7 +2672,7 @@ static void CALLBACK gpuSurfaceDeadlineCallback(UINT, UINT, DWORD_PTR user,
  * this helper only for surfaces that own a shared-renderer client: software
  * surfaces stay on the coalescing UI timer and neither load winmm nor inherit
  * multimedia-timer behavior from compatibility layers such as Wine. */
-static bool scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns) {
+static bool scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns, uint32_t generation) {
     using LoadFn = HMODULE (WINAPI *)(LPCWSTR);
     static HMODULE winmm = LoadLibraryW(L"winmm.dll");
     static TimeSetEventFn time_set_event = winmm
@@ -2651,8 +2682,22 @@ static bool scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns) {
     constexpr UINT kTimeOneShot = 0;
     constexpr UINT kTimeKillSynchronous = 0x0100;
     const UINT delay_ms = (UINT)std::max<uint64_t>(1, (delay_ns + 999999ull) / 1000000ull);
+    const uint64_t user = weaverPackGpuDeadline(
+        (uint32_t)reinterpret_cast<uintptr_t>(hwnd), generation);
     return time_set_event(delay_ms, 1, gpuSurfaceDeadlineCallback,
-        reinterpret_cast<DWORD_PTR>(hwnd), kTimeOneShot | kTimeKillSynchronous) != 0;
+        (DWORD_PTR)user, kTimeOneShot | kTimeKillSynchronous) != 0;
+}
+
+/* Process-wide, so a generation never repeats across surfaces or surface
+ * lifetimes (an HWND can be reused after its surface is destroyed). */
+static uint32_t nextGpuEmissionGeneration() {
+    static std::atomic<uint32_t> counter{ 0 };
+    uint32_t previous = counter.load(std::memory_order_relaxed);
+    uint32_t next = weaverNextGpuEmissionGeneration(previous);
+    while (!counter.compare_exchange_weak(previous, next, std::memory_order_relaxed)) {
+        next = weaverNextGpuEmissionGeneration(previous);
+    }
+    return next;
 }
 
 /* The single surface-frame emission: view state (nonblank verdict, sample
@@ -2777,7 +2822,7 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
  * message hop out of the period. SetTimer clamps short delays up to its
  * ~10 ms floor; the clock absorbs that as jitter, not drift. */
 static void gpuSurfaceScheduleFrameEmission(NativeView &view) {
-    if (!view.hwnd || view.gpu_emission_scheduled) return;
+    if (!view.hwnd || view.gpu_emission.scheduled) return;
     const uint64_t now = gpuTimestampNs();
     /* Minimized surfaces pace on the heartbeat, not the frame grid —
      * see kGpuOccludedHeartbeatNs. Exempt: an input's responding frame
@@ -2797,15 +2842,38 @@ static void gpuSurfaceScheduleFrameEmission(NativeView &view) {
      * entire 60 Hz interval. An already-due emission is ordinary queued
      * work, so post the same WM_TIMER message directly. The scheduled flag
      * still folds all producers and the handler keeps one-shot semantics. */
-    if (delay_ns == 0) {
-        if (PostMessageW(view.hwnd, WM_TIMER, kGpuEmitTimerId, 0)) {
-            view.gpu_emission_scheduled = true;
-        }
+    const uint32_t generation = nextGpuEmissionGeneration();
+    if (delay_ns == 0 && PostMessageW(view.hwnd, kGpuEmitMessage, generation,
+            kWeaverGpuEmissionPosted)) {
+        view.gpu_emission = { true, kWeaverGpuEmissionPosted, generation };
         return;
     }
-    if ((view.gpu_presenter && scheduleGpuSurfaceDeadline(view.hwnd, delay_ns)) ||
-        SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr)) {
-        view.gpu_emission_scheduled = true;
+    /* Not due yet, or the post failed (a full queue): arm a timer instead,
+     * so a scheduled frame is never silently dropped. */
+    if (view.gpu_presenter && scheduleGpuSurfaceDeadline(view.hwnd, delay_ns, generation)) {
+        view.gpu_emission = { true, kWeaverGpuEmissionDeadline, generation };
+        return;
+    }
+    if (SetTimer(view.hwnd, (UINT_PTR)weaverGpuUiTimerId(generation), delay_ms, nullptr)) {
+        view.gpu_emission = { true, kWeaverGpuEmissionUiTimer, generation };
+    }
+}
+
+/* Re-arm the in-flight emission at the delay that applies now (input and
+ * restore). The replacement gets a new generation, so the superseded one is
+ * dropped when it arrives; if no replacement can be scheduled, the old one
+ * stays current. */
+static void gpuSurfaceRearmFrameEmission(NativeView &view) {
+    const WeaverGpuEmission previous = view.gpu_emission;
+    view.gpu_emission.scheduled = false;
+    gpuSurfaceScheduleFrameEmission(view);
+    view.gpu_emission = weaverGpuEmissionAfterRearm(previous, view.gpu_emission);
+    /* A superseded SetTimer would repeat until killed; retire it once its
+     * replacement is in place (a message it already queued is dropped by
+     * generation). Deadlines and posts are one-shot and need nothing. */
+    if (previous.scheduled && previous.source == kWeaverGpuEmissionUiTimer &&
+        view.gpu_emission.generation != previous.generation) {
+        KillTimer(view.hwnd, (UINT_PTR)weaverGpuUiTimerId(previous.generation));
     }
 }
 
@@ -2843,49 +2911,78 @@ static void paintGpuSurface(NativeView &view, HWND hwnd, HDC dc) {
  * layered window. UpdateLayeredWindow owns the top-level redirection
  * surface; the child HWND stays as the runtime's input/timer endpoint,
  * but its WM_PAINT pixels are not the glass for this window shape. */
-static void releaseLayeredPresentSurface(Window &window) {
-    if (window.layered_memory_dc && window.layered_previous_bitmap) {
-        SelectObject(window.layered_memory_dc, window.layered_previous_bitmap);
-    }
-    if (window.layered_bitmap) DeleteObject(window.layered_bitmap);
-    if (window.layered_memory_dc) DeleteDC(window.layered_memory_dc);
-    window.layered_memory_dc = nullptr;
-    window.layered_bitmap = nullptr;
-    window.layered_previous_bitmap = nullptr;
-    window.layered_bits = nullptr;
+static void forgetLayeredPresent(Window &window) {
     window.layered_width = 0;
     window.layered_height = 0;
     window.layered_gpu_frame = {};
     window.layered_gpu_frame_valid = false;
 }
 
-static bool ensureLayeredPresentSurface(Window &window, HDC screen_dc, int width, int height) {
-    if (window.layered_memory_dc && window.layered_bitmap && window.layered_bits &&
-        window.layered_width == width && window.layered_height == height) return true;
-    releaseLayeredPresentSurface(window);
-    window.layered_memory_dc = CreateCompatibleDC(screen_dc);
-    if (!window.layered_memory_dc) return false;
+static void releaseLayeredScratch(LayeredScratch &scratch) {
+    if (scratch.memory_dc && scratch.previous_bitmap) SelectObject(scratch.memory_dc, scratch.previous_bitmap);
+    if (scratch.bitmap) DeleteObject(scratch.bitmap);
+    if (scratch.memory_dc) DeleteDC(scratch.memory_dc);
+    scratch = {};
+}
+
+/* Grow-only: the scratch fits the largest layered window presented so far. */
+static bool ensureLayeredScratch(LayeredScratch &scratch, HDC screen_dc, int width, int height) {
+    if (scratch.bits && scratch.width >= width && scratch.height >= height) return true;
+    const int grown_width = std::max(width, scratch.width);
+    const int grown_height = std::max(height, scratch.height);
+    releaseLayeredScratch(scratch);
+    scratch.memory_dc = CreateCompatibleDC(screen_dc);
+    if (!scratch.memory_dc) return false;
     BITMAPINFO info = {};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = width;
-    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biWidth = grown_width;
+    info.bmiHeader.biHeight = -grown_height;
     info.bmiHeader.biPlanes = 1;
     info.bmiHeader.biBitCount = 32;
     info.bmiHeader.biCompression = BI_RGB;
-    window.layered_bitmap = CreateDIBSection(window.layered_memory_dc, &info, DIB_RGB_COLORS, &window.layered_bits, nullptr, 0);
-    if (!window.layered_bitmap || !window.layered_bits) {
-        releaseLayeredPresentSurface(window);
+    void *bits = nullptr;
+    scratch.bitmap = CreateDIBSection(scratch.memory_dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!scratch.bitmap || !bits) {
+        releaseLayeredScratch(scratch);
         return false;
     }
-    window.layered_previous_bitmap = SelectObject(window.layered_memory_dc, window.layered_bitmap);
-    window.layered_width = width;
-    window.layered_height = height;
-    memset(window.layered_bits, 0, static_cast<size_t>(width) * height * 4);
+    scratch.previous_bitmap = SelectObject(scratch.memory_dc, scratch.bitmap);
+    scratch.bits = static_cast<uint8_t *>(bits);
+    scratch.width = grown_width;
+    scratch.height = grown_height;
     return true;
 }
 
-static bool presentLayeredGpuSurface(Window &window, const NativeView &view, int dirty_left, int dirty_top, int dirty_right, int dirty_bottom, bool full_copy) {
-    if (!window.hwnd || !window.transparent || view.gpu_bgra.empty()) return false;
+/* Straight-alpha RGBA8 rows -> the BGRA UpdateLayeredWindow's AC_SRC_ALPHA
+ * blend reads: premultiplied for a premultiplied surface, and fully
+ * opaque (alpha forced to 255, colors unchanged) for an opaque one. */
+static void rowToLayeredBgra(uint8_t *dst, const uint8_t *src, int pixels, bool premultiplied) {
+    for (int x = 0; x < pixels; ++x) {
+        if (!premultiplied) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = 255;
+            dst += 4;
+            src += 4;
+            continue;
+        }
+        const uint8_t alpha = src[3];
+        dst[0] = (uint8_t)(((uint32_t)src[2] * alpha + 127) / 255);
+        dst[1] = (uint8_t)(((uint32_t)src[1] * alpha + 127) / 255);
+        dst[2] = (uint8_t)(((uint32_t)src[0] * alpha + 127) / 255);
+        dst[3] = alpha;
+        dst += 4;
+        src += 4;
+    }
+}
+
+/* A layered window keeps no pixels of its own: the frame's changed rows go
+ * straight from the renderer's RGBA output into the shared scratch DIB and
+ * the compositor keeps everything else. `full_frame` says the RGBA output
+ * covers the whole surface (a resize, the first frame, or no dirty rect). */
+static bool presentLayeredGpuSurface(Host *host, Window &window, const NativeView &view, const uint8_t *rgba8, int dirty_left, int dirty_top, int dirty_right, int dirty_bottom, bool full_frame) {
+    if (!window.hwnd || !window.transparent || !rgba8) return false;
     if (view.gpu_buf_width <= 0 || view.gpu_buf_height <= 0) return false;
 
     HDC screen_dc = GetDC(nullptr);
@@ -2898,22 +2995,33 @@ static bool presentLayeredGpuSurface(Window &window, const NativeView &view, int
         ReleaseDC(nullptr, screen_dc);
         return false;
     }
+    LayeredScratch &scratch = host->layered_scratch;
+    if (!ensureLayeredScratch(scratch, screen_dc, client_width, client_height)) {
+        ReleaseDC(nullptr, screen_dc);
+        return false;
+    }
+    const size_t stride = static_cast<size_t>(scratch.width) * 4;
     const bool resized = window.layered_width != client_width ||
         window.layered_height != client_height;
     const WeaverPhysicalRectI destination = view.gpu_geometry_physical;
     const bool destination_changed = !window.layered_gpu_frame_valid ||
         !weaverPhysicalRectsEqual(window.layered_gpu_frame, destination);
-    if (!ensureLayeredPresentSurface(window, screen_dc, client_width, client_height)) {
-        ReleaseDC(nullptr, screen_dc);
-        return false;
-    }
-    if (full_copy || resized || destination_changed) {
-        memset(window.layered_bits, 0,
-            static_cast<size_t>(client_width) * client_height * 4);
-        dirty_left = 0;
-        dirty_top = 0;
-        dirty_right = view.gpu_buf_width;
-        dirty_bottom = view.gpu_buf_height;
+    const bool whole_window = full_frame || resized || destination_changed;
+    if (whole_window) {
+        // Everything the view does not cover is transparent. A new client
+        // size or view destination comes with a geometry change that makes
+        // the runtime render the whole surface, so `full_frame` normally
+        // holds here; if it does not, only the dirty rows are known and the
+        // rest of the surface stays transparent until the next full frame.
+        for (int y = 0; y < client_height; ++y) {
+            memset(scratch.bits + static_cast<size_t>(y) * stride, 0, static_cast<size_t>(client_width) * 4);
+        }
+        if (full_frame) {
+            dirty_left = 0;
+            dirty_top = 0;
+            dirty_right = view.gpu_buf_width;
+            dirty_bottom = view.gpu_buf_height;
+        }
     }
     const int source_left = std::max(0, std::max(dirty_left, -destination.left));
     const int source_top = std::max(0, std::max(dirty_top, -destination.top));
@@ -2921,31 +3029,50 @@ static bool presentLayeredGpuSurface(Window &window, const NativeView &view, int
         std::min(dirty_right, client_width - destination.left));
     const int source_bottom = std::min(view.gpu_buf_height,
         std::min(dirty_bottom, client_height - destination.top));
-    if (source_right > source_left && source_bottom > source_top) {
-        const size_t row_bytes = static_cast<size_t>(source_right - source_left) * 4;
+    const bool copies = source_right > source_left && source_bottom > source_top;
+    if (copies) {
         for (int source_y = source_top; source_y < source_bottom; ++source_y) {
-            const int destination_y = destination.top + source_y;
-            const int destination_x = destination.left + source_left;
             const size_t source_offset =
                 (static_cast<size_t>(source_y) * view.gpu_buf_width + source_left) * 4;
             const size_t destination_offset =
-                (static_cast<size_t>(destination_y) * client_width + destination_x) * 4;
-            memcpy(static_cast<uint8_t *>(window.layered_bits) + destination_offset,
-                view.gpu_bgra.data() + source_offset, row_bytes);
+                static_cast<size_t>(destination.top + source_y) * stride +
+                static_cast<size_t>(destination.left + source_left) * 4;
+            rowToLayeredBgra(scratch.bits + destination_offset, rgba8 + source_offset, source_right - source_left, view.gpu_alpha_mode == 2);
         }
     }
+    window.layered_width = client_width;
+    window.layered_height = client_height;
     window.layered_gpu_frame = destination;
     window.layered_gpu_frame_valid = true;
+    if (!whole_window && !copies) {
+        ReleaseDC(nullptr, screen_dc);
+        return true;
+    }
 
+    // Only these rows of the scratch hold this window's pixels; the rest
+    // may hold another window's. The dirty rect keeps the compositor's
+    // copy of everything else.
+    RECT update = whole_window
+        ? RECT{ 0, 0, client_width, client_height }
+        : RECT{ destination.left + source_left, destination.top + source_top,
+                destination.left + source_right, destination.top + source_bottom };
     RECT frame = {};
     GetWindowRect(window.hwnd, &frame);
     POINT window_destination = { frame.left, frame.top };
     POINT source = { 0, 0 };
     SIZE size = { client_width, client_height };
     BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    const BOOL updated = UpdateLayeredWindow(window.hwnd, screen_dc,
-        &window_destination, &size, window.layered_memory_dc, &source, 0,
-        &blend, ULW_ALPHA);
+    UPDATELAYEREDWINDOWINFO info = {};
+    info.cbSize = sizeof(info);
+    info.hdcDst = screen_dc;
+    info.pptDst = &window_destination;
+    info.psize = &size;
+    info.hdcSrc = scratch.memory_dc;
+    info.pptSrc = &source;
+    info.pblend = &blend;
+    info.dwFlags = ULW_ALPHA;
+    info.prcDirty = &update;
+    const BOOL updated = UpdateLayeredWindowIndirect(window.hwnd, &info);
     ReleaseDC(nullptr, screen_dc);
     return updated != FALSE;
 }
@@ -3012,17 +3139,25 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
                 gpuSurfaceScheduleFrameEmission(*view);
                 return 0;
             }
-            if (wparam == kGpuEmitTimerId) {
-                /* The one scheduled emission fires: one-shot semantics
-                 * (KillTimer before the emit — SetTimer timers repeat),
-                 * and the scheduled flag clears BEFORE emitting so the
-                 * emission's engine dispatch can re-arm the scheduler. */
-                KillTimer(hwnd, kGpuEmitTimerId);
-                view->gpu_emission_scheduled = false;
+            if (weaverIsGpuUiTimerId((uint64_t)wparam)) {
+                /* One-shot semantics: kill this emission's own timer before
+                 * the emit, since SetTimer timers repeat. */
+                KillTimer(hwnd, wparam);
+                if (!weaverGpuEmissionAccepts(view->gpu_emission, kWeaverGpuEmissionUiTimer,
+                        weaverGpuUiTimerGeneration((uint64_t)wparam))) return 0;
+                view->gpu_emission.scheduled = false;
                 gpuSurfaceEmitFrame(host, *view, hwnd);
                 return 0;
             }
             break;
+        case kGpuEmitMessage:
+            /* Only the emission currently scheduled emits (see
+             * gpu_emission_policy.h). The scheduled state clears BEFORE
+             * emitting so the emission's engine dispatch can re-arm. */
+            if (!weaverGpuEmissionAccepts(view->gpu_emission, (int)lparam, (uint32_t)wparam)) return 0;
+            view->gpu_emission.scheduled = false;
+            gpuSurfaceEmitFrame(host, *view, hwnd);
+            return 0;
         case WM_PAINT: {
             PAINTSTRUCT paint = {};
             HDC dc = BeginPaint(hwnd, &paint);
@@ -5390,10 +5525,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                     const Window *resized_window = windowForHwnd(host, hwnd);
                     for (auto &view_entry : host->native_views) {
                         NativeView &surface = view_entry.second;
-                        if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission_scheduled) continue;
+                        if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission.scheduled) continue;
                         if (!resized_window || surface.window_id != resized_window->id) continue;
-                        surface.gpu_emission_scheduled = false;
-                        gpuSurfaceScheduleFrameEmission(surface);
+                        gpuSurfaceRearmFrameEmission(surface);
                     }
                 }
             }
@@ -5479,7 +5613,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) {
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd) {
-                        releaseLayeredPresentSurface(entry.second);
+                        forgetLayeredPresent(entry.second);
                         destroyNativeViewsForWindow(host, entry.first);
                         destroyChildWebViewsForWindow(host, entry.first);
                         entry.second.hwnd = nullptr;
@@ -5672,6 +5806,7 @@ void native_sdk_windows_destroy(Host *host) {
     audioReleaseSession(host, true);
     removeNotificationIcon(host);
     destroyAllWindows(host);
+    releaseLayeredScratch(host->layered_scratch);
     const bool com_initialized = host->com_initialized;
     delete host;
     if (com_initialized) CoUninitialize();
@@ -6332,9 +6467,8 @@ int native_sdk_windows_note_gpu_surface_input(Host *host, uint64_t window_id, co
     if (found == host->native_views.end() || found->second.kind != kViewGpuSurface || !found->second.hwnd) return 0;
     NativeView &view = found->second;
     view.gpu_prompt_frame_pending = true;
-    if (view.gpu_emission_scheduled) {
-        view.gpu_emission_scheduled = false;
-        gpuSurfaceScheduleFrameEmission(view);
+    if (view.gpu_emission.scheduled) {
+        gpuSurfaceRearmFrameEmission(view);
     }
     return 1;
 }
@@ -6388,10 +6522,16 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
      * over the top band and composites its own caption material wherever
      * the redirection surface's alpha is 0 — the app's pixels must read
      * as opaque there or the whole header band would vanish under DWM
-     * chrome (only the punched button hole yields on purpose). */
-    view.gpu_bgra.resize(width * height * 4);
+     * chrome (only the punched button hole yields on purpose). Layered
+     * windows convert straight into the shared layered DIB instead and
+     * retain nothing (`presentLayeredGpuSurface`). */
+    if (layered) {
+        std::vector<uint8_t>().swap(view.gpu_bgra);
+    } else {
+        view.gpu_bgra.resize(width * height * 4);
+    }
     uint8_t *dst = view.gpu_bgra.data();
-    for (int y = dirty_top; y < dirty_bottom; ++y) {
+    if (!layered) for (int y = dirty_top; y < dirty_bottom; ++y) {
         for (int x = dirty_left; x < dirty_right; ++x) {
             const size_t index = (size_t)y * width + (size_t)x;
             const uint8_t *src = rgba8 + index * 4;
@@ -6415,18 +6555,22 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
      * button cluster matched to the header the app just presented. */
     if (owner != host->windows.end()) syncHiddenCaptionColor(host, owner->second, view, rgba8, width, height);
 
+    // The sample pixel is only this frame's when it lies in the rendered
+    // rows: outside them the renderer's buffer may hold another view's.
+    const bool sample_rendered = (int)(height / 2) >= dirty_top && (int)(height / 2) < dirty_bottom &&
+        (int)(width / 2) >= dirty_left && (int)(width / 2) < dirty_right;
     const size_t sample_index = ((height / 2) * width + width / 2) * 4;
     const uint8_t sr = rgba8[sample_index + 0];
     const uint8_t sg = rgba8[sample_index + 1];
     const uint8_t sb = rgba8[sample_index + 2];
     const uint8_t sa = rgba8[sample_index + 3];
-    if (sr != 0 || sg != 0 || sb != 0) {
+    if (sample_rendered && (sr != 0 || sg != 0 || sb != 0)) {
         view.gpu_nonblank = 1;
         view.gpu_sample_color = ((uint32_t)sa << 24) | ((uint32_t)sr << 16) | ((uint32_t)sg << 8) | (uint32_t)sb;
     }
 
     if (layered) {
-        if (!presentLayeredGpuSurface(owner->second, view, dirty_left, dirty_top, dirty_right, dirty_bottom, full_update)) return 0;
+        if (!presentLayeredGpuSurface(host, owner->second, view, rgba8, dirty_left, dirty_top, dirty_right, dirty_bottom, full_update)) return 0;
     } else {
         RECT dirty = { dirty_left, dirty_top, dirty_right, dirty_bottom };
         InvalidateRect(view.hwnd, full_update ? nullptr : &dirty, FALSE);

@@ -1562,7 +1562,13 @@ test "windows top-level frame delivery stays demand-driven" {
     // coalescing UI timer so compatibility layers cannot run a caret or
     // other continuous animation fast enough to starve input dispatch.
     try std.testing.expect(std.mem.indexOf(u8, host_source, "view.gpu_presenter && scheduleGpuSurfaceDeadline") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "SetTimer(view.hwnd, kGpuEmitTimerId") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "SetTimer(view.hwnd, (UINT_PTR)weaverGpuUiTimerId(generation)") != null);
+    // Both emission paths must gate on the policy (its rules are exercised
+    // in dpi_geometry_tests.cpp): emitting a superseded emission starts a
+    // second self-re-arming frame chain.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "weaverGpuEmissionAccepts(view->gpu_emission, kWeaverGpuEmissionUiTimer,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "weaverGpuUiTimerGeneration((uint64_t)wparam)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "weaverGpuEmissionAccepts(view->gpu_emission, (int)lparam, (uint32_t)wparam)") != null);
 }
 
 test "windows audio event maps kinds and payload" {

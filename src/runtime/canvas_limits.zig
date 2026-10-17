@@ -125,9 +125,11 @@ pub const max_canvas_text_layout_lines_per_view: usize = 8192;
 // (512x512 RGBA8), not photo scale. Weaver's shipped noro/retro covers both
 // measure 256x256 = 256 KiB decoded and sat exactly on the old widget-profile
 // cap; 1 MiB leaves 4x byte headroom. Each of 16 slots reserves 1 MiB (16 MiB
-// total address space), with pages touched only as an image is registered.
+// total), allocated when an image registers and sized to it, so the slot count
+// costs nothing until used. A widget host (`-Dwidget-windows`) gets 16 slots
+// per window: every widget keeps the budget it had as its own process.
 // Oversized registrations and decodes fail loudly with `error.ImageTooLarge`.
-pub const max_registered_canvas_images: usize = 16;
+pub const max_registered_canvas_images: usize = 16 * @import("../platform/types.zig").max_windows_per_effects_table;
 pub const max_registered_canvas_image_pixel_bytes: usize = 1024 * 1024;
 
 // Runtime-registered font faces: TrueType bytes apps register under a
@@ -145,10 +147,11 @@ pub const max_registered_canvas_image_pixel_bytes: usize = 1024 * 1024;
 // static-instance UI faces (the bundled faces are 71/116 KB; a large
 // Latin+Cyrillic+Greek UI face is a few hundred KB) while refusing
 // multi-megabyte CJK/variable fonts the glyph pipeline is not sized for.
-// Memory is fixed-capacity address space in the Runtime: 8 x 2 MiB =
-// 16 MiB, pages touched only as fonts register; oversized files and a
-// ninth font fail loudly (`error.FontTooLarge` / `error.FontRegistryFull`).
-pub const max_registered_canvas_fonts: usize = if (native_sdk_options.widget_profile) 2 else 8;
+// Each face's bytes are allocated when it registers, sized to the file;
+// oversized files and a ninth font fail loudly (`error.FontTooLarge` /
+// `error.FontRegistryFull`). A widget host (`-Dwidget-windows`) gets the
+// widget profile's two slots per window, as each widget had alone.
+pub const max_registered_canvas_fonts: usize = (if (native_sdk_options.widget_profile) 2 else 8) * @import("../platform/types.zig").max_windows_per_effects_table;
 pub const max_registered_canvas_font_bytes: usize = if (native_sdk_options.widget_profile) 512 * 1024 else 2 * 1024 * 1024;
 
 // The retained widget-tree budgets (raised 256 -> 1024; see the header
@@ -339,4 +342,10 @@ pub const max_canvas_widget_provenance_key_bytes: usize = 48;
 // rebuild-per-Msg bill visible-by-construction. Declaring more windows
 // than this warns loudly (naming this budget) and ignores the excess;
 // it never takes the render loop down.
-pub const max_ui_app_windows: usize = 4;
+//
+// The widget-profile host is the "window per document" architecture
+// above: one Runtime, one window per widget, each skipping rebuilds
+// through `window_view_revision`. Its slot budget follows the runtime's
+// window capacity (`-Dwidget-windows`), so the runtime cap is the only
+// one a host can hit.
+pub const max_ui_app_windows: usize = if (native_sdk_options.widget_profile) @max(@import("../platform/types.zig").widget_profile_windows, 4) else 4;

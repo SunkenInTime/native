@@ -13,6 +13,7 @@ test {
     _ = @import("canvas_budget_edge_tests.zig");
     _ = @import("ui_app_huge_model_tests.zig");
     _ = @import("ui_app_window_tests.zig");
+    _ = @import("ui_app_independent_windows_tests.zig");
     _ = @import("canvas_image_tests.zig");
     _ = @import("canvas_font_tests.zig");
     _ = @import("storage_layout_tests.zig");

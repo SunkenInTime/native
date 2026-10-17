@@ -440,8 +440,9 @@ pub const EffectClipboardResult = struct {
 /// fixed table: they do NOT consume `max_effects` slots or worker
 /// threads (a timer is a platform service arm, not a blocking effect),
 /// and timer keys are their own namespace — an fx timer key never
-/// collides with a spawn/fetch/file key.
-pub const max_effect_timers: usize = 16;
+/// collides with a spawn/fetch/file key. A multi-window widget host runs
+/// one app for every widget window, so the table holds 16 per window.
+pub const max_effect_timers: usize = 16 * platform.max_windows_per_effects_table;
 
 /// Whether an fx timer fires once and retires or keeps firing until
 /// `cancelTimer`.
@@ -1450,6 +1451,21 @@ pub fn Effects(comptime Msg: type) type {
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{ .allocator = allocator };
+        }
+
+        /// `init` in place: every field from its default except the two
+        /// rings, which are written before they are read. Returning `Self`
+        /// by value builds all of it, rings included, and copies it, so
+        /// every ring page becomes resident in every app.
+        pub fn initInPlace(self: *Self, allocator: std.mem.Allocator) void {
+            inline for (std.meta.fields(Self)) |field| {
+                if (comptime std.mem.eql(u8, field.name, "queue") or std.mem.eql(u8, field.name, "pending_exits")) continue;
+                if (comptime std.mem.eql(u8, field.name, "allocator")) {
+                    self.allocator = allocator;
+                } else {
+                    @field(self, field.name) = field.defaultValue().?;
+                }
+            }
         }
 
         /// Kill every running effect, wait for the workers to finish
