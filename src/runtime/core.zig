@@ -205,7 +205,7 @@ pub const DisplayListRefreshScratch = struct {
 };
 
 pub const Runtime = struct {
-    display_list_refresh_scratch: DisplayListRefreshScratch = undefined,
+    display_list_refresh_scratch: DisplayListRefreshScratch align(storage_align) = undefined,
     display_list_refresh_active: bool = false,
     options: Options,
     surface: platform.Surface,
