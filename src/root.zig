@@ -7,6 +7,7 @@ pub const diagnostics = @import("diagnostics");
 pub const platform_info = @import("platform_info");
 pub const canvas = @import("canvas");
 pub const markdown = canvas.markdown;
+pub const lazy_commit = canvas.lazy_commit;
 
 pub const runtime = @import("runtime/root.zig");
 pub const platform = @import("platform/root.zig");

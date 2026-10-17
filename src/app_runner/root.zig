@@ -1070,8 +1070,8 @@ fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, 
     } else if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
         native_sdk.platform.windows.installHeadlessCaptureServices(&capture_platform.services);
     }
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
     var driver: CaptureDriver = .{
         .io = init.io,
         .null_platform = &null_platform,
@@ -1232,9 +1232,10 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    // stack overflows on a stack instance, so construct it on the heap,
+    // committed as it is touched (most of its tables never are).
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
     native_sdk.Runtime.initAt(runtime, .{
         .platform = null_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1287,9 +1288,10 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    // stack overflows on a stack instance, so construct it on the heap,
+    // committed as it is touched (most of its tables never are).
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
     native_sdk.Runtime.initAt(runtime, .{
         .platform = mac_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1339,9 +1341,10 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    // stack overflows on a stack instance, so construct it on the heap,
+    // committed as it is touched (most of its tables never are).
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
     native_sdk.Runtime.initAt(runtime, .{
         .platform = linux_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1390,9 +1393,10 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    // stack overflows on a stack instance, so construct it on the heap,
+    // committed as it is touched (most of its tables never are).
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
     native_sdk.Runtime.initAt(runtime, .{
         .platform = windows_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1510,8 +1514,8 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
         native_sdk.platform.macos.installHeadlessTextServices(&replay_platform.services);
         null_platform.gpu_surface_scroll_drivers = true;
     }
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
     // Bridge policy and security must match what the recording ran
     // under (they gate replayed bridge_message dispatch); automation,
     // window-state restore, and tracing stay off — replay consumes only
