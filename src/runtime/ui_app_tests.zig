@@ -2344,7 +2344,7 @@ fn denyFocusView(context: ?*anyopaque, window_id: zero_platform.WindowId, label:
 }
 
 fn retainedPlaceholder(runtime: *const core.Runtime, view_label: []const u8) ?[]const u8 {
-    for (runtime.views[0..runtime.view_count]) |*view| {
+    for (runtime.views[0..runtime.view_count]) |view| {
         if (!std.mem.eql(u8, view.label, view_label)) continue;
         for (view.widgetSemantics()) |node| {
             if (node.placeholder.len > 0) return node.placeholder;
