@@ -1,6 +1,7 @@
 #include "dpi_geometry.h"
 #include "renderer_protocol.h"
 #include "shared_renderer_policy.h"
+#include "gpu_emission_policy.h"
 
 #include <array>
 #include <cmath>
@@ -157,6 +158,42 @@ extern "C" int native_sdk_dpi_geometry_tests() {
     expect(!weaverSharedRendererRecoveryPumpNeeded(true, false, false));
     expect(!weaverSharedRendererRecoveryPumpNeeded(true, true, true));
     expect(weaverSharedRendererRecoveryPumpNeeded(true, false, true));
+
+    // GPU frame emissions: only the currently scheduled one emits.
+    expect(weaverNextGpuEmissionGeneration(0) == 1);
+    expect(weaverNextGpuEmissionGeneration(41) == 42);
+    expect(weaverNextGpuEmissionGeneration(0xFFFFFFFFu) == 1);
+    const uint64_t packed = weaverPackGpuDeadline(0xFEDCBA98u, 0xFFFFFFFFu);
+    expect(weaverGpuDeadlineHwnd(packed) == 0xFEDCBA98u);
+    expect(weaverGpuDeadlineGeneration(packed) == 0xFFFFFFFFu);
+    const WeaverGpuEmission deadline = { true, kWeaverGpuEmissionDeadline, 7 };
+    expect(weaverGpuEmissionAccepts(deadline, kWeaverGpuEmissionDeadline, 7));
+    expect(!weaverGpuEmissionAccepts(deadline, kWeaverGpuEmissionDeadline, 6));
+    expect(!weaverGpuEmissionAccepts(deadline, kWeaverGpuEmissionPosted, 7));
+    const WeaverGpuEmission idle = { false, kWeaverGpuEmissionDeadline, 7 };
+    expect(!weaverGpuEmissionAccepts(idle, kWeaverGpuEmissionDeadline, 7));
+    // Input re-arms a pending deadline: the replacement takes over and the
+    // superseded deadline, still arriving, is refused.
+    const WeaverGpuEmission rearmed = weaverGpuEmissionAfterRearm(deadline,
+        { true, kWeaverGpuEmissionPosted, 8 });
+    expect(weaverGpuEmissionAccepts(rearmed, kWeaverGpuEmissionPosted, 8));
+    expect(!weaverGpuEmissionAccepts(rearmed, kWeaverGpuEmissionDeadline, 7));
+    // A replacement that could not be scheduled leaves the old one current,
+    // so the surface still gets its frame.
+    const WeaverGpuEmission kept = weaverGpuEmissionAfterRearm(deadline,
+        { false, kWeaverGpuEmissionNone, 9 });
+    expect(weaverGpuEmissionAccepts(kept, kWeaverGpuEmissionDeadline, 7));
+    // SetTimer emissions: the id carries the generation, so a WM_TIMER
+    // queued by a superseded timer is refused while its replacement counts.
+    expect(weaverIsGpuUiTimerId(weaverGpuUiTimerId(0xFFFFFFFFu)));
+    expect(weaverGpuUiTimerGeneration(weaverGpuUiTimerId(0xFFFFFFFFu)) == 0xFFFFFFFFu);
+    expect(!weaverIsGpuUiTimerId(1) && !weaverIsGpuUiTimerId(2) && !weaverIsGpuUiTimerId(0x1000));
+    const WeaverGpuEmission ui_rearmed = weaverGpuEmissionAfterRearm(
+        { true, kWeaverGpuEmissionUiTimer, 10 }, { true, kWeaverGpuEmissionUiTimer, 11 });
+    expect(!weaverGpuEmissionAccepts(ui_rearmed, kWeaverGpuEmissionUiTimer,
+        weaverGpuUiTimerGeneration(weaverGpuUiTimerId(10))));
+    expect(weaverGpuEmissionAccepts(ui_rearmed, kWeaverGpuEmissionUiTimer,
+        weaverGpuUiTimerGeneration(weaverGpuUiTimerId(11))));
 
     // Software pixels, retained pixels, and shared GPU textures all consume
     // this same physical edge extent; no path re-derives it from width alone.
