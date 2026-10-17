@@ -223,6 +223,45 @@ pub const max_canvas_widget_chart_points_per_view: usize = 16384;
 // labels) fits dozens. Entries are 16 B x 512 = 8 KiB per view.
 // Overflow is loud (`WidgetChartLabelsLimitReached`).
 pub const max_canvas_widget_chart_x_labels_per_view: usize = 512;
+// Immediate commands retained across all widgets of a view
+// (`Widget.immediate_commands`: `Ui.immediateCanvas` draw batches plus the
+// rare per-widget style metadata that rides the same slice: text style,
+// fonts, shadows, icon paths, gradients, corner radii, hover/pressed
+// styles), and the slices those commands carry. The runtime copies all of
+// it into per-view storage so a retained tree never reads memory the app
+// reuses for its next build. Receipts, measured 2026-10-16 at
+// `copyWidgetLayoutTree`: every Native example test carries zero
+// immediate commands; across all 22 Weaver examples captured headless
+// (49 runs) the largest view carried 114 commands (the visualizer: one
+// 109-command canvas), 169 icon path elements (styling-icons), 17
+// gradient stops (gradient-stack), 1 mesh patch, 0 polyline points, and
+// at most 3 metadata commands on one node. The budgets are tripwires
+// sized from the limits upstream of them, not from those small numbers:
+// - commands: a canvas may fill the whole display-list command budget
+//   (2048, which Weaver's own canvas budget mirrors) and every node of a
+//   full 1024-node tree may still carry two metadata commands.
+// - polyline points: Weaver's per-canvas point budget (8192). Visible
+//   points lower 1:1 into display-list path elements, so the 2048 path
+//   element budget fails first for anything on screen.
+// - icon path elements: twice the display-list path element budget, so
+//   mounted-but-offscreen icons (a scrolled list) never trip it before
+//   the visible ones trip the display list.
+// - gradient stops / mesh patches: four widgets at Weaver's per-widget
+//   maximum (64 stops, 16 patches); the display list allows 64 stops and
+//   16 patches on screen per view.
+// Memory is fixed-capacity address space, pages touched only as views
+// use it: 112 B x 4096 commands = 448 KiB, 8 B x 8192 points = 64 KiB,
+// 28 B x 4096 elements = 112 KiB, 20 B x 256 stops = 5 KiB, 192 B x 64
+// patches = 12 KiB, about 641 KiB per view (x 32 view slots ~ 20 MiB in
+// the desktop profile, one slot in the widget profile). A clock's three
+// text-style commands (336 B) touch at most two 4 KiB pages; the
+// visualizer's 114 (12.5 KiB) at most five. Overflow is loud and atomic: the layout is refused before any
+// pool resets, with a warning naming the budget, its limit, and the ask.
+pub const max_canvas_widget_immediate_commands_per_view: usize = 4096;
+pub const max_canvas_widget_immediate_points_per_view: usize = 8192;
+pub const max_canvas_widget_icon_path_elements_per_view: usize = 4096;
+pub const max_canvas_widget_gradient_stops_per_view: usize = 256;
+pub const max_canvas_widget_mesh_patches_per_view: usize = 64;
 pub const max_canvas_widget_invalidations_per_view: usize = max_canvas_widget_nodes_per_view * 2 + 1;
 // Scroll containers whose offset changed since the last app dispatch:
 // entries are node ids, deduped, and the dispatched event reads the

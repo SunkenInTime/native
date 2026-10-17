@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const validation = @import("validation.zig");
@@ -36,6 +37,8 @@ const clampCanvasWidgetLayoutTextOffsets = canvas_widget_runtime.clampCanvasWidg
 
 const platformCursorFromCanvas = widget_bridge.platformCursorFromCanvas;
 
+const widget_tree_log = std.log.scoped(.zero_canvas_widget_tree);
+
 /// Byte offset of `inner` within `outer` when it is a subslice, else null.
 fn subsliceOffset(outer: []const u8, inner: []const u8) ?usize {
     if (inner.len == 0) return 0;
@@ -47,13 +50,85 @@ fn subsliceOffset(outer: []const u8, inner: []const u8) ?usize {
     return offset;
 }
 
+/// Retained-pool demand of immediate commands, counted the way
+/// `copyWidgetImmediateCommands` charges the pools.
+const ImmediateCommandDemand = struct {
+    commands: usize = 0,
+    points: usize = 0,
+    icon_path_elements: usize = 0,
+    gradient_stops: usize = 0,
+    mesh_patches: usize = 0,
+
+    fn add(self: *ImmediateCommandDemand, commands: []const canvas.ImmediateCanvasCommand) void {
+        self.commands += commands.len;
+        for (commands) |command| switch (command) {
+            .polyline => |value| self.points += value.points.len,
+            .icon_path => |value| self.icon_path_elements += value.elements.len,
+            .background_gradient => |gradient| self.gradient_stops += switch (gradient) {
+                inline else => |value| value.stops.len,
+            },
+            .background_mesh_gradient => |value| self.mesh_patches += value.patches.len,
+            else => {},
+        };
+    }
+
+    fn validate(self: ImmediateCommandDemand) anyerror!void {
+        try checkBudget("immediate commands", "max_canvas_widget_immediate_commands_per_view", self.commands, "draw fewer immediate-canvas commands or put less style metadata on always-mounted widgets", error.WidgetImmediateCommandLimitReached);
+        try checkBudget("polyline points", "max_canvas_widget_immediate_points_per_view", self.points, "downsample polylines", error.WidgetImmediatePointLimitReached);
+        try checkBudget("icon path elements", "max_canvas_widget_icon_path_elements_per_view", self.icon_path_elements, "simplify icon paths or mount fewer path icons at once", error.WidgetIconPathElementLimitReached);
+        try checkBudget("gradient stops", "max_canvas_widget_gradient_stops_per_view", self.gradient_stops, "use fewer gradient stops", error.WidgetGradientStopLimitReached);
+        try checkBudget("mesh gradient patches", "max_canvas_widget_mesh_patches_per_view", self.mesh_patches, "use fewer mesh patches", error.WidgetMeshPatchLimitReached);
+    }
+
+    fn checkBudget(comptime what: []const u8, comptime budget: []const u8, asked: usize, comptime ask: []const u8, limit_error: anyerror) anyerror!void {
+        const limit = @field(canvas_limits, budget);
+        if (asked <= limit) return;
+        widget_tree_log.warn(
+            "retained " ++ what ++ " exceeded: the layout carries {d}, the per-view budget is {d} (canvas_limits." ++ budget ++ ") - " ++ ask,
+            .{ asked, limit },
+        );
+        return limit_error;
+    }
+};
+
+/// Whether a value of type `T` can point at memory outside itself. The
+/// immediate-command copy uses it to refuse, at compile time, a command
+/// payload that carries a slice the copy does not know to retain.
+fn typeHasPointer(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => true,
+        .array => |info| typeHasPointer(info.child),
+        .optional => |info| typeHasPointer(info.child),
+        .@"struct" => |info| inline for (info.fields) |field| {
+            if (typeHasPointer(field.type)) break true;
+        } else false,
+        .@"union" => |info| inline for (info.fields) |field| {
+            if (typeHasPointer(field.type)) break true;
+        } else false,
+        else => false,
+    };
+}
+
+/// Copy `items` into the next free run of a per-view pool and return the
+/// copy.
+fn copyIntoPool(comptime T: type, pool: []T, len: *usize, items: []const T, limit_error: anyerror) anyerror![]T {
+    if (items.len == 0) return pool[0..0];
+    const start = len.*;
+    const end = start + items.len;
+    if (end > pool.len) return limit_error;
+    @memcpy(pool[start..end], items);
+    len.* = end;
+    return pool[start..end];
+}
+
 /// Total retained-pool demand of a layout, mirrored charge-for-charge
-/// from `copyWidgetLayoutNode` and its helpers (text/icon/command/label
-/// bytes, span text unless it rebases as a subslice of the widget text,
-/// span links, context-menu labels, chart labels/values/lows). Checked
-/// BEFORE `copyWidgetLayoutTree` resets the pools so a budget overflow
-/// is loud AND atomic — the previous tree stays applied instead of a
-/// torn partial copy.
+/// from `copyWidgetLayoutNode` and its helpers (text/placeholder/icon/
+/// command/label bytes, span text unless it rebases as a subslice of the
+/// widget text, span links, context-menu labels, chart labels/values/
+/// lows, immediate commands and their payloads). Checked BEFORE
+/// `copyWidgetLayoutTree` resets the pools so a budget overflow is loud
+/// AND atomic — the previous tree stays applied instead of a torn
+/// partial copy.
 fn validateWidgetLayoutPoolBudgets(
     layout: canvas.WidgetLayoutTree,
     previous_texts: *const canvas_widget_runtime.CanvasWidgetTextEntryIndex,
@@ -64,11 +139,13 @@ fn validateWidgetLayoutPoolBudgets(
     var series_len: usize = 0;
     var points_len: usize = 0;
     var x_labels_len: usize = 0;
+    var immediate: ImmediateCommandDemand = .{};
     for (layout.nodes, 0..) |node, node_index| {
         // The copy loop charges the RECONCILED node (runtime editor text
         // can outgrow the source's) — mirror the same transform.
         const widget = canvasWidgetLayoutNodeWithTextReconcileState(node, layout, node_index, previous_texts).widget;
-        text_len += widget.text.len + widget.icon.len + widget.command.len + widget.semantics.label.len;
+        text_len += widget.text.len + widget.placeholder.len + widget.icon.len + widget.command.len + widget.semantics.label.len;
+        immediate.add(widget.immediate_commands);
         span_len += widget.spans.len;
         for (widget.spans) |span| {
             if (subsliceOffset(widget.text, span.text) == null) text_len += span.text.len;
@@ -89,6 +166,7 @@ fn validateWidgetLayoutPoolBudgets(
     if (series_len > canvas_limits.max_canvas_widget_chart_series_per_view) return error.WidgetChartSeriesLimitReached;
     if (points_len > canvas_limits.max_canvas_widget_chart_points_per_view) return error.WidgetChartPointsLimitReached;
     if (x_labels_len > canvas_limits.max_canvas_widget_chart_x_labels_per_view) return error.WidgetChartLabelsLimitReached;
+    try immediate.validate();
     if (text_len > max_canvas_widget_text_bytes_per_view) return error.WidgetTextTooLarge;
 }
 
@@ -276,6 +354,11 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             self.widget_chart_series_len = 0;
             self.widget_chart_points_len = 0;
             self.widget_chart_x_labels_len = 0;
+            self.widget_immediate_command_len = 0;
+            self.widget_immediate_point_len = 0;
+            self.widget_icon_path_element_len = 0;
+            self.widget_gradient_stop_len = 0;
+            self.widget_mesh_patch_len = 0;
 
             for (layout.nodes, 0..) |node, layout_index| {
                 const text_reconciled = canvasWidgetLayoutNodeWithTextReconcileState(node, layout, layout_index, &index_scratch.texts);
@@ -725,6 +808,8 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (node.widget.command.len > 0) try validateCommandName(node.widget.command);
             copy.widget.text = try self.copyWidgetText(node.widget.text);
             copy.widget.spans = try self.copyWidgetSpans(node.widget.text, copy.widget.text, node.widget.spans);
+            copy.widget.placeholder = try self.copyWidgetText(node.widget.placeholder);
+            copy.widget.immediate_commands = try self.copyWidgetImmediateCommands(node.widget.immediate_commands);
             copy.widget.icon = try self.copyWidgetText(node.widget.icon);
             copy.widget.command = try self.copyWidgetText(node.widget.command);
             copy.widget.semantics.label = try self.copyWidgetText(node.widget.semantics.label);
@@ -733,6 +818,30 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             copy = canvasWidgetLayoutNodeWithSourceSemantics(copy, source_semantics);
             copy.widget.children = &.{};
             return copy;
+        }
+
+        /// Retain a widget's immediate commands and every slice they carry
+        /// (polyline points, icon path elements, gradient stops, mesh
+        /// patches) in per-view storage, the same ownership rule as text:
+        /// the retained tree must stay readable after the app reuses the
+        /// memory it built the layout in, including when the rebuild that
+        /// handed this layout over fails afterwards. Bounded by the
+        /// per-view immediate-command budgets in `canvas_limits`.
+        pub fn copyWidgetImmediateCommands(self: *RuntimeView, commands: []const canvas.ImmediateCanvasCommand) anyerror![]const canvas.ImmediateCanvasCommand {
+            const copied = try copyIntoPool(canvas.ImmediateCanvasCommand, &self.widget_immediate_commands, &self.widget_immediate_command_len, commands, error.WidgetImmediateCommandLimitReached);
+            for (copied) |*command| switch (command.*) {
+                .polyline => |*value| value.points = try copyIntoPool(geometry.PointF, &self.widget_immediate_points, &self.widget_immediate_point_len, value.points, error.WidgetImmediatePointLimitReached),
+                .icon_path => |*value| value.elements = try copyIntoPool(canvas.PathElement, &self.widget_icon_path_elements, &self.widget_icon_path_element_len, value.elements, error.WidgetIconPathElementLimitReached),
+                .background_gradient => |*gradient| switch (gradient.*) {
+                    inline else => |*value| value.stops = try copyIntoPool(canvas.GradientStop, &self.widget_gradient_stops, &self.widget_gradient_stop_len, value.stops, error.WidgetGradientStopLimitReached),
+                },
+                .background_mesh_gradient => |*value| value.patches = try copyIntoPool(canvas.WidgetMeshPatch, &self.widget_mesh_patches, &self.widget_mesh_patch_len, value.patches, error.WidgetMeshPatchLimitReached),
+                // Every other payload is plain data. A new command that
+                // carries a slice fails to compile here until it is copied
+                // above.
+                inline else => |value| comptime std.debug.assert(!typeHasPointer(@TypeOf(value))),
+            };
+            return copied;
         }
 
         /// Retain a widget's declared context-menu items: the retained tree

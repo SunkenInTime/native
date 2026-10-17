@@ -525,6 +525,20 @@ pub const RuntimeView = struct {
     widget_chart_points_len: usize = 0,
     widget_chart_x_labels: [canvas_limits.max_canvas_widget_chart_x_labels_per_view][]const u8 align(storage_align) = undefined,
     widget_chart_x_labels_len: usize = 0,
+    /// Immediate commands retained across all widgets of the view, and the
+    /// slices those commands carry (polyline points, icon path elements,
+    /// gradient stops, mesh patches), same bump-copy discipline as spans:
+    /// the retained tree never points into memory the app reuses.
+    widget_immediate_commands: [canvas_limits.max_canvas_widget_immediate_commands_per_view]canvas.ImmediateCanvasCommand = undefined,
+    widget_immediate_command_len: usize = 0,
+    widget_immediate_points: [canvas_limits.max_canvas_widget_immediate_points_per_view]geometry.PointF = undefined,
+    widget_immediate_point_len: usize = 0,
+    widget_icon_path_elements: [canvas_limits.max_canvas_widget_icon_path_elements_per_view]canvas.PathElement = undefined,
+    widget_icon_path_element_len: usize = 0,
+    widget_gradient_stops: [canvas_limits.max_canvas_widget_gradient_stops_per_view]canvas.GradientStop = undefined,
+    widget_gradient_stop_len: usize = 0,
+    widget_mesh_patches: [canvas_limits.max_canvas_widget_mesh_patches_per_view]canvas.WidgetMeshPatch = undefined,
+    widget_mesh_patch_len: usize = 0,
     focused: bool = false,
     open: bool = false,
     label_storage: [platform.max_view_label_bytes]u8 = undefined,
@@ -676,6 +690,7 @@ pub const RuntimeView = struct {
     pub const copyWidgetLayoutNode = CanvasWidgetTreeMethods.copyWidgetLayoutNode;
     pub const copyWidgetText = CanvasWidgetTreeMethods.copyWidgetText;
     pub const copyWidgetSpans = CanvasWidgetTreeMethods.copyWidgetSpans;
+    pub const copyWidgetImmediateCommands = CanvasWidgetTreeMethods.copyWidgetImmediateCommands;
     pub const copyWidgetContextMenu = CanvasWidgetTreeMethods.copyWidgetContextMenu;
     pub const copyWidgetChart = CanvasWidgetTreeMethods.copyWidgetChart;
 

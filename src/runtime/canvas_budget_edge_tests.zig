@@ -10,9 +10,11 @@
 //!
 //! Boundaries covered: widget layout nodes, widget text bytes, inline
 //! spans, declared context-menu items, anchored surfaces, chart series,
-//! and chart points (reachable through `.band` series: values + low both
+//! chart points (reachable through `.band` series: values + low both
 //! charge the pool, so 32 maximal bands fill it exactly while staying
-//! inside the 64-series budget). Retained packet commands are documented
+//! inside the 64-series budget), and the retained immediate-command pools
+//! (commands, polyline points, icon path elements, gradient stops, mesh
+//! patches). Retained packet commands are documented
 //! structurally unreachable (the command budget fails first) and the
 //! text-layout budgets have their own suite
 //! (canvas_frame_text_layout_budget_tests.zig).
@@ -37,6 +39,11 @@ const StressMode = enum {
     anchored,
     chart_series,
     chart_points,
+    immediate_commands,
+    immediate_points,
+    icon_path_elements,
+    gradient_stops,
+    mesh_patches,
 };
 
 const StressConfig = struct {
@@ -71,6 +78,12 @@ fn stressUpdate(model: *StressModel, msg: StressMsg) void {
 var text_payload: [96 * 1024]u8 = undefined;
 var chart_values: [256]f32 = undefined;
 var chart_low: [256]f32 = undefined;
+var immediate_payload: [canvas_limits.max_canvas_widget_immediate_commands_per_view + 1]canvas.ImmediateCanvasCommand = undefined;
+var point_payload: [canvas_limits.max_canvas_widget_immediate_points_per_view + 1]geometry.PointF = undefined;
+var path_element_payload: [canvas_limits.max_canvas_widget_icon_path_elements_per_view + 1]canvas.PathElement = undefined;
+var gradient_stop_payload: [canvas_limits.max_canvas_widget_gradient_stops_per_view + 1]canvas.GradientStop = undefined;
+var mesh_patch_payload: [canvas_limits.max_canvas_widget_mesh_patches_per_view + 1]canvas.WidgetMeshPatch = undefined;
+var payload_command: [1]canvas.ImmediateCanvasCommand = undefined;
 
 fn stressKey(index: *const usize) canvas.UiKey {
     return canvas.uiKey(@as(u64, index.*));
@@ -191,6 +204,28 @@ fn stressView(ui: *StressApp.Ui, model: *const StressModel) StressApp.Ui.Node {
             };
             return ui.column(.{}, .{ui.chart(.{ .height = 64 }, series)});
         },
+        // count = retained immediate commands: text-style metadata, which
+        // the renderer never draws, so the display-list command budget
+        // cannot fail first.
+        .immediate_commands => return ui.column(.{}, .{ui.immediateCanvas(.{}, immediate_payload[0..count])}),
+        // count = polyline points / icon path elements / gradient stops /
+        // mesh patches, all carried by one command.
+        .immediate_points => {
+            payload_command[0] = .{ .polyline = .{ .points = point_payload[0..count], .width = 1, .color = canvas.Color.rgba8(0, 0, 0, 255) } };
+            return ui.column(.{}, .{ui.immediateCanvas(.{}, &payload_command)});
+        },
+        .icon_path_elements => {
+            payload_command[0] = .{ .icon_path = .{ .elements = path_element_payload[0..count] } };
+            return ui.column(.{}, .{ui.immediateCanvas(.{}, &payload_command)});
+        },
+        .gradient_stops => {
+            payload_command[0] = .{ .background_gradient = .{ .linear = .{ .start = geometry.PointF.init(0, 0), .end = geometry.PointF.init(1, 0), .stops = gradient_stop_payload[0..count] } } };
+            return ui.column(.{}, .{ui.immediateCanvas(.{}, &payload_command)});
+        },
+        .mesh_patches => {
+            payload_command[0] = .{ .background_mesh_gradient = .{ .patches = mesh_patch_payload[0..count] } };
+            return ui.column(.{}, .{ui.immediateCanvas(.{}, &payload_command)});
+        },
     }
 }
 
@@ -214,6 +249,18 @@ const Harness = struct {
         @memset(text_payload[0..], 'x');
         for (&chart_values, 0..) |*value, index| value.* = @floatFromInt(index % 7);
         for (&chart_low, 0..) |*value, index| value.* = @as(f32, @floatFromInt(index % 5)) - 4;
+        @memset(&immediate_payload, .{ .text_style = .{} });
+        for (&point_payload, 0..) |*point, index| point.* = geometry.PointF.init(@floatFromInt(index % 100), @floatFromInt(index % 37));
+        @memset(&path_element_payload, .{ .verb = .line_to, .points = .{ geometry.PointF.init(4, 4), geometry.PointF.zero(), geometry.PointF.zero() } });
+        path_element_payload[0].verb = .move_to;
+        for (&gradient_stop_payload, 0..) |*stop, index| stop.* = .{
+            .offset = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(gradient_stop_payload.len - 1)),
+            .color = canvas.Color.rgba8(@intCast(index % 256), 0, 0, 255),
+        };
+        @memset(&mesh_patch_payload, .{
+            .points = @splat(geometry.PointF.init(0.5, 0.5)),
+            .colors = @splat(canvas.Color.rgba8(0, 0, 255, 255)),
+        });
 
         const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(800, 3200) });
         errdefer harness.destroy(std.testing.allocator);
@@ -415,6 +462,52 @@ test "budget edge: chart points through band series" {
     try std.testing.expectEqual(applied_nodes, try h.layoutNodeCount());
 
     // Survival either way.
+    try h.set(.{ .mode = .idle, .count = 0 });
+    try std.testing.expectEqual(@as(usize, 2), try h.layoutNodeCount());
+}
+
+test "budget edge: retained immediate commands" {
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+    const h = try Harness.create();
+    defer h.destroy();
+    try h.expectEdge(.immediate_commands, canvas_limits.max_canvas_widget_immediate_commands_per_view, error.WidgetImmediateCommandLimitReached);
+}
+
+test "budget edge: retained icon path elements" {
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+    const h = try Harness.create();
+    defer h.destroy();
+    // Icon paths on an immediate canvas are metadata the canvas never
+    // draws, so the retained pool is the only budget in play.
+    try h.expectEdge(.icon_path_elements, canvas_limits.max_canvas_widget_icon_path_elements_per_view, error.WidgetIconPathElementLimitReached);
+}
+
+test "budget edge: retained polyline points, gradient stops, and mesh patches" {
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+    const h = try Harness.create();
+    defer h.destroy();
+
+    // These pools are deliberately larger than what one frame can draw
+    // (path elements, gradient stops, and mesh patches each have a smaller
+    // display-list budget), so only the one-past side is reachable as a
+    // retained-pool failure: it fails with the named error, leaves the
+    // applied tree untouched, and the next sane rebuild applies.
+    const cases = [_]struct { mode: StressMode, budget: usize, err: anyerror }{
+        .{ .mode = .immediate_points, .budget = canvas_limits.max_canvas_widget_immediate_points_per_view, .err = error.WidgetImmediatePointLimitReached },
+        .{ .mode = .gradient_stops, .budget = canvas_limits.max_canvas_widget_gradient_stops_per_view, .err = error.WidgetGradientStopLimitReached },
+        .{ .mode = .mesh_patches, .budget = canvas_limits.max_canvas_widget_mesh_patches_per_view, .err = error.WidgetMeshPatchLimitReached },
+    };
+    for (cases) |case| {
+        try h.set(.{ .mode = .idle, .count = 0 });
+        try std.testing.expectError(case.err, h.set(.{ .mode = case.mode, .count = case.budget + 1 }));
+        try std.testing.expectEqual(@as(usize, 2), try h.layoutNodeCount());
+    }
     try h.set(.{ .mode = .idle, .count = 0 });
     try std.testing.expectEqual(@as(usize, 2), try h.layoutNodeCount());
 }
