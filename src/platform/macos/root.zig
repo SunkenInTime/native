@@ -13,6 +13,8 @@ pub const Error = error{
     CreateFailed,
     FocusFailed,
     CloseFailed,
+    /// A `.hidden` window: Windows-only for now (`hiddenUnsupported`).
+    UnsupportedWindowShowMode,
 };
 
 const AppKitHost = opaque {};
