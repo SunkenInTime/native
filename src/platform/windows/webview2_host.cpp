@@ -4437,13 +4437,15 @@ static void audioApplyVolume(Host *host) {
 
 /* Synchronous local-file load: 0 loaded (the asynchronous LOADED
  * acknowledgment follows at topology ready), 1 missing file, 2
- * undecodable — the macOS host's result contract. */
+ * undecodable — the macOS host's result contract — plus 3 when Media
+ * Foundation itself is unavailable (says nothing about the file). */
+constexpr int kAudioLoadMediaFoundationUnavailable = 3;
 static int audioLoadPathInternal(Host *host, const std::string &path) {
     audioReleaseSession(host, true);
     std::wstring wide = widen(path);
     if (!regularFileExists(wide)) return 1;
     const AudioMediaFoundation *mf = audioEnsureMediaFoundation();
-    if (!mf) return 2;
+    if (!mf) return kAudioLoadMediaFoundationUnavailable;
     IMFSourceResolver *resolver = nullptr;
     if (FAILED(mf->createSourceResolver(&resolver)) || !resolver) return 2;
     MF_OBJECT_TYPE type = MF_OBJECT_INVALID;
@@ -4476,6 +4478,11 @@ static int audioLoadPathInternal(Host *host, const std::string &path) {
 static int audioLoadUrlInternal(Host *host, const std::string &url, const std::string &cache_path, uint64_t expected_bytes) {
     audioReleaseSession(host, true);
     if (url.find("://") == std::string::npos) return 2;
+    /* Before the cache check: without Media Foundation nothing can be
+     * decoded, and a valid cache entry must not be mistaken for a corrupt
+     * one and deleted. */
+    const AudioMediaFoundation *mf = audioEnsureMediaFoundation();
+    if (!mf) return kAudioLoadMediaFoundationUnavailable;
     if (!cache_path.empty()) {
         std::wstring cache_wide = widen(cache_path);
         bool exists = false;
@@ -4491,8 +4498,6 @@ static int audioLoadUrlInternal(Host *host, const std::string &url, const std::s
             DeleteFileW(cache_wide.c_str());
         }
     }
-    const AudioMediaFoundation *mf = audioEnsureMediaFoundation();
-    if (!mf) return 2;
     HWND hwnd = parentWindow(host);
     if (!hwnd) return 2;
     IMFSourceResolver *resolver = nullptr;
@@ -5560,7 +5565,15 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                 HDROP drop = reinterpret_cast<HDROP>(wparam);
                 std::string paths = droppedFilePaths(drop);
                 static const auto finish_drop = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, DragFinish, "file drops");
-                if (finish_drop) finish_drop(drop);
+                /* The HDROP is the GlobalAlloc block the drop source
+                 * handed us; DragFinish is GlobalFree with shell
+                 * bookkeeping. Without SHELL32 free it directly so an
+                 * undeliverable drop still never leaks. */
+                if (finish_drop) {
+                    finish_drop(drop);
+                } else {
+                    GlobalFree(drop);
+                }
                 if (!paths.empty()) {
                     for (auto &entry : host->windows) {
                         if (entry.second.hwnd == hwnd) {
