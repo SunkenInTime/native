@@ -354,12 +354,12 @@ pub const DisplayList = struct {
 /// half-full bound; small or oversized lists keep the linear scans.
 const diff_id_index_slots = 4096;
 const DiffIdIndex = plan_key_index.HashSlots(diff_id_index_slots);
-// Lazily heap-allocated per thread (32 KiB of probe tables): reset per
-// diff, so first-use init on the diffing thread is the only contract —
-// threads that never diff never allocate it.
+// Lazily heap-allocated per thread (up to 32 KiB of probe tables): each
+// diff resets the prefix it needs, so threads that never diff never
+// allocate it and small diffs never touch most of it.
 const DiffIdScratch = struct {
-    previous: DiffIdIndex = .{},
-    next: DiffIdIndex = .{},
+    previous: DiffIdIndex,
+    next: DiffIdIndex,
 };
 const diff_id_scratch = @import("lazy_tls.zig").LazyTls(DiffIdScratch);
 
@@ -367,10 +367,10 @@ const diff_id_scratch = @import("lazy_tls.zig").LazyTls(DiffIdScratch);
 /// the duplicate ids `validateUniqueObjectIds` rejects — one pass does
 /// both jobs.
 fn buildDiffIdIndex(display_list: DisplayList, table: *DiffIdIndex) Error!void {
-    table.reset();
+    table.reset(display_list.commands.len);
     for (display_list.commands, 0..) |command, index| {
         const id = command.objectId() orelse continue;
-        var p = DiffIdIndex.probe(plan_key_index.mixHash(id));
+        var p = table.probe(plan_key_index.mixHash(id));
         while (table.next(&p)) |candidate| {
             if (display_list.commands[candidate].objectId() == id) return error.DuplicateObjectId;
         }
@@ -379,7 +379,7 @@ fn buildDiffIdIndex(display_list: DisplayList, table: *DiffIdIndex) Error!void {
 }
 
 fn findCommandByIdIndexed(display_list: DisplayList, table: *const DiffIdIndex, id: ObjectId) ?CommandRef {
-    var p = DiffIdIndex.probe(plan_key_index.mixHash(id));
+    var p = table.probe(plan_key_index.mixHash(id));
     while (table.next(&p)) |candidate| {
         if (display_list.commands[candidate].objectId() == id) {
             return .{ .index = candidate, .command = display_list.commands[candidate] };

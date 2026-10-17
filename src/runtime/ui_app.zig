@@ -888,7 +888,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// declarable window; a build declaring more variable lists than
         /// slots drops the excess to estimate-only math with a debug
         /// warning.
-        virtual_extent_tables: [canvas.max_virtual_windows]canvas.VirtualExtentTable = [_]canvas.VirtualExtentTable{.{}} ** canvas.max_virtual_windows,
+        ///
+        /// Only `virtual_extent_tables[0..virtual_extent_table_count]`
+        /// is initialized: a table is reset when a list first claims it.
+        /// Resetting all of them up front wrote 16 pages (64 KiB) in
+        /// every app, since each ~48 KiB table keeps fields on both
+        /// sides of its arrays; an app without variable-extent lists
+        /// now writes none.
+        virtual_extent_tables: [canvas.max_virtual_windows]canvas.VirtualExtentTable = undefined,
+        virtual_extent_table_count: usize = 0,
         /// Live model-declared secondary windows (`Options.windows_fn`),
         /// keyed by window label.
         window_slots: [max_ui_windows]WindowSlot,
@@ -976,16 +984,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 },
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
-                // Both set in place below. A by-value `Effects.init` and the
-                // tables' default image each write every page of their
-                // undefined arrays (the effect rings, the extent caches),
-                // ~650 KiB that most apps never use, and `Effects.init`
-                // also routes its 493 KiB through the caller's stack.
+                // Set in place below. A by-value `Effects.init` writes every
+                // page of its undefined rings, which most apps never use,
+                // and routes its 493 KiB through the caller's stack.
                 .effects = undefined,
-                .virtual_extent_tables = undefined,
             };
             self.effects.initInPlace(backing);
-            for (&self.virtual_extent_tables) |*table| table.reset();
         }
 
         fn assertOptions(options: Options) void {
@@ -1557,7 +1561,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn virtualExtentTableForId(self: *const Self, id: canvas.ObjectId) ?*canvas.VirtualExtentTable {
             if (id == 0) return null;
-            for (&self.virtual_extent_tables) |*table| {
+            for (self.virtual_extent_tables[0..self.virtual_extent_table_count]) |*table| {
                 if (table.id == id) return @constCast(table);
             }
             return null;
@@ -1565,11 +1569,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn claimVirtualExtentTable(self: *Self, id: canvas.ObjectId) ?*canvas.VirtualExtentTable {
             if (id == 0) return null;
-            for (&self.virtual_extent_tables) |*table| {
+            const claimed = self.virtual_extent_tables[0..self.virtual_extent_table_count];
+            for (claimed) |*table| {
                 if (table.id == id) return table;
             }
-            for (&self.virtual_extent_tables) |*table| {
+            for (claimed) |*table| {
                 if (table.id == 0) return table;
+            }
+            if (self.virtual_extent_table_count < self.virtual_extent_tables.len) {
+                const table = &self.virtual_extent_tables[self.virtual_extent_table_count];
+                table.reset();
+                self.virtual_extent_table_count += 1;
+                return table;
             }
             // All slots busy: recycle one whose list the LAST build no
             // longer declared (per-document lists come and go; their
