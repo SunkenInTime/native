@@ -175,7 +175,7 @@ test "runtime applies pointer values to canvas controls" {
     try std.testing.expectEqual(@as(f32, 0), retained.nodes[2].widget.value);
     try std.testing.expectEqual(@as(f32, 0), retained.nodes[3].widget.value);
 
-    const semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    const semantics = runtimeViewWidgetSemantics(harness.runtime.views[0]);
     try std.testing.expectEqual(@as(?f32, 1), semantics[0].value);
     try std.testing.expectEqual(@as(?f32, 0), semantics[1].value);
     try std.testing.expectEqual(@as(?f32, 0), semantics[2].value);
@@ -407,17 +407,17 @@ test "runtime batches pointer widget display list refreshes" {
     try std.testing.expectEqual(harness.runtime.views[0].widget_tokens.motion.durationMs(.fast), animations[0].duration_ms);
     try std.testing.expectApproxEqAbs(-travel, animations[0].from_transform.?.tx, 0.001);
     try std.testing.expectEqual(canvas.Affine.identity(), animations[0].to_transform.?);
-    const expected_toggle_dirty = runtimeViewCanvasWidgetDirtyBounds(&harness.runtime.views[0], 1, retained.nodes[1].widget.frame).?;
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_render_animation_dirty_bounds_count);
-    try std.testing.expectEqual(canvas.toggleWidgetKnobCommandId(4), harness.runtime.views[0].canvas_render_animation_dirty_bounds[0].id);
-    try std.testing.expectEqualDeep(expected_toggle_dirty, harness.runtime.views[0].canvas_render_animation_dirty_bounds[0].bounds.?);
+    const expected_toggle_dirty = runtimeViewCanvasWidgetDirtyBounds(harness.runtime.views[0], 1, retained.nodes[1].widget.frame).?;
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_render_animation_dirty_bounds.len);
+    try std.testing.expectEqual(canvas.toggleWidgetKnobCommandId(4), harness.runtime.views[0].canvas_render_animation_dirty_bounds.slice()[0].id);
+    try std.testing.expectEqualDeep(expected_toggle_dirty, harness.runtime.views[0].canvas_render_animation_dirty_bounds.slice()[0].bounds.?);
 
     var overrides: [1]canvas.CanvasRenderOverride = undefined;
     const sampled = try canvas.sampleCanvasRenderAnimations(animations, 110 + 60_000_000, &overrides);
     try std.testing.expectEqual(@as(usize, 1), sampled.len);
     try std.testing.expect(sampled[0].transform.?.tx > -travel);
     try std.testing.expect(sampled[0].transform.?.tx < 0);
-    try std.testing.expectEqualDeep(expected_toggle_dirty, runtimeViewCanvasRenderAnimationDirtyBoundsForOverrides(&harness.runtime.views[0], &.{}, sampled).?);
+    try std.testing.expectEqualDeep(expected_toggle_dirty, runtimeViewCanvasRenderAnimationDirtyBoundsForOverrides(harness.runtime.views[0], &.{}, sampled).?);
 
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
@@ -761,7 +761,7 @@ test "runtime reconciles canvas control state across layout replacement" {
     try std.testing.expect(!harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
 
-    const semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    const semantics = runtimeViewWidgetSemantics(harness.runtime.views[0]);
     try std.testing.expectEqual(@as(?f32, 1), canvasWidgetSemanticsById(semantics, 2).?.value);
     try std.testing.expectEqual(@as(?f32, 0), canvasWidgetSemanticsById(semantics, 3).?.value);
     try std.testing.expectApproxEqAbs(@as(f32, 0.55), canvasWidgetSemanticsById(semantics, 4).?.value.?, 0.001);
@@ -1110,7 +1110,7 @@ test "model-side selection move between treeitems leaves exactly one wash" {
 
     // Semantics report the same single selection (the snapshot channel
     // that exposed the stale `state=[selected]`).
-    const semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    const semantics = runtimeViewWidgetSemantics(harness.runtime.views[0]);
     try std.testing.expectEqual(@as(?f32, 0), canvasWidgetSemanticsById(semantics, 51).?.value);
     try std.testing.expectEqual(@as(?f32, 1), canvasWidgetSemanticsById(semantics, 52).?.value);
 
@@ -1209,7 +1209,7 @@ test "runtime drives retained settings and data grid workflow" {
     try std.testing.expect(!retained.findById(35).?.widget.state.selected);
     try std.testing.expect(retained.findById(36).?.widget.state.selected);
 
-    var semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    var semantics = runtimeViewWidgetSemantics(harness.runtime.views[0]);
     try std.testing.expectEqual(canvas.WidgetRole.grid, canvasWidgetSemanticsById(semantics, 30).?.role);
     try std.testing.expectEqual(@as(?usize, 3), canvasWidgetSemanticsById(semantics, 30).?.grid_row_count);
     try std.testing.expectEqual(@as(?usize, 2), canvasWidgetSemanticsById(semantics, 30).?.grid_column_count);
@@ -1271,7 +1271,7 @@ test "runtime drives retained settings and data grid workflow" {
     try std.testing.expect(retained.findById(36).?.widget.state.selected);
     try std.testing.expectEqualStrings("Ready", retained.findById(36).?.widget.text);
 
-    semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    semantics = runtimeViewWidgetSemantics(harness.runtime.views[0]);
     try std.testing.expectEqualStrings("Ready", canvasWidgetSemanticsById(semantics, 36).?.label);
     try std.testing.expectEqual(@as(?f32, 1), canvasWidgetSemanticsById(semantics, 36).?.value);
     try std.testing.expectEqual(@as(?f32, 1), canvasWidgetSemanticsById(semantics, 23).?.value);
@@ -1509,7 +1509,7 @@ test "runtime selects canvas widgets from pointer and keyboard activation" {
     try std.testing.expect(retained.findById(4).?.widget.state.selected);
     try std.testing.expectEqual(@as(f32, 1), retained.findById(4).?.widget.value);
 
-    const semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    const semantics = runtimeViewWidgetSemantics(harness.runtime.views[0]);
     try std.testing.expectEqual(@as(usize, 3), semantics.len);
     try std.testing.expectEqual(@as(?f32, 1), semantics[0].value);
     try std.testing.expectEqual(@as(?f32, 0), semantics[1].value);
@@ -1657,7 +1657,7 @@ test "runtime clears sibling canvas selections in retained groups" {
     try std.testing.expect(retained.findById(5).?.widget.state.selected);
     try std.testing.expectEqual(@as(f32, 1), retained.findById(5).?.widget.value);
 
-    const semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    const semantics = runtimeViewWidgetSemantics(harness.runtime.views[0]);
     try std.testing.expectEqual(@as(?f32, 0), semantics[1].value);
     try std.testing.expectEqual(@as(?f32, 1), semantics[2].value);
     try std.testing.expectEqual(@as(?f32, 0), semantics[3].value);
@@ -1683,7 +1683,7 @@ test "runtime clears sibling canvas selections in retained groups" {
     try std.testing.expect(retained.findById(7).?.widget.state.selected);
     try std.testing.expectEqual(@as(f32, 1), retained.findById(7).?.widget.value);
 
-    const menu_semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    const menu_semantics = runtimeViewWidgetSemantics(harness.runtime.views[0]);
     try std.testing.expectEqual(@as(?f32, 0), menu_semantics[6].value);
     try std.testing.expectEqual(@as(?f32, 1), menu_semantics[7].value);
 
@@ -1915,7 +1915,7 @@ test "runtime applies keyboard values to focused canvas controls" {
     try std.testing.expect(retained.findById(5).?.widget.state.selected);
     try std.testing.expectEqual(@as(f32, 1), retained.findById(5).?.widget.value);
 
-    const semantics = runtimeViewWidgetSemantics(&harness.runtime.views[0]);
+    const semantics = runtimeViewWidgetSemantics(harness.runtime.views[0]);
     try std.testing.expectEqual(@as(?f32, 1), semantics[0].value);
     try std.testing.expectEqual(@as(?f32, 0), semantics[1].value);
     try std.testing.expectEqual(@as(?f32, 1), semantics[2].value);
@@ -2024,7 +2024,7 @@ test "runtime dispatches canvas widget commands from pointer and keyboard activa
     const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &widgets }, geometry.RectF.init(0, 0, 240, 200), &nodes);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
-    const combobox_semantics = canvasWidgetSemanticsById(runtimeViewWidgetSemantics(&harness.runtime.views[0]), 6).?;
+    const combobox_semantics = canvasWidgetSemanticsById(runtimeViewWidgetSemantics(harness.runtime.views[0]), 6).?;
     try std.testing.expectEqual(canvas.WidgetRole.textbox, combobox_semantics.role);
     try std.testing.expectEqualStrings("Production", combobox_semantics.text_value);
     try std.testing.expect(combobox_semantics.actions.press);

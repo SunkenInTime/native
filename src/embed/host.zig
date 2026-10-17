@@ -569,7 +569,7 @@ pub const EmbeddedApp = struct {
     };
 
     pub fn canvasRevisions(self: *const EmbeddedApp) CanvasRevisions {
-        for (self.runtime.views[0..self.runtime.view_count]) |*view| {
+        for (self.runtime.views[0..self.runtime.view_count]) |view| {
             if (!view.open or view.window_id != 1 or view.kind != .gpu_surface) continue;
             if (!std.mem.eql(u8, view.label, mobile_gpu_surface_label)) continue;
             return .{ .current = view.canvas_revision, .presented = view.presented_canvas_revision };
@@ -592,7 +592,7 @@ pub const EmbeddedApp = struct {
     /// focused widget accepts text edits right now.
     pub fn textInputState(self: *const EmbeddedApp) types.MobileTextInputState {
         var state = types.MobileTextInputState{};
-        for (self.runtime.views[0..self.runtime.view_count]) |*view| {
+        for (self.runtime.views[0..self.runtime.view_count]) |view| {
             if (!view.open or view.window_id != 1 or view.kind != .gpu_surface) continue;
             if (!std.mem.eql(u8, view.label, mobile_gpu_surface_label)) continue;
             if (!view.focused or view.canvas_widget_focused_id == 0) return state;
@@ -757,6 +757,7 @@ pub const MobileHostApp = struct {
 
     pub fn destroy(self: *MobileHostApp) void {
         disableAutomation(self);
+        self.embedded.runtime.deinit();
         std.heap.page_allocator.destroy(self);
     }
 

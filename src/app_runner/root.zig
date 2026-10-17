@@ -56,6 +56,9 @@ pub const RunOptions = struct {
     startup_window_layer: ?native_sdk.WindowLayer = null,
     /// Optional so false can explicitly replace a compiled true value.
     startup_click_through: ?bool = null,
+    /// Replaces the compiled show mode of the startup window; `.hidden`
+    /// keeps it off screen for the app's life.
+    startup_window_show: ?native_sdk.WindowShowMode = null,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     js_window_api: bool = false,
@@ -118,6 +121,9 @@ pub const RunOptions = struct {
         if (self.startup_click_through) |click_through| {
             info.main_window.click_through = click_through;
             if (windows.len > 0) buffers.restored_windows[0].click_through = click_through;
+        }
+        if (self.startup_window_show) |show| {
+            info.main_window.show = show;
         }
         info.main_window.primary_display_anchor = self.primary_display_anchor;
         if (windows.len > 0) buffers.restored_windows[0].primary_display_anchor = self.primary_display_anchor;
@@ -1072,6 +1078,7 @@ fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, 
     }
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     var driver: CaptureDriver = .{
         .io = init.io,
         .null_platform = &null_platform,
@@ -1235,6 +1242,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = null_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1290,6 +1298,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = mac_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1342,6 +1351,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = linux_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1393,6 +1403,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = windows_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1512,6 +1523,7 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
     }
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    defer runtime.deinit();
     // Bridge policy and security must match what the recording ran
     // under (they gate replayed bridge_message dispatch); automation,
     // window-state restore, and tracing stay off — replay consumes only

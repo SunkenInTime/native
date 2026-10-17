@@ -433,7 +433,7 @@ test "mid-tween frames present as region-scoped patches, not full repaints" {
     try tweenFrame(harness, app, t0);
     try tweenFrame(harness, app, t0 + 90_000_000);
     try presentFrame(harness, gpu_commands, packet_buffer, pixels, scratch, 2);
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
     try std.testing.expectEqual(platform.GpuPresentPacketMode.patch, view.gpu_present_packet_mode);
     try std.testing.expect(view.gpu_present_patch_upsert_count > 0);
     try std.testing.expect(view.gpu_present_patch_upsert_count < harness.runtime.views[0].canvasDisplayList().commands.len);

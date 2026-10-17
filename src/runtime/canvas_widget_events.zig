@@ -9,6 +9,7 @@ const canvas_limits = @import("canvas_limits.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const widget_bridge = @import("widget_bridge.zig");
+const storage_allocator = @import("grown_array.zig").storage_allocator;
 
 const GpuSurfaceInputEvent = runtime_api.GpuSurfaceInputEvent;
 const CanvasWidgetPointerEvent = runtime_api.CanvasWidgetPointerEvent;
@@ -464,17 +465,19 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             if (view_index >= self.view_count) return;
             if (self.views[view_index].kind != .gpu_surface) return;
             if (self.options.platform.services.set_window_drag_regions_fn == null) return;
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             var regions: [canvas_limits.max_canvas_widget_window_drag_regions_per_view]platform.WindowDragRegion = undefined;
             const count = collectCanvasWidgetWindowDragRegions(view.widgetLayoutTree(), &regions);
             if (view.canvas_widget_drag_regions_pushed) {
-                if (count == view.canvas_widget_drag_region_count and windowDragRegionsEqual(regions[0..count], view.canvas_widget_drag_regions[0..count])) return;
+                if (count == view.canvas_widget_drag_regions.len and windowDragRegionsEqual(regions[0..count], view.canvas_widget_drag_regions.slice())) return;
             } else if (count == 0) {
                 return;
             }
+            // Room for the mirror before the platform sees the regions, so
+            // the mirror always says what the platform holds.
+            try view.canvas_widget_drag_regions.ensureCapacity(storage_allocator, count);
             try self.options.platform.services.setWindowDragRegions(view.window_id, view.label, regions[0..count]);
-            @memcpy(view.canvas_widget_drag_regions[0..count], regions[0..count]);
-            view.canvas_widget_drag_region_count = count;
+            try view.canvas_widget_drag_regions.replace(storage_allocator, regions[0..count]);
             view.canvas_widget_drag_regions_pushed = true;
         }
 
@@ -1020,7 +1023,7 @@ fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {
 }
 
 fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
-    for (self.views[0..self.view_count], 0..) |*view, index| {
+    for (self.views[0..self.view_count], 0..) |view, index| {
         if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
     }
     return null;

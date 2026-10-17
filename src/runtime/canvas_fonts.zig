@@ -218,7 +218,7 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
             // cached advance batch and retained wrap result.
             canvas.bumpTextMeasureGeneration();
             const frame_methods = canvas_frame_module.RuntimeCanvasFrames(Runtime);
-            for (self.views[0..self.view_count], 0..) |*view, index| {
+            for (self.views[0..self.view_count], 0..) |view, index| {
                 if (!view.open or view.kind != .gpu_surface) continue;
                 view.presented_canvas_valid = false;
                 self.invalidateFor(.state, view.frame);

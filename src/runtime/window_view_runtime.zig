@@ -142,7 +142,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 output[count] = viewInfoFromWebView(Self.mainWebViewInfo(self, window_index));
                 count += 1;
             }
-            for (self.views[0..self.view_count]) |*view| {
+            for (self.views[0..self.view_count]) |view| {
                 if (!view.open or view.window_id != window_id) continue;
                 if (count >= output.len) return output[0..count];
                 output[count] = view.info();
@@ -451,7 +451,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn relayoutDescendantWebViewBackendsDepth(self: *Runtime, window_id: platform.WindowId, parent_label: []const u8, depth: usize) !void {
             if (depth >= platform.max_views + platform.max_webviews) return;
-            for (self.views[0..self.view_count]) |*view| {
+            for (self.views[0..self.view_count]) |view| {
                 if (view.window_id != window_id) continue;
                 const parent = view.parent orelse continue;
                 if (std.mem.eql(u8, parent, parent_label)) {
@@ -472,7 +472,11 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn reserveView(self: *Runtime, options: platform.ViewOptions) !void {
             const index = self.view_count;
-            self.views[index] = .{
+            const slot = self.view_slot_used.complement().findFirstSet() orelse return error.ViewLimitReached;
+            self.view_slot_used.set(slot);
+            errdefer self.view_slot_used.unset(slot);
+            self.views[index] = &self.view_slots[slot];
+            self.views[index].* = .{
                 .id = WindowStorageMethods.allocateViewId(self),
                 .window_id = options.window_id,
                 .kind = options.kind,
@@ -504,7 +508,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn findViewIndex(self: *const Runtime, window_id: platform.WindowId, label: []const u8) ?usize {
-            for (self.views[0..self.view_count], 0..) |*view, index| {
+            for (self.views[0..self.view_count], 0..) |view, index| {
                 if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
             }
             return null;
@@ -516,13 +520,13 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             // by-value copy here is megabytes of stack — more than a
             // mobile main thread has (iOS caps it at 1MB, and this runs
             // on the host's display-link tick via automation commands).
-            var view = &self.views[index];
+            var view = self.views[index];
             var depth: usize = 0;
             while (depth < platform.max_views) : (depth += 1) {
                 if (view.kind == .toolbar) return .toolbar;
                 const parent_label = view.parent orelse return .native_view;
                 const parent_index = Self.findViewIndex(self, window_id, parent_label) orelse return .native_view;
-                view = &self.views[parent_index];
+                view = self.views[parent_index];
             }
             return .native_view;
         }
@@ -531,7 +535,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             if (WindowStorageMethods.findWindowIndexById(self, window_id)) |window_index| {
                 self.windows[window_index].main_focused = std.mem.eql(u8, label, "main");
             }
-            for (self.views[0..self.view_count], 0..) |*view, view_index| {
+            for (self.views[0..self.view_count], 0..) |view, view_index| {
                 if (view.window_id != window_id) continue;
                 const previous_state = view.canvasWidgetRenderState();
                 view.focused = std.mem.eql(u8, view.label, label);
@@ -549,7 +553,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             if (WindowStorageMethods.findWindowIndexById(self, window_id)) |window_index| {
                 self.windows[window_index].main_focused = false;
             }
-            for (self.views[0..self.view_count], 0..) |*view, view_index| {
+            for (self.views[0..self.view_count], 0..) |view, view_index| {
                 if (view.window_id != window_id) continue;
                 const previous_state = view.canvasWidgetRenderState();
                 view.focused = false;
@@ -616,12 +620,10 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn removeViewAt(self: *Runtime, index: usize) void {
             if (index >= self.view_count) return;
+            self.views[index].deinit();
             self.releaseWidgetTokens(self.views[index].widget_tokens);
-            var cursor = index;
-            while (cursor + 1 < self.view_count) : (cursor += 1) {
-                const next = &self.views[cursor + 1];
-                self.views[cursor].copyRuntimeStateFrom(next, &self.canvas_widget_copy_scratch);
-            }
+            self.view_slot_used.unset((@intFromPtr(self.views[index]) - @intFromPtr(&self.view_slots)) / @sizeOf(@TypeOf(self.view_slots[0])));
+            std.mem.copyForwards(*@TypeOf(self.view_slots[0]), self.views[index .. self.view_count - 1], self.views[index + 1 .. self.view_count]);
             self.view_count -= 1;
         }
 
@@ -684,7 +686,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn closeDescendantWebViewBackendsDepth(self: *Runtime, window_id: platform.WindowId, parent_label: []const u8, depth: usize) !void {
             if (depth >= platform.max_views + platform.max_webviews) return;
-            for (self.views[0..self.view_count]) |*view| {
+            for (self.views[0..self.view_count]) |view| {
                 if (view.window_id != window_id) continue;
                 const parent = view.parent orelse continue;
                 if (std.mem.eql(u8, parent, parent_label)) {
@@ -713,7 +715,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             if (Self.findWebViewIndex(self, window_id, label)) |index| {
                 if (self.webviews[index].focused) return true;
             }
-            for (self.views[0..self.view_count]) |*view| {
+            for (self.views[0..self.view_count]) |view| {
                 if (view.window_id != window_id) continue;
                 const parent = view.parent orelse continue;
                 if (std.mem.eql(u8, parent, label) and Self.viewTreeHasFocusedDepth(self, window_id, view.label, depth + 1)) return true;

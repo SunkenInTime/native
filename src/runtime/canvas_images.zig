@@ -229,7 +229,7 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         /// frames so the repaint is not gated on other input.
         fn noteCanvasImagesChanged(self: *Runtime) void {
             const frame_methods = canvas_frame_module.RuntimeCanvasFrames(Runtime);
-            for (self.views[0..self.view_count], 0..) |*view, index| {
+            for (self.views[0..self.view_count], 0..) |view, index| {
                 if (!view.open or view.kind != .gpu_surface) continue;
                 view.presented_canvas_valid = false;
                 self.invalidateFor(.state, view.frame);

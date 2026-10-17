@@ -575,7 +575,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         /// match in window order wins, deterministically.
         pub fn automationGpuSurfaceViewIndexByLabel(self: *Runtime, view_label: []const u8) anyerror!usize {
             try validateViewLabel(view_label);
-            for (self.views[0..self.view_count], 0..) |*view, index| {
+            for (self.views[0..self.view_count], 0..) |view, index| {
                 if (!view.open or view.kind != .gpu_surface) continue;
                 if (!std.mem.eql(u8, view.label, view_label)) continue;
                 const window_index = runtimeFindWindowIndexById(self, view.window_id) orelse continue;
@@ -610,7 +610,7 @@ fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {
 }
 
 fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
-    for (self.views[0..self.view_count], 0..) |*view, index| {
+    for (self.views[0..self.view_count], 0..) |view, index| {
         if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
     }
     return null;
