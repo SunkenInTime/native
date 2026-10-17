@@ -4284,3 +4284,191 @@ test "a slot allocates its request storage with its first spawn, fetch or file e
     try fx.feedExit(3, 0);
     while (fx.takeMsg()) |_| {}
 }
+
+
+test "slot allocation failures recover, recycle across effect kinds, and deinit twice" {
+    const Msg = union(enum) { exit: EffectExit, response: EffectResponse, file: EffectFileResult };
+    const Fx = Effects(Msg);
+    const H = struct {
+        fn exited(v: EffectExit) Msg { return .{ .exit = v }; }
+        fn response(v: EffectResponse) Msg { return .{ .response = v }; }
+        fn file(v: EffectFileResult) Msg { return .{ .file = v }; }
+        fn start(fx: *Fx, mode: usize) void {
+            switch (mode) {
+                0 => fx.spawn(.{ .key = 1, .argv = &.{"echo", "new"}, .stdin = "stdin", .on_exit = exited }),
+                1 => fx.spawn(.{ .key = 1, .argv = &.{"echo"}, .output = .collect, .on_exit = exited }),
+                2 => fx.spawn(.{ .key = 1, .argv = &.{"echo"}, .max_line_bytes = max_effect_line_bytes + 1, .on_exit = exited }),
+                3 => fx.fetch(.{ .key = 1, .url = "http://localhost/new", .headers = &.{.{.name = "X-Test", .value = "fresh"}}, .body = "body", .on_response = response }),
+                4 => fx.fetch(.{ .key = 1, .url = "http://localhost/stream", .body = "body", .response = .stream, .max_line_bytes = max_effect_line_bytes + 1, .on_response = response }),
+                5 => fx.readFile(.{ .key = 1, .path = "review-new.txt", .on_result = file }),
+                6 => fx.writeFile(.{ .key = 1, .path = "review-new.txt", .bytes = "payload", .on_result = file }),
+                else => unreachable,
+            }
+        }
+        fn rejected(msg: Msg) bool {
+            return switch (msg) { .exit => |v| v.reason == .rejected, .response => |v| v.outcome == .rejected, .file => |v| v.outcome == .rejected };
+        }
+    };
+    const allocations = [_]usize{1,2,2,2,3,2,2};
+    for (allocations, 0..) |count, mode| {
+        for (0..count) |fail_at| {
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{.fail_index = fail_at});
+            const fx = try std.testing.allocator.create(Fx);
+            defer std.testing.allocator.destroy(fx);
+            fx.initInPlace(failing.allocator());
+            defer fx.deinit();
+            fx.executor = .fake;
+            H.start(fx, mode);
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expect(H.rejected(fx.takeMsg().?));
+            try std.testing.expect(fx.takeMsg() == null);
+            try std.testing.expectEqual(Fx.SlotState.idle, fx.slots[0].state.load(.acquire));
+            if (fail_at == 0) try std.testing.expect(fx.slots[0].storage == null);
+            failing.fail_index = std.math.maxInt(usize);
+            H.start(fx, mode);
+            try std.testing.expectEqual(Fx.SlotState.running, fx.slots[0].state.load(.acquire));
+            const storage = fx.slots[0].storage.?;
+            fx.cancel(1);
+            try std.testing.expect(!H.rejected(fx.takeMsg().?));
+            while (fx.takeMsg()) |_| {}
+            // Cycle every kind through the same retained allocation.
+            for (0..allocations.len) |next_mode| {
+                H.start(fx, next_mode);
+                try std.testing.expectEqual(storage, fx.slots[0].storage.?);
+                switch (next_mode) {
+                    0,1,2 => {
+                        try std.testing.expectEqualStrings("echo", fx.pendingSpawnAt(0).?.argv[0]);
+                        if (next_mode == 1) try fx.feedStderr(1, "new stderr");
+                        try fx.feedExit(1, 7);
+                    },
+                    3,4 => {
+                        const request = fx.pendingFetchAt(0).?;
+                        try std.testing.expectEqualStrings("body", request.body);
+                        try fx.feedResponseOutcome(1, .connect_failed, 0, "");
+                    },
+                    5,6 => {
+                        try std.testing.expectEqualStrings("review-new.txt", fx.pendingFileAt(0).?.path);
+                        try fx.feedFileResult(1, .not_found, "");
+                    },
+                    else => unreachable,
+                }
+                try std.testing.expect(fx.takeMsg() != null);
+                while (fx.takeMsg()) |_| {}
+            }
+            H.start(fx, mode); // deinit with an accepted effect still active
+            fx.deinit();
+            fx.deinit();
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            for (&fx.slots) |*slot| try std.testing.expect(slot.storage == null);
+        }
+    }
+}
+
+
+test "real Windows subprocess storage survives stdin stderr cancel failure and teardown" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const Msg = union(enum) { exit: EffectExit, line: EffectLine };
+    const Fx = Effects(Msg);
+    const H = struct {
+        fn exited(v: EffectExit) Msg { return .{.exit = v}; }
+        fn line(v: EffectLine) Msg { return .{.line = v}; }
+        fn next(fx: *Fx) !Msg {
+            for (0..1000) |_| {
+                if (fx.takeMsg()) |msg| return msg;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
+            }
+            return error.ReviewTimedOut;
+        }
+        fn settled(fx: *Fx) !void {
+            for (0..1000) |_| {
+                if (fx.slots[0].state.load(.acquire) != .running) return;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
+            }
+            return error.ReviewTimedOut;
+        }
+    };
+    const fx = try std.testing.allocator.create(Fx);
+    defer std.testing.allocator.destroy(fx);
+    fx.initInPlace(std.testing.allocator);
+    defer fx.deinit();
+    const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    fx.spawn(.{.key = 1, .argv = &.{powershell, "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write([Console]::In.ReadToEnd()); [Console]::Error.Write('real stderr'); exit 7"}, .stdin = "real stdin", .output = .collect, .on_exit = H.exited});
+    const storage = fx.slots[0].storage.?;
+    const result = (try H.next(fx)).exit;
+    try std.testing.expectEqual(EffectExitReason.exited, result.reason);
+    try std.testing.expectEqual(@as(i32,7), result.code);
+    try std.testing.expectEqualStrings("real stdin", result.output);
+    try std.testing.expectEqualStrings("real stderr", result.stderr_tail);
+    try H.settled(fx);
+
+    fx.spawn(.{.key = 2, .argv = &.{"E:\\w\\review-native50-51\\does-not-exist.exe"}, .output = .collect, .on_exit = H.exited});
+    const failed = (try H.next(fx)).exit;
+    try std.testing.expectEqual(EffectExitReason.spawn_failed, failed.reason);
+    try std.testing.expectEqualStrings("", failed.stderr_tail);
+    try H.settled(fx);
+    try std.testing.expectEqual(storage, fx.slots[0].storage.?);
+
+    fx.spawn(.{.key = 3, .argv = &.{powershell, "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.WriteLine('ready'); Start-Sleep -Seconds 30"}, .on_line = H.line, .on_exit = H.exited});
+    try std.testing.expectEqualStrings("ready\r", (try H.next(fx)).line.line);
+    fx.cancel(3);
+    try std.testing.expectEqual(EffectExitReason.cancelled, (try H.next(fx)).exit.reason);
+    try H.settled(fx);
+    try std.testing.expectEqual(storage, fx.slots[0].storage.?);
+
+    fx.spawn(.{.key = 4, .argv = &.{powershell, "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.WriteLine('ready'); Start-Sleep -Seconds 30"}, .on_line = H.line, .on_exit = H.exited});
+    try std.testing.expectEqualStrings("ready\r", (try H.next(fx)).line.line);
+    fx.deinit(); // stop a live real worker, then free slot storage
+    fx.deinit();
+    try std.testing.expect(fx.slots[0].storage == null);
+}
+
+test "every slot keeps independent storage and frees it at teardown" {
+    const Fx = Effects(void);
+    const fx = try std.testing.allocator.create(Fx);
+    defer std.testing.allocator.destroy(fx);
+    var tracking = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    fx.initInPlace(tracking.allocator());
+    defer fx.deinit();
+    fx.executor = .fake;
+    for (0..max_effects) |i| {
+        switch (i % 3) {
+            0 => fx.spawn(.{.key = @intCast(i + 1), .argv = &.{"echo"}, .output = .collect}),
+            1 => fx.fetch(.{.key = @intCast(i + 1), .url = "http://localhost/test"}),
+            2 => fx.readFile(.{.key = @intCast(i + 1), .path = "test.txt"}),
+            else => unreachable,
+        }
+        try std.testing.expect(fx.slots[i].storage != null);
+        for (0..i) |j| try std.testing.expect(fx.slots[i].storage != fx.slots[j].storage);
+    }
+    try std.testing.expectEqual(max_effects, fx.activeCount());
+    for (0..max_effects / 2) |i| fx.cancel(@intCast(i + 1));
+    fx.deinit();
+    fx.deinit();
+    try std.testing.expectEqual(tracking.allocated_bytes, tracking.freed_bytes);
+}
+
+test "real executor IO allocation failure retains storage and leaves slot usable" {
+    const Fx = Effects(EffectExit);
+    const H = struct { fn exit(v: EffectExit) EffectExit { return v; } };
+    const fx = try std.testing.allocator.create(Fx);
+    defer std.testing.allocator.destroy(fx);
+    // Storage and collect buffer succeed; creating the IO executor fails.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{.fail_index = 2});
+    fx.initInPlace(failing.allocator());
+    defer fx.deinit();
+    fx.spawn(.{.key=1, .argv=&.{"unused"}, .output=.collect, .on_exit=H.exit});
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(EffectExitReason.rejected, fx.takeMsg().?.reason);
+    try std.testing.expectEqual(Fx.SlotState.idle, fx.slots[0].state.load(.acquire));
+    try std.testing.expect(fx.slots[0].collect_buffer == null);
+    const storage = fx.slots[0].storage.?;
+    failing.fail_index = std.math.maxInt(usize);
+    fx.executor = .fake;
+    fx.spawn(.{.key=1, .argv=&.{"recovered"}, .on_exit=H.exit});
+    try std.testing.expectEqualStrings("recovered", fx.pendingSpawnAt(0).?.argv[0]);
+    try std.testing.expectEqual(storage, fx.slots[0].storage.?);
+    try fx.feedExit(1,0);
+    try std.testing.expectEqual(EffectExitReason.exited, fx.takeMsg().?.reason);
+    fx.deinit();
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
