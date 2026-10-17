@@ -2315,6 +2315,94 @@ test "ui app autofocus moves the keyboard to a freshly mounted editor through th
     try std.testing.expectEqual(button_id, harness.runtime.views[view_index].canvas_widget_focused_id);
 }
 
+// ----------------------------- a failed rebuild after the runtime took its tree
+
+/// The autofocus view with a placeholder formatted into the app's tree
+/// arena, so the placeholder bytes live only as long as that arena.
+fn formattedPlaceholderAutofocusView(ui: *AutofocusApp.Ui, model: *const AutofocusModel) AutofocusApp.Ui.Node {
+    if (!model.editing) {
+        return ui.column(.{ .gap = 8, .padding = 12 }, .{
+            ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
+        });
+    }
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
+        ui.textField(.{
+            .autofocus = true,
+            .text = model.draft.text(),
+            .placeholder = ui.fmt("Untitled note {d}", .{model.edit_count + 1}),
+            .on_input = AutofocusApp.Ui.inputMsg(.draft_edit),
+        }),
+    });
+}
+
+fn denyFocusView(context: ?*anyopaque, window_id: zero_platform.WindowId, label: []const u8) anyerror!void {
+    _ = context;
+    _ = window_id;
+    _ = label;
+    return error.FocusDenied;
+}
+
+fn retainedPlaceholder(runtime: *const core.Runtime, view_label: []const u8) ?[]const u8 {
+    for (runtime.views[0..runtime.view_count]) |view| {
+        if (!std.mem.eql(u8, view.label, view_label)) continue;
+        for (view.widgetSemantics()) |node| {
+            if (node.placeholder.len > 0) return node.placeholder;
+        }
+    }
+    return null;
+}
+
+test "a rebuild that fails after the runtime took its tree does not leave the runtime reading app memory" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(AutofocusApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = AutofocusApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-failed-rebuild",
+        .scene = autofocus_scene,
+        .canvas_label = autofocus_canvas_label,
+        .update = autofocusUpdate,
+        .view = formattedPlaceholderAutofocusView,
+        .on_command = autofocusCommand,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = autofocus_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    // Mounting the editor hands the new tree to the runtime, then autofocus
+    // calls the focus service, which fails. The rebuild stops there, so the
+    // app keeps its previous tree as the active one and will build into the
+    // failed tree's arena again next time.
+    const services = &harness.runtime.options.platform.services;
+    const focus_view_fn = services.focus_view_fn;
+    services.focus_view_fn = denyFocusView;
+    const active_before = app_state.arena_index;
+    try std.testing.expectError(error.FocusDenied, harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "note.new", .window_id = 1 } }));
+    try std.testing.expectEqual(active_before, app_state.arena_index);
+    try std.testing.expectEqualStrings("Untitled note 1", retainedPlaceholder(&harness.runtime, autofocus_canvas_label).?);
+
+    // The next rebuild resets that arena and builds into it while the
+    // runtime still holds the failed rebuild's layout. The runtime compares
+    // against that layout, so it has to read its own copy of it.
+    services.focus_view_fn = focus_view_fn;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "note.new", .window_id = 1 } });
+    try std.testing.expect(app_state.arena_index != active_before);
+    try std.testing.expectEqualStrings("Untitled note 1", retainedPlaceholder(&harness.runtime, autofocus_canvas_label).?);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, autofocus_canvas_label, harness.runtime.tokensWithTextMeasure(app_state.effectiveTokens()));
+}
+
 // -------------------------------------------------------- layout capacity
 
 const CapacityModel = struct {

@@ -766,8 +766,53 @@ fn immediateCommandsEqual(a: []const canvas.ImmediateCanvasCommand, b: []const c
                 .icon_path => |other| if (!equality_model.rectsEqual(value.view_box, other.view_box) or value.stroke_width != other.stroke_width or !equality_model.pathElementsEqual(value.elements, other.elements)) return false,
                 else => unreachable,
             },
+            // Slice payloads compare by content: the runtime retains its
+            // own copy of them, so the previous and next layouts never
+            // share a pointer even when nothing changed.
+            .polyline => |value| switch (right) {
+                .polyline => |other| if (value.width != other.width or !equality_model.colorsEqual(value.color, other.color) or !pointSlicesEqual(value.points, other.points)) return false,
+                else => unreachable,
+            },
+            .background_gradient => |value| switch (right) {
+                .background_gradient => |other| if (!widgetGradientsEqual(value, other)) return false,
+                else => unreachable,
+            },
+            .background_mesh_gradient => |value| switch (right) {
+                .background_mesh_gradient => |other| if (value.interpolation != other.interpolation or !meshPatchesEqual(value.patches, other.patches)) return false,
+                else => unreachable,
+            },
             else => if (!std.meta.eql(left, right)) return false,
         }
+    }
+    return true;
+}
+
+fn pointSlicesEqual(a: []const geometry.PointF, b: []const geometry.PointF) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (!equality_model.pointsEqual(left, right)) return false;
+    }
+    return true;
+}
+
+fn widgetGradientsEqual(a: canvas.WidgetGradient, b: canvas.WidgetGradient) bool {
+    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+    switch (a) {
+        inline else => |left, tag| {
+            const right = @field(b, @tagName(tag));
+            inline for (std.meta.fields(@TypeOf(left))) |field| {
+                if (comptime std.mem.eql(u8, field.name, "stops")) continue;
+                if (!std.meta.eql(@field(left, field.name), @field(right, field.name))) return false;
+            }
+            return equality_model.gradientStopsEqual(left.stops, right.stops);
+        },
+    }
+}
+
+fn meshPatchesEqual(a: []const canvas.WidgetMeshPatch, b: []const canvas.WidgetMeshPatch) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (!std.meta.eql(left, right)) return false;
     }
     return true;
 }
