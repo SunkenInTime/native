@@ -37,7 +37,10 @@ const page_size = std.heap.page_size_min;
 /// `create` commits eagerly as `page_allocator` does, and says so once.
 pub const max_reservations = 256;
 
-var bases: [max_reservations]std.atomic.Value(usize) = @splat(.init(0));
+/// Each slot's reservation, `base` 0 when free. Written under `table_lock`
+/// held exclusively, read under it held shared (the fault handler), so a
+/// reader never pairs one reservation's base with another's length.
+var bases: [max_reservations]usize = @splat(0);
 var lengths: [max_reservations]usize = @splat(0);
 var table_lock: windows.SRWLOCK = .{};
 var handler: ?*anyopaque = null;
@@ -81,9 +84,9 @@ fn track(base: usize, length: usize) bool {
         if (handler == null) return false;
     }
     for (&bases, &lengths) |*slot, *slot_length| {
-        if (slot.load(.monotonic) != 0) continue;
+        if (slot.* != 0) continue;
+        slot.* = base;
         slot_length.* = length;
-        slot.store(base, .release);
         return true;
     }
     if (!warned_full) {
@@ -97,16 +100,16 @@ fn untrack(base: usize) bool {
     AcquireSRWLockExclusive(&table_lock);
     defer ReleaseSRWLockExclusive(&table_lock);
     for (&bases) |*slot| {
-        if (slot.load(.monotonic) != base) continue;
-        slot.store(0, .release);
+        if (slot.* != base) continue;
+        slot.* = 0;
         return true;
     }
     return false;
 }
 
+/// Call with `table_lock` held.
 fn owned(address: usize) bool {
-    for (&bases, lengths) |*slot, length| {
-        const base = slot.load(.acquire);
+    for (bases, lengths) |base, length| {
         if (base != 0 and address >= base and address - base < length) return true;
     }
     return false;
@@ -120,6 +123,11 @@ fn onFault(info: *windows.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     // 0 is a read, 1 a write; 8 (execution) is never ours.
     if (record.ExceptionInformation[0] > 1) return windows.EXCEPTION_CONTINUE_SEARCH;
     const address = record.ExceptionInformation[1];
+    // Held across the commit too: a reservation untracked meanwhile is not
+    // released until this lets go. Nothing under the lock touches lazily
+    // committed memory, so no fault can arrive while a writer holds it.
+    AcquireSRWLockShared(&table_lock);
+    defer ReleaseSRWLockShared(&table_lock);
     if (!owned(address)) return windows.EXCEPTION_CONTINUE_SEARCH;
     const page = std.mem.alignBackward(usize, address, page_size);
     // Out of commit: the access fails as it would have without us.
@@ -137,6 +145,8 @@ extern "kernel32" fn VirtualAlloc(address: ?*anyopaque, size: usize, kind: u32, 
 extern "kernel32" fn VirtualFree(address: ?*anyopaque, size: usize, kind: u32) callconv(.winapi) windows.BOOL;
 extern "kernel32" fn AcquireSRWLockExclusive(lock: *windows.SRWLOCK) callconv(.winapi) void;
 extern "kernel32" fn ReleaseSRWLockExclusive(lock: *windows.SRWLOCK) callconv(.winapi) void;
+extern "kernel32" fn AcquireSRWLockShared(lock: *windows.SRWLOCK) callconv(.winapi) void;
+extern "kernel32" fn ReleaseSRWLockShared(lock: *windows.SRWLOCK) callconv(.winapi) void;
 
 const ProcessMemoryCounters = extern struct {
     cb: u32,
@@ -200,6 +210,48 @@ test "the kernel writes into a table only where it is committed" {
     try std.testing.expect(ReadFile(file, buffer.ptr, @intCast(buffer.len), &read, null).toBool());
     try std.testing.expectEqual(@as(u32, @intCast(buffer.len)), read);
     try std.testing.expectEqualSlices(u8, "MZ", buffer[0..2]);
+}
+
+test "a slot reused by another thread never lends its length to a foreign reservation" {
+    if (!lazy) return error.SkipZigTest;
+    // Three reservations at known addresses: a small one, a large one, and
+    // a foreign one inside the span the large one's length would cover if
+    // it were paired with the small one's base.
+    const envelope = VirtualAlloc(null, 192 * 1024 * 1024, mem_reserve, page_noaccess) orelse return error.OutOfMemory;
+    const start = @intFromPtr(envelope);
+    _ = VirtualFree(envelope, 0, mem_release);
+    const small = VirtualAlloc(@ptrFromInt(start), 64 * 1024, mem_reserve, page_noaccess) orelse return error.SkipZigTest;
+    defer _ = VirtualFree(small, 0, mem_release);
+    const foreign = VirtualAlloc(@ptrFromInt(start + 1024 * 1024), 64 * 1024, mem_reserve, page_noaccess) orelse return error.SkipZigTest;
+    defer _ = VirtualFree(foreign, 0, mem_release);
+    const large = VirtualAlloc(@ptrFromInt(start + 128 * 1024 * 1024), 64 * 1024 * 1024, mem_reserve, page_noaccess) orelse return error.SkipZigTest;
+    defer _ = VirtualFree(large, 0, mem_release);
+    const Race = struct {
+        stop: std.atomic.Value(bool) = .init(false),
+        small: usize,
+        large: usize,
+        fn writer(self: *@This()) void {
+            while (!self.stop.load(.acquire)) {
+                if (track(self.large, 64 * 1024 * 1024)) _ = untrack(self.large);
+                if (track(self.small, 64 * 1024)) _ = untrack(self.small);
+            }
+        }
+    };
+    var race: Race = .{ .small = @intFromPtr(small), .large = @intFromPtr(large) };
+    const writer = try std.Thread.spawn(.{}, Race.writer, .{&race});
+    defer {
+        race.stop.store(true, .release);
+        writer.join();
+    }
+    var exception = std.mem.zeroes(windows.EXCEPTION_RECORD);
+    exception.ExceptionCode = windows.EXCEPTION_ACCESS_VIOLATION;
+    exception.NumberParameters = 2;
+    exception.ExceptionInformation[0] = 1;
+    exception.ExceptionInformation[1] = @intFromPtr(foreign);
+    var info: windows.EXCEPTION_POINTERS = .{ .ExceptionRecord = &exception, .ContextRecord = undefined };
+    for (0..500_000) |_| {
+        try std.testing.expectEqual(@as(c_long, windows.EXCEPTION_CONTINUE_SEARCH), onFault(&info));
+    }
 }
 
 test "memory not from create passes through" {
