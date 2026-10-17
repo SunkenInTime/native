@@ -13,6 +13,13 @@ const widget_bridge = @import("widget_bridge.zig");
 const storage_allocator = @import("grown_array.zig").storage_allocator;
 
 const CanvasWidgetDisplayListChrome = runtime_api.CanvasWidgetDisplayListChrome;
+
+/// One loop animation a display refresh wants armed, with the bounds it
+/// repaints (see `Runtime.canvas_widget_loop_animation_scratch`).
+pub const DesiredLoopAnimation = struct {
+    animation: canvas.CanvasRenderAnimation,
+    bounds: geometry.RectF,
+};
 const CanvasWidgetToggleAnimation = runtime_view.CanvasWidgetToggleAnimation;
 const CanvasDisplayListScratch = runtime_view.CanvasDisplayListScratch;
 const max_canvas_commands_per_view = canvas_limits.max_canvas_commands_per_view;
@@ -421,7 +428,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // for all of them and for the tracked set, then arm: nothing
             // allocates between arming an animation and tracking its id.
             var desired_ids: [canvas_limits.max_canvas_widget_loop_animations_per_view]canvas.ObjectId = undefined;
-            var desired: [canvas_limits.max_canvas_widget_loop_animations_per_view]DesiredLoopAnimation = undefined;
+            const desired = &self.canvas_widget_loop_animation_scratch;
             var desired_count: usize = 0;
 
             const reduce_motion = view.widget_tokens.motion.durationMs(.slow) == 0;
@@ -541,11 +548,6 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             }
             try view.canvas_widget_loop_animation_ids.replace(storage_allocator, desired_ids[0..desired_count]);
         }
-
-        const DesiredLoopAnimation = struct {
-            animation: canvas.CanvasRenderAnimation,
-            bounds: geometry.RectF,
-        };
 
         fn existingCanvasRenderAnimationStartNs(view: anytype, id: canvas.ObjectId) ?u64 {
             for (view.canvasRenderAnimations()) |animation| {
