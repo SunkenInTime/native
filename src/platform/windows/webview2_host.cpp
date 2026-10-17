@@ -9,6 +9,7 @@
 #include <wincodec.h>
 #include <uxtheme.h>
 #include <dwmapi.h>
+#include "lazy_dll.h"
 #include "shared_renderer_client.h"
 #include "shared_renderer_policy.h"
 #include "dpi_geometry.h"
@@ -793,6 +794,29 @@ static void copyWideField(wchar_t *dest, size_t dest_len, const std::wstring &va
     dest[count] = L'\0';
 }
 
+/* SHELL32.dll loads with the first tray icon or notification, not at
+ * process start (lazy_dll.h); FALSE when it cannot load. */
+static BOOL notifyIcon(DWORD message, NOTIFYICONDATAW *data) {
+    static const auto notify = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, Shell_NotifyIconW, "tray icons and notifications");
+    return notify ? notify(message, data) : FALSE;
+}
+
+/* ShellExecuteW's "open" verb: the default handler for a URL or file, or
+ * explorer.exe with arguments. SHELL32.dll loads on first use. */
+static bool shellOpen(const wchar_t *target, const wchar_t *arguments) {
+    static const auto execute = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, ShellExecuteW, "opening links and revealing files");
+    if (!execute) return false;
+    HINSTANCE result = execute(nullptr, L"open", target, arguments, nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<intptr_t>(result) > 32;
+}
+
+static bool addToRecentDocs(UINT flags, const void *item) {
+    static const auto add = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, SHAddToRecentDocs, "recent documents");
+    if (!add) return false;
+    add(flags, item);
+    return true;
+}
+
 static NOTIFYICONDATAW notificationIconData(Host *host) {
     NOTIFYICONDATAW data = {};
     data.cbSize = sizeof(data);
@@ -826,12 +850,12 @@ static bool setNotificationIcon(Host *host, const std::string &icon_path, const 
     data.hIcon = loadNotificationIcon(host, icon_path, &destroy_icon);
     std::wstring tip = widen(!tooltip.empty() ? tooltip : (host->app_name.empty() ? std::string("native-sdk") : host->app_name));
     copyWideField(data.szTip, ARRAYSIZE(data.szTip), tip);
-    BOOL ok = Shell_NotifyIconW(host->notification_icon_added ? NIM_MODIFY : NIM_ADD, &data);
+    BOOL ok = notifyIcon(host->notification_icon_added ? NIM_MODIFY : NIM_ADD, &data);
     if (destroy_icon && data.hIcon) DestroyIcon(data.hIcon);
     if (!ok) return false;
     if (!host->notification_icon_added) {
         data.uVersion = NOTIFYICON_VERSION_4;
-        Shell_NotifyIconW(NIM_SETVERSION, &data);
+        notifyIcon(NIM_SETVERSION, &data);
     }
     host->notification_icon_added = true;
     return true;
@@ -844,7 +868,7 @@ static bool ensureNotificationIcon(Host *host) {
 static void removeNotificationIcon(Host *host) {
     if (!host || !host->notification_icon_added) return;
     NOTIFYICONDATAW data = notificationIconData(host);
-    if (data.hWnd) Shell_NotifyIconW(NIM_DELETE, &data);
+    if (data.hWnd) notifyIcon(NIM_DELETE, &data);
     host->notification_icon_added = false;
 }
 
@@ -876,8 +900,10 @@ static void setDialogFolder(IFileDialog *dialog, const char *path, size_t path_l
     if (!dialog || !path || path_len == 0) return;
     std::wstring path_wide = widen(slice(path, path_len));
     if (path_wide.empty()) return;
+    static const auto create_item = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, SHCreateItemFromParsingName, "a file dialog's starting folder");
+    if (!create_item) return;
     IShellItem *folder = nullptr;
-    if (SUCCEEDED(SHCreateItemFromParsingName(path_wide.c_str(), nullptr, IID_PPV_ARGS(&folder))) && folder) {
+    if (SUCCEEDED(create_item(path_wide.c_str(), nullptr, IID_PPV_ARGS(&folder))) && folder) {
         dialog->SetFolder(folder);
         folder->Release();
     }
@@ -1319,14 +1345,18 @@ static void emitFileDrop(Host *host, const Window &window, const std::string &pa
     host->callback(host->callback_context, &event);
 }
 
+/* SHELL32.dll loads with the first file drop (lazy_dll.h); windows
+ * accept drops through WS_EX_ACCEPTFILES, set when they are created. */
 static std::string droppedFilePaths(HDROP drop) {
+    static const auto query_file = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, DragQueryFileW, "file drops");
     std::string paths;
-    UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+    if (!query_file) return paths;
+    UINT count = query_file(drop, 0xFFFFFFFF, nullptr, 0);
     for (UINT index = 0; index < count; ++index) {
-        UINT len = DragQueryFileW(drop, index, nullptr, 0);
+        UINT len = query_file(drop, index, nullptr, 0);
         if (len == 0) continue;
         std::wstring path((size_t)len + 1, L'\0');
-        DragQueryFileW(drop, index, path.data(), len + 1);
+        query_file(drop, index, path.data(), len + 1);
         path.resize(len);
         std::string utf8_path = narrow(path);
         if (utf8_path.empty()) continue;
@@ -2653,6 +2683,13 @@ static bool scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns) {
         reinterpret_cast<DWORD_PTR>(hwnd), kTimeOneShot | kTimeKillSynchronous) != 0;
 }
 
+/* dwmapi.dll loads with the first GPU surface backend switch
+ * (lazy_dll.h); a software-only app never makes one. */
+static void dwmFlush() {
+    static const auto flush = NATIVE_SDK_LAZY_PROC(kNativeSdkDwmApi, DwmFlush, "GPU surface backend switches");
+    if (flush) flush();
+}
+
 /* The single surface-frame emission: view state (nonblank verdict, sample
  * color, buffer geometry) is the payload, so one event serves surface-frame
  * requests and present completions alike. The runtime publishes automation
@@ -2685,7 +2722,7 @@ static void setGpuSurfaceBackend(Host *host, NativeView &view, int backend) {
             SetWindowPos(owner->second.hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
-        DwmFlush();
+        dwmFlush();
         return;
     }
 
@@ -2705,7 +2742,7 @@ static void setGpuSurfaceBackend(Host *host, NativeView &view, int backend) {
             SetWindowPos(owner->second.hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
-        DwmFlush();
+        dwmFlush();
     }
 }
 
@@ -3269,20 +3306,47 @@ constexpr UINT kAudioSpectrumIntervalMs = 40;
  * 100-nanosecond units. Defined locally like the WIC GUIDs. */
 static const GUID kNativeSdkAudioTimeFormat = { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
 
-/* One-time Media Foundation bring-up on the loop thread. COM and MF stay
- * up for the process lifetime: retired sessions finish closing on Media
- * Foundation worker threads, so pairing MFShutdown with host destroy
- * would race their teardown; the OS reclaims both at process exit. */
-static bool audioEnsureMediaFoundation() {
+/* The Media Foundation entry points the audio backend calls. MF.dll and
+ * MFPlat.dll load here, on the first audio load, not at process start
+ * (see lazy_dll.h). */
+struct AudioMediaFoundation {
+    decltype(&MFStartup) startup;
+    decltype(&MFCreateSourceResolver) createSourceResolver;
+    decltype(&MFCreateMediaSession) createMediaSession;
+    decltype(&MFCreateTopology) createTopology;
+    decltype(&MFCreateTopologyNode) createTopologyNode;
+    decltype(&MFCreateAudioRendererActivate) createAudioRendererActivate;
+    decltype(&MFGetService) getService;
+};
+
+/* One-time Media Foundation bring-up on the loop thread; null when Media
+ * Foundation is unavailable (Windows N editions ship without it until the
+ * Media Feature Pack is installed), already reported by the loader. COM
+ * and MF stay up for the process lifetime: retired sessions finish
+ * closing on Media Foundation worker threads, so pairing MFShutdown with
+ * host destroy would race their teardown; the OS reclaims both at
+ * process exit. */
+static const AudioMediaFoundation *audioEnsureMediaFoundation() {
     static bool attempted = false;
     static bool ready = false;
-    if (attempted) return ready;
+    static AudioMediaFoundation mf = {};
+    if (attempted) return ready ? &mf : nullptr;
     attempted = true;
+    constexpr const char *kFeature = "audio playback";
+    mf.startup = NATIVE_SDK_LAZY_PROC(kNativeSdkMfPlat, MFStartup, kFeature);
+    mf.createSourceResolver = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFCreateSourceResolver, kFeature);
+    mf.createMediaSession = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFCreateMediaSession, kFeature);
+    mf.createTopology = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFCreateTopology, kFeature);
+    mf.createTopologyNode = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFCreateTopologyNode, kFeature);
+    mf.createAudioRendererActivate = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFCreateAudioRendererActivate, kFeature);
+    mf.getService = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFGetService, kFeature);
+    if (!mf.startup || !mf.createSourceResolver || !mf.createMediaSession || !mf.createTopology ||
+        !mf.createTopologyNode || !mf.createAudioRendererActivate || !mf.getService) return nullptr;
     /* S_FALSE (already initialized) and RPC_E_CHANGED_MODE (an MTA is
      * already active) both leave a usable COM state for MF. */
     (void)CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    ready = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_FULL));
-    return ready;
+    ready = SUCCEEDED(mf.startup(MF_VERSION, MFSTARTUP_FULL));
+    return ready ? &mf : nullptr;
 }
 
 /* Pumps one media session's event queue on Media Foundation worker
@@ -3457,12 +3521,26 @@ static void audioCreateParentDirectories(const std::wstring &path) {
     for (wchar_t &ch : directory) {
         if (ch == L'/') ch = L'\\';
     }
-    SHCreateDirectoryExW(nullptr, directory.c_str(), nullptr);
+    static const auto create_directory = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, SHCreateDirectoryExW, "the audio cache");
+    if (create_directory) create_directory(nullptr, directory.c_str(), nullptr);
 }
 
 /* One GET into the part file, cancellable between reads. Only a 200
  * installs bytes — an error page must never masquerade as a track. */
 static bool audioHttpDownload(const std::string &url, const std::wstring &part_path, const std::shared_ptr<AudioDownloadCancel> &cancel) {
+    /* WINHTTP.dll loads on the first cache fill (lazy_dll.h). */
+    constexpr const char *kFeature = "the audio cache";
+    static const auto crack_url = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpCrackUrl, kFeature);
+    static const auto open_session = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpOpen, kFeature);
+    static const auto connect_session = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpConnect, kFeature);
+    static const auto open_request = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpOpenRequest, kFeature);
+    static const auto send_request = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpSendRequest, kFeature);
+    static const auto receive_response = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpReceiveResponse, kFeature);
+    static const auto query_headers = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpQueryHeaders, kFeature);
+    static const auto read_data = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpReadData, kFeature);
+    static const auto close_handle = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpCloseHandle, kFeature);
+    if (!crack_url || !open_session || !connect_session || !open_request || !send_request || !receive_response ||
+        !query_headers || !read_data || !close_handle) return false;
     std::wstring url_wide = widen(url);
     wchar_t host_name[256] = {};
     wchar_t url_path[2048] = {};
@@ -3475,24 +3553,24 @@ static bool audioHttpDownload(const std::string &url, const std::wstring &part_p
     parts.dwUrlPathLength = ARRAYSIZE(url_path) - 1;
     parts.lpszExtraInfo = url_extra;
     parts.dwExtraInfoLength = ARRAYSIZE(url_extra) - 1;
-    if (!WinHttpCrackUrl(url_wide.c_str(), (DWORD)url_wide.size(), 0, &parts)) return false;
+    if (!crack_url(url_wide.c_str(), (DWORD)url_wide.size(), 0, &parts)) return false;
     const bool secure = parts.nScheme == INTERNET_SCHEME_HTTPS;
     if (!secure && parts.nScheme != INTERNET_SCHEME_HTTP) return false;
     std::wstring object = std::wstring(url_path) + url_extra;
     if (object.empty()) object = L"/";
 
     bool ok = false;
-    HINTERNET session = WinHttpOpen(L"native-sdk-audio-cache", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    HINTERNET connection = session ? WinHttpConnect(session, host_name, parts.nPort, 0) : nullptr;
-    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET", object.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
+    HINTERNET session = open_session(L"native-sdk-audio-cache", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET connection = session ? connect_session(session, host_name, parts.nPort, 0) : nullptr;
+    HINTERNET request = connection ? open_request(connection, L"GET", object.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
     HANDLE file = INVALID_HANDLE_VALUE;
     do {
         if (!request) break;
-        if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) break;
-        if (!WinHttpReceiveResponse(request, nullptr)) break;
+        if (!send_request(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) break;
+        if (!receive_response(request, nullptr)) break;
         DWORD status_code = 0;
         DWORD status_size = sizeof(status_code);
-        if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_size, WINHTTP_NO_HEADER_INDEX)) break;
+        if (!query_headers(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_size, WINHTTP_NO_HEADER_INDEX)) break;
         if (status_code != 200) break;
         file = CreateFileW(part_path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE) break;
@@ -3500,7 +3578,7 @@ static bool audioHttpDownload(const std::string &url, const std::wstring &part_p
         for (;;) {
             if (cancel->cancelled.load()) break;
             DWORD read = 0;
-            if (!WinHttpReadData(request, buffer.data(), (DWORD)buffer.size(), &read)) break;
+            if (!read_data(request, buffer.data(), (DWORD)buffer.size(), &read)) break;
             if (read == 0) {
                 ok = true;
                 break;
@@ -3510,9 +3588,9 @@ static bool audioHttpDownload(const std::string &url, const std::wstring &part_p
         }
     } while (false);
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
-    if (request) WinHttpCloseHandle(request);
-    if (connection) WinHttpCloseHandle(connection);
-    if (session) WinHttpCloseHandle(session);
+    if (request) close_handle(request);
+    if (connection) close_handle(connection);
+    if (session) close_handle(session);
     return ok && !cancel->cancelled.load();
 }
 
@@ -4109,8 +4187,10 @@ static bool audioAttachSession(Host *host) {
     if (!source) return false;
     HWND hwnd = parentWindow(host);
     if (!hwnd) return false;
+    const AudioMediaFoundation *mf = audioEnsureMediaFoundation();
+    if (!mf) return false;
     IMFMediaSession *session = nullptr;
-    if (FAILED(MFCreateMediaSession(nullptr, &session)) || !session) return false;
+    if (FAILED(mf->createMediaSession(nullptr, &session)) || !session) return false;
     IMFPresentationDescriptor *descriptor = nullptr;
     IMFTopology *topology = nullptr;
     bool ok = false;
@@ -4118,7 +4198,7 @@ static bool audioAttachSession(Host *host) {
         if (FAILED(source->CreatePresentationDescriptor(&descriptor)) || !descriptor) break;
         UINT64 duration_hns = 0;
         if (SUCCEEDED(descriptor->GetUINT64(MF_PD_DURATION, &duration_hns))) audio.duration_ms = duration_hns / 10000ull;
-        if (FAILED(MFCreateTopology(&topology)) || !topology) break;
+        if (FAILED(mf->createTopology(&topology)) || !topology) break;
         DWORD stream_count = 0;
         if (FAILED(descriptor->GetStreamDescriptorCount(&stream_count))) break;
         DWORD audio_streams = 0;
@@ -4140,12 +4220,12 @@ static bool audioAttachSession(Host *host) {
             IMFTopologyNode *source_node = nullptr;
             IMFTopologyNode *output_node = nullptr;
             IMFActivate *renderer = nullptr;
-            const bool added = SUCCEEDED(MFCreateTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE, &source_node)) &&
+            const bool added = SUCCEEDED(mf->createTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE, &source_node)) &&
                 SUCCEEDED(source_node->SetUnknown(MF_TOPONODE_SOURCE, source)) &&
                 SUCCEEDED(source_node->SetUnknown(MF_TOPONODE_PRESENTATION_DESCRIPTOR, descriptor)) &&
                 SUCCEEDED(source_node->SetUnknown(MF_TOPONODE_STREAM_DESCRIPTOR, stream)) &&
-                SUCCEEDED(MFCreateTopologyNode(MF_TOPOLOGY_OUTPUT_NODE, &output_node)) &&
-                SUCCEEDED(MFCreateAudioRendererActivate(&renderer)) &&
+                SUCCEEDED(mf->createTopologyNode(MF_TOPOLOGY_OUTPUT_NODE, &output_node)) &&
+                SUCCEEDED(mf->createAudioRendererActivate(&renderer)) &&
                 SUCCEEDED(output_node->SetObject(renderer)) &&
                 SUCCEEDED(topology->AddNode(source_node)) &&
                 SUCCEEDED(topology->AddNode(output_node)) &&
@@ -4205,8 +4285,10 @@ static void audioStartTransport(Host *host, bool has_position, uint64_t position
 static void audioApplyVolume(Host *host) {
     AudioState &audio = host->audio;
     if (!audio.session) return;
+    const AudioMediaFoundation *mf = audioEnsureMediaFoundation();
+    if (!mf) return;
     IMFAudioStreamVolume *volume = nullptr;
-    if (FAILED(MFGetService(audio.session, MR_STREAM_VOLUME_SERVICE, IID_IMFAudioStreamVolume, reinterpret_cast<void **>(&volume))) || !volume) return;
+    if (FAILED(mf->getService(audio.session, MR_STREAM_VOLUME_SERVICE, IID_IMFAudioStreamVolume, reinterpret_cast<void **>(&volume))) || !volume) return;
     UINT32 channels = 0;
     if (SUCCEEDED(volume->GetChannelCount(&channels)) && channels > 0 && channels <= 16) {
         float levels[16];
@@ -4223,9 +4305,10 @@ static int audioLoadPathInternal(Host *host, const std::string &path) {
     audioReleaseSession(host, true);
     std::wstring wide = widen(path);
     if (!regularFileExists(wide)) return 1;
-    if (!audioEnsureMediaFoundation()) return 2;
+    const AudioMediaFoundation *mf = audioEnsureMediaFoundation();
+    if (!mf) return 2;
     IMFSourceResolver *resolver = nullptr;
-    if (FAILED(MFCreateSourceResolver(&resolver)) || !resolver) return 2;
+    if (FAILED(mf->createSourceResolver(&resolver)) || !resolver) return 2;
     MF_OBJECT_TYPE type = MF_OBJECT_INVALID;
     IUnknown *object = nullptr;
     /* A cache entry's name is a hash, so resolution must sniff content
@@ -4271,11 +4354,12 @@ static int audioLoadUrlInternal(Host *host, const std::string &url, const std::s
             DeleteFileW(cache_wide.c_str());
         }
     }
-    if (!audioEnsureMediaFoundation()) return 2;
+    const AudioMediaFoundation *mf = audioEnsureMediaFoundation();
+    if (!mf) return 2;
     HWND hwnd = parentWindow(host);
     if (!hwnd) return 2;
     IMFSourceResolver *resolver = nullptr;
-    if (FAILED(MFCreateSourceResolver(&resolver)) || !resolver) return 2;
+    if (FAILED(mf->createSourceResolver(&resolver)) || !resolver) return 2;
     AudioState &audio = host->audio;
     audio.active = true;
     audio.url_source = true;
@@ -4896,7 +4980,7 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 if (found != host->webviews.end() && isInternalAssetUrl(found->second, uri)) return S_OK;
                                 if (uri.empty() || uri.rfind("about:", 0) == 0 || policyListMatches(host->allowed_origins, uri)) return S_OK;
                                 if (host->external_link_action == 1 && policyListMatches(host->allowed_external_urls, uri)) {
-                                    ShellExecuteW(nullptr, L"open", uri_wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                                    shellOpen(uri_wide.c_str(), nullptr);
                                 }
                                 args->put_Cancel(TRUE);
                                 return S_OK;
@@ -5338,7 +5422,8 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) {
                 HDROP drop = reinterpret_cast<HDROP>(wparam);
                 std::string paths = droppedFilePaths(drop);
-                DragFinish(drop);
+                static const auto finish_drop = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, DragFinish, "file drops");
+                if (finish_drop) finish_drop(drop);
                 if (!paths.empty()) {
                     for (auto &entry : host->windows) {
                         if (entry.second.hwnd == hwnd) {
@@ -5535,6 +5620,10 @@ static bool createNativeWindow(Host *host, Window &window) {
     if (window.transparent || window.click_through) ex_style |= WS_EX_LAYERED;
     if (window.click_through) ex_style |= WS_EX_TRANSPARENT;
     if (window.no_activate) ex_style |= WS_EX_NOACTIVATE;
+    /* Every window accepts file drops (WM_DROPFILES). This is the style
+     * DragAcceptFiles sets; setting it here keeps SHELL32.dll from loading
+     * until a drop actually arrives. */
+    ex_style |= WS_EX_ACCEPTFILES;
     /* The requested frame is a CONTENT size in LOGICAL points (the
      * other hosts size the content area); scale it to physical pixels
      * at the DPI of the monitor containing the requested origin, then grow
@@ -5573,7 +5662,6 @@ static bool createNativeWindow(Host *host, Window &window) {
         host->instance,
         host);
     if (!hwnd) return false;
-    DragAcceptFiles(hwnd, TRUE);
     window.hwnd = hwnd;
     applyMenusToWindow(host, window);
     if (windowUsesHiddenTitlebar(window)) {
@@ -6738,7 +6826,7 @@ int native_sdk_windows_show_notification(Host *host, const char *title, size_t t
     data.dwInfoFlags = NIIF_INFO;
     copyWideField(data.szInfoTitle, ARRAYSIZE(data.szInfoTitle), title_wide);
     copyWideField(data.szInfo, ARRAYSIZE(data.szInfo), body_wide);
-    return Shell_NotifyIconW(NIM_MODIFY, &data) ? 1 : 0;
+    return notifyIcon(NIM_MODIFY, &data) ? 1 : 0;
 }
 
 int native_sdk_windows_create_tray(Host *host, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len) {
@@ -6778,8 +6866,7 @@ int native_sdk_windows_open_external_url(Host *host, const char *url, size_t url
     (void)host;
     if (!url || url_len == 0) return 0;
     std::wstring target = widen(slice(url, url_len));
-    HINSTANCE result = ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    return reinterpret_cast<intptr_t>(result) > 32 ? 1 : 0;
+    return shellOpen(target.c_str(), nullptr) ? 1 : 0;
 }
 
 int native_sdk_windows_reveal_path(Host *host, const char *path, size_t path_len) {
@@ -6787,22 +6874,19 @@ int native_sdk_windows_reveal_path(Host *host, const char *path, size_t path_len
     if (!path || path_len == 0) return 0;
     std::wstring target = widen(slice(path, path_len));
     std::wstring args = L"/select,\"" + target + L"\"";
-    HINSTANCE result = ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
-    return reinterpret_cast<intptr_t>(result) > 32 ? 1 : 0;
+    return shellOpen(L"explorer.exe", args.c_str()) ? 1 : 0;
 }
 
 int native_sdk_windows_add_recent_document(Host *host, const char *path, size_t path_len) {
     (void)host;
     if (!path || path_len == 0) return 0;
     std::wstring target = widen(slice(path, path_len));
-    SHAddToRecentDocs(SHARD_PATHW, target.c_str());
-    return 1;
+    return addToRecentDocs(SHARD_PATHW, target.c_str()) ? 1 : 0;
 }
 
 int native_sdk_windows_clear_recent_documents(Host *host) {
     (void)host;
-    SHAddToRecentDocs(SHARD_PIDL, nullptr);
-    return 1;
+    return addToRecentDocs(SHARD_PIDL, nullptr) ? 1 : 0;
 }
 
 int native_sdk_windows_set_credential(Host *host, const char *service, size_t service_len, const char *account, size_t account_len, const char *secret, size_t secret_len) {

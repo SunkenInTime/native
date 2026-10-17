@@ -1,6 +1,7 @@
 #include "shared_renderer_client.h"
 #include "shared_renderer_policy.h"
 #include "renderer_protocol.h"
+#include "lazy_dll.h"
 
 #include <dcomp.h>
 #include <d2d1.h>
@@ -380,8 +381,12 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
     }
     if (reply.surface_handle != 0) {
         HANDLE replacement = reinterpret_cast<HANDLE>(reply.surface_handle);
+        /* dcomp.dll loads with the first GPU surface, not at process
+         * start (lazy_dll.h). */
+        static const auto create_device = NATIVE_SDK_LAZY_PROC(kNativeSdkDComp, DCompositionCreateDevice2, "GPU surfaces");
         if (!client->composition &&
-            (FAILED(DCompositionCreateDevice2(nullptr, IID_PPV_ARGS(&client->composition))) ||
+            (!create_device ||
+             FAILED(create_device(nullptr, IID_PPV_ARGS(&client->composition))) ||
              FAILED(client->composition->CreateTargetForHwnd(client->window, TRUE, &client->target)) ||
              FAILED(client->composition->CreateVisual(&client->visual)))) {
             client->composition.Reset();
