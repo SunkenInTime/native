@@ -349,7 +349,7 @@ test "runtime applies text input to focused canvas text fields" {
     snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expectEqualStrings("Search", snapshot.widgets[0].name);
     try std.testing.expectEqualStrings("x", snapshot.widgets[0].text_value);
-    try std.testing.expectEqualDeep(canvas.TextRange.init(1, 1), runtimeViewWidgetSemantics(&harness.runtime.views[0])[0].text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(1, 1), runtimeViewWidgetSemantics(harness.runtime.views[0])[0].text_selection.?);
     try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 1, .end = 1 }, snapshot.widgets[0].text_selection.?);
     try std.testing.expect(snapshot.widgets[0].text_composition == null);
 }
@@ -461,7 +461,7 @@ test "runtime applies text input to canvas textareas" {
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("First!\nSecond", retained.nodes[1].widget.text);
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(13), retained.nodes[1].widget.text_selection.?);
-    try std.testing.expectEqualDeep(canvas.TextRange.init(13, 13), runtimeViewWidgetSemantics(&harness.runtime.views[0])[0].text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(13, 13), runtimeViewWidgetSemantics(harness.runtime.views[0])[0].text_selection.?);
 
     const text_geometry = try harness.runtime.canvasWidgetTextGeometry(1, "canvas", 2);
     try std.testing.expect(text_geometry.caret_bounds != null);
@@ -807,7 +807,7 @@ test "runtime clips canvas widget control dirty bounds to scroll ancestors" {
     );
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
 
-    const dirty = try runtimeViewSetCanvasWidgetSelected(&harness.runtime.views[0], 2, true);
+    const dirty = try runtimeViewSetCanvasWidgetSelected(harness.runtime.views[0], 2, true);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 40, 160, 8), dirty.?);
 }
 
@@ -1143,7 +1143,7 @@ test "runtime applies pointer selection to canvas text fields" {
     } });
     var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), retained.nodes[1].widget.text_selection.?);
-    try std.testing.expectEqualDeep(canvas.TextRange.init(0, 0), runtimeViewWidgetSemantics(&harness.runtime.views[0])[0].text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(0, 0), runtimeViewWidgetSemantics(harness.runtime.views[0])[0].text_selection.?);
 
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
         .window_id = 1,
@@ -1296,7 +1296,7 @@ test "runtime applies text input to focused canvas search fields" {
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("Queryx", retained.nodes[1].widget.text);
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(6), retained.nodes[1].widget.text_selection.?);
-    try std.testing.expectEqualDeep(canvas.TextRange.init(6, 6), runtimeViewWidgetSemantics(&harness.runtime.views[0])[0].text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(6, 6), runtimeViewWidgetSemantics(harness.runtime.views[0])[0].text_selection.?);
     const snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expectEqualStrings("Queryx", snapshot.widgets[0].text_value);
 
@@ -1360,7 +1360,7 @@ test "runtime applies text input to focused canvas search fields" {
     const cleared = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqualStrings("", cleared.nodes[1].widget.text);
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), cleared.nodes[1].widget.text_selection.?);
-    try std.testing.expectEqualDeep(canvas.TextRange.init(0, 0), runtimeViewWidgetSemantics(&harness.runtime.views[0])[0].text_selection.?);
+    try std.testing.expectEqualDeep(canvas.TextRange.init(0, 0), runtimeViewWidgetSemantics(harness.runtime.views[0])[0].text_selection.?);
     const cleared_snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expectEqualStrings("", cleared_snapshot.widgets[0].text_value);
     try std.testing.expectEqualDeep(automation.snapshot.TextRange{ .start = 0, .end = 0 }, cleared_snapshot.widgets[0].text_selection.?);
@@ -1551,7 +1551,7 @@ test "runtime click focus shows caret, ring, and blink; blur drops them" {
     // The caret carries a LOOPING blink animation: still active far in
     // the future (frame scheduling keeps sampling it), fading between
     // full and zero opacity across a cycle.
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
     try std.testing.expectEqual(testCanvasWidgetPartId(2, 6), view.canvas_widget_caret_blink_id);
     try std.testing.expect(view.canvasRenderAnimationsActive(1_000_000_000));
     try std.testing.expect(view.canvasRenderAnimationsActive(1_000_000_000 + 60 * std.time.ns_per_s));

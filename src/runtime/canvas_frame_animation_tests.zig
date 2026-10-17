@@ -261,7 +261,7 @@ test "runtime schedules canvas render animations without display list rebuild" {
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, 15, 10), final_frame.dirty_bounds.?);
     try std.testing.expect(!harness.runtime.invalidated);
     try std.testing.expectEqual(@as(usize, 0), (try harness.runtime.canvasRenderAnimations(1, "canvas")).len);
-    try std.testing.expectEqual(@as(usize, 0), runtimeViewCanvasFrameRenderOverrides(&harness.runtime.views[0]).len);
+    try std.testing.expectEqual(@as(usize, 0), runtimeViewCanvasFrameRenderOverrides(harness.runtime.views[0]).len);
 
     const clean_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
         .frame_index = 4,
@@ -303,7 +303,7 @@ test "runtime spins visible spinners and parks the view on unmount" {
 
     // The visible spinner arms ONE looping rotation animation on its arc
     // command — never completing, so frame scheduling keeps sampling it.
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
     const arc_id = canvas.spinnerWidgetArcCommandId(5);
     try std.testing.expectEqual(@as(usize, 1), view.canvas_widget_loop_animation_count);
     try std.testing.expectEqual(arc_id, view.canvas_widget_loop_animation_ids[0]);
@@ -385,7 +385,7 @@ test "runtime staggers segmented spinner opacity loops and removes them on unmou
 
     // The visible dial arms one `.wrap` opacity loop PER SEGMENT, each
     // segment starting one count-th of the period after its neighbor.
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
     const count = canvas.spinnerWidgetSegmentCount(tokens);
     try std.testing.expectEqual(@as(usize, 12), count);
     try std.testing.expectEqual(count, view.canvas_widget_loop_animation_count);
@@ -470,7 +470,7 @@ test "runtime pulses visible skeletons and removes the loop on unmount" {
 
     // The visible skeleton arms ONE looping ping-pong opacity pulse on
     // its fill command — never completing, so frames keep sampling it.
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
     const fill_id = canvas.skeletonWidgetFillCommandId(5);
     try std.testing.expectEqual(@as(usize, 1), view.canvas_widget_loop_animation_count);
     try std.testing.expectEqual(fill_id, view.canvas_widget_loop_animation_ids[0]);
@@ -548,7 +548,7 @@ test "runtime leaves skeletons static under reduced motion" {
 
     // Reduced motion arms nothing: the placeholder renders as a static
     // block and the view never pumps frames for it.
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
     try std.testing.expectEqual(@as(usize, 0), view.canvas_widget_loop_animation_count);
     try std.testing.expectEqual(@as(usize, 0), view.canvas_render_animation_count);
     try std.testing.expect(!view.canvasRenderAnimationsActive(60 * std.time.ns_per_s));
@@ -586,7 +586,7 @@ test "runtime leaves spinners static under reduced motion" {
 
     // Reduced motion arms nothing: the arc renders as a static pose and
     // the view never pumps frames for it.
-    const view = &harness.runtime.views[0];
+    const view = harness.runtime.views[0];
     try std.testing.expectEqual(@as(usize, 0), view.canvas_widget_loop_animation_count);
     try std.testing.expectEqual(@as(usize, 0), view.canvas_render_animation_count);
     try std.testing.expect(!view.canvasRenderAnimationsActive(60 * std.time.ns_per_s));

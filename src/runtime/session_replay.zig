@@ -235,7 +235,7 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
 /// time, and hash the PNG.
 fn renderScreenshotHash(runtime: *core.Runtime, view_label: []const u8, scale: f32) anyerror!u64 {
     const window_id = blk: {
-        for (runtime.views[0..runtime.view_count]) |*view| {
+        for (runtime.views[0..runtime.view_count]) |view| {
             if (view.open and view.kind == .gpu_surface and std.mem.eql(u8, view.label, view_label)) {
                 break :blk view.window_id;
             }

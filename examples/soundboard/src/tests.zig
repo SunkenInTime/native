@@ -169,7 +169,7 @@ const LiveApp = struct {
     /// target, which would re-pin the tab order as a side effect.
     fn focusWidgetRing(self: LiveApp, id: canvas.ObjectId) !void {
         try self.focusWidget(id);
-        for (self.harness.runtime.views[0..self.harness.runtime.view_count]) |*view| {
+        for (self.harness.runtime.views[0..self.harness.runtime.view_count]) |view| {
             if (std.mem.eql(u8, view.label, main.canvas_label)) view.canvas_widget_focus_visible_id = id;
         }
     }
@@ -177,7 +177,7 @@ const LiveApp = struct {
     /// The canvas view's focus-visible id (0 = no ring anywhere) — the
     /// assertion surface for "arrows never dress rows in the ring".
     fn focusVisibleId(self: LiveApp) canvas.ObjectId {
-        for (self.harness.runtime.views[0..self.harness.runtime.view_count]) |*view| {
+        for (self.harness.runtime.views[0..self.harness.runtime.view_count]) |view| {
             if (std.mem.eql(u8, view.label, main.canvas_label)) return view.canvas_widget_focus_visible_id;
         }
         return 0;

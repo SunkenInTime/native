@@ -461,7 +461,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         /// the reconciled tree is retained.
         fn planCanvasWidgetDisclosureTween(self: *Runtime, view_index: usize, previous: canvas.WidgetLayoutTree, next: canvas.WidgetLayoutTree) CanvasWidgetDisclosurePlan {
             var plan = CanvasWidgetDisclosurePlan{};
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             const was_active = view.canvas_widget_disclosure_tween.active;
             const retire_or_none: CanvasWidgetDisclosureAction = if (was_active) .retire else .none;
 
@@ -559,7 +559,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         /// every rebuild — applied or ignored, a note never outlives
         /// the rebuild that had the chance to animate it.
         fn applyCanvasWidgetDisclosureTweenPlan(self: *Runtime, view_index: usize, plan: CanvasWidgetDisclosurePlan) anyerror!void {
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             view.canvas_widget_disclosure_pending_count = 0;
             switch (plan.action) {
                 .none => {},
@@ -599,7 +599,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         /// the user never sees the one-frame pop, and the clock keeps
         /// running.
         fn refreshCanvasWidgetDisclosurePose(self: *Runtime, view_index: usize) anyerror!void {
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             const tween = &view.canvas_widget_disclosure_tween;
             var moved = false;
             for (view.canvas_widget_disclosure_moves[0..tween.move_count]) |*move| {
@@ -635,7 +635,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         pub fn advanceCanvasWidgetDisclosureTweenForFrame(self: *Runtime, view_index: usize, timestamp_ns: u64) anyerror!void {
             if (view_index >= self.view_count) return;
             if (self.views[view_index].kind != .gpu_surface) return;
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             if (!view.canvas_widget_disclosure_tween.active) return;
             const tween = &view.canvas_widget_disclosure_tween;
 
@@ -839,7 +839,7 @@ fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {
 }
 
 fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
-    for (self.views[0..self.view_count], 0..) |*view, index| {
+    for (self.views[0..self.view_count], 0..) |view, index| {
         if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
     }
     return null;

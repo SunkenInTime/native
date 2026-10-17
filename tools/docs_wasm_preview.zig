@@ -479,7 +479,7 @@ export fn preview_set_focused(self: ?*Preview, focused: u32) void {
 /// ABI's text-input state).
 export fn preview_text_input_active(self: ?*Preview) u32 {
     const p = self orelse return 0;
-    const view = &p.runtime.views[0];
+    const view = p.runtime.views[0];
     if (!view.open or view.canvas_widget_focused_id == 0) return 0;
     return if (view.canEditCanvasWidgetText(view.canvas_widget_focused_id)) 1 else 0;
 }
