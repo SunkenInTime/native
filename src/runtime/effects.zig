@@ -1237,6 +1237,29 @@ pub fn Effects(comptime Msg: type) type {
             }
         };
 
+        /// A slot's request bytes and stderr tail: the bulk of a slot
+        /// (13.5 KiB of 13.7). It lives on the heap apart from the slot,
+        /// allocated by the first spawn, fetch or file effect the slot
+        /// accepts and kept for the slot's later effects, so an app that
+        /// never runs one never makes these pages resident, and the 16
+        /// slot headers sit together in about one page. Clipboard
+        /// effects never touch it. Every field is written before it is
+        /// read; the lengths live in `Slot`.
+        const SlotStorage = struct {
+            argv_slices: [max_effect_argv][]const u8,
+            argv_storage: [max_effect_argv_bytes]u8,
+            stdin_storage: [max_effect_stdin_bytes]u8,
+            /// Ring of the child's most recent stderr bytes. Written by
+            /// the stderr reader (worker-side thread in real mode, loop
+            /// thread in fake mode); read only after the child is done.
+            stderr_ring: [max_effect_stderr_tail_bytes]u8,
+            /// A fetch's URL — and a file effect's path (they never
+            /// coexist in one slot; `max_effect_file_path_bytes` fits).
+            url_storage: [max_effect_url_bytes]u8,
+            header_storage: [max_effect_fetch_header_bytes]u8,
+            header_slices: [max_effect_fetch_headers]std.http.Header,
+        };
+
         const Slot = struct {
             state: std.atomic.Value(SlotState) = std.atomic.Value(SlotState).init(.idle),
             generation: u32 = 0,
@@ -1267,10 +1290,10 @@ pub fn Effects(comptime Msg: type) type {
             /// thread in fake mode; never both).
             dropped_pending: u32 = 0,
             dropped_total: u32 = 0,
-            argv_slices: [max_effect_argv][]const u8 = undefined,
+            /// See `SlotStorage`. Set before the slot's first spawn,
+            /// fetch or file effect runs; freed only by `deinit`.
+            storage: ?*SlotStorage = null,
             argv_count: usize = 0,
-            argv_storage: [max_effect_argv_bytes]u8 = undefined,
-            stdin_storage: [max_effect_stdin_bytes]u8 = undefined,
             stdin_len: usize = 0,
             // ---- line-framing fields (.lines spawns, .stream fetches) ----
             /// Effective per-line bound: the default or the accepted
@@ -1290,10 +1313,6 @@ pub fn Effects(comptime Msg: type) type {
             collect_buffer: ?[]u8 = null,
             collect_len: usize = 0,
             collect_truncated: bool = false,
-            /// Ring of the child's most recent stderr bytes. Written by
-            /// the stderr reader (worker-side thread in real mode, loop
-            /// thread in fake mode); read only after the child is done.
-            stderr_ring: [max_effect_stderr_tail_bytes]u8 = undefined,
             /// Total stderr bytes seen; beyond the ring capacity means
             /// the tail is truncated.
             stderr_total: usize = 0,
@@ -1306,12 +1325,7 @@ pub fn Effects(comptime Msg: type) type {
             /// `.buffered` delivers it whole on the terminal entry.
             fetch_response_mode: FetchResponseMode = .buffered,
             method: std.http.Method = .GET,
-            /// A fetch's URL — and a file effect's path (they never
-            /// coexist in one slot; `max_effect_file_path_bytes` fits).
-            url_storage: [max_effect_url_bytes]u8 = undefined,
             url_len: usize = 0,
-            header_storage: [max_effect_fetch_header_bytes]u8 = undefined,
-            header_slices: [max_effect_fetch_headers]std.http.Header = undefined,
             header_count: usize = 0,
             timeout_ms: u32 = default_effect_fetch_timeout_ms,
             /// Heap buffer per accepted fetch: request payload copy
@@ -1335,19 +1349,19 @@ pub fn Effects(comptime Msg: type) type {
             fetch_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
             fn argv(slot: *const Slot) []const []const u8 {
-                return slot.argv_slices[0..slot.argv_count];
+                return slot.storage.?.argv_slices[0..slot.argv_count];
             }
 
             fn stdinBytes(slot: *const Slot) []const u8 {
-                return slot.stdin_storage[0..slot.stdin_len];
+                return slot.storage.?.stdin_storage[0..slot.stdin_len];
             }
 
             fn fetchUrl(slot: *const Slot) []const u8 {
-                return slot.url_storage[0..slot.url_len];
+                return slot.storage.?.url_storage[0..slot.url_len];
             }
 
             fn fetchHeaders(slot: *const Slot) []const std.http.Header {
-                return slot.header_slices[0..slot.header_count];
+                return slot.storage.?.header_slices[0..slot.header_count];
             }
 
             fn fetchPayload(slot: *const Slot) []const u8 {
@@ -1356,7 +1370,7 @@ pub fn Effects(comptime Msg: type) type {
             }
 
             fn filePath(slot: *const Slot) []const u8 {
-                return slot.url_storage[0..slot.url_len];
+                return slot.storage.?.url_storage[0..slot.url_len];
             }
         };
 
@@ -1540,6 +1554,10 @@ pub fn Effects(comptime Msg: type) type {
                 if (slot.line_buffer) |buffer| {
                     self.allocator.free(buffer);
                     slot.line_buffer = null;
+                }
+                if (slot.storage) |storage| {
+                    self.allocator.destroy(storage);
+                    slot.storage = null;
                 }
             }
             if (self.drain_fetch_body) |buffer| {
@@ -1734,6 +1752,7 @@ pub fn Effects(comptime Msg: type) type {
             const slot_index = self.findIdleSlot() orelse return self.reject(options);
 
             const slot = &self.slots[slot_index];
+            const storage = self.slotStorage(slot) orelse return self.reject(options);
             slot.generation = self.next_generation;
             self.next_generation +%= 1;
             if (self.next_generation == 0) self.next_generation = 1;
@@ -1754,11 +1773,11 @@ pub fn Effects(comptime Msg: type) type {
             slot.argv_count = options.argv.len;
             var offset: usize = 0;
             for (options.argv, 0..) |arg, index| {
-                @memcpy(slot.argv_storage[offset .. offset + arg.len], arg);
-                slot.argv_slices[index] = slot.argv_storage[offset .. offset + arg.len];
+                @memcpy(storage.argv_storage[offset .. offset + arg.len], arg);
+                storage.argv_slices[index] = storage.argv_storage[offset .. offset + arg.len];
                 offset += arg.len;
             }
-            @memcpy(slot.stdin_storage[0..stdin_bytes.len], stdin_bytes);
+            @memcpy(storage.stdin_storage[0..stdin_bytes.len], stdin_bytes);
             slot.stdin_len = stdin_bytes.len;
             slot.output_mode = options.output;
             slot.collect_len = 0;
@@ -1835,6 +1854,7 @@ pub fn Effects(comptime Msg: type) type {
             const slot_index = self.findIdleSlot() orelse return self.rejectFetch(options);
 
             const slot = &self.slots[slot_index];
+            const storage = self.slotStorage(slot) orelse return self.rejectFetch(options);
             // Stream fetches never buffer a body: the buffer holds only
             // the request payload copy.
             const body_space: usize = if (options.response == .stream) 0 else max_effect_body_bytes;
@@ -1870,17 +1890,17 @@ pub fn Effects(comptime Msg: type) type {
             slot.reaping = false;
             slot.dropped_pending = 0;
             slot.dropped_total = 0;
-            @memcpy(slot.url_storage[0..options.url.len], options.url);
+            @memcpy(storage.url_storage[0..options.url.len], options.url);
             slot.url_len = options.url.len;
             var offset: usize = 0;
             for (options.headers, 0..) |header, index| {
-                @memcpy(slot.header_storage[offset .. offset + header.name.len], header.name);
-                const name = slot.header_storage[offset .. offset + header.name.len];
+                @memcpy(storage.header_storage[offset .. offset + header.name.len], header.name);
+                const name = storage.header_storage[offset .. offset + header.name.len];
                 offset += header.name.len;
-                @memcpy(slot.header_storage[offset .. offset + header.value.len], header.value);
-                const value = slot.header_storage[offset .. offset + header.value.len];
+                @memcpy(storage.header_storage[offset .. offset + header.value.len], header.value);
+                const value = storage.header_storage[offset .. offset + header.value.len];
                 offset += header.value.len;
-                slot.header_slices[index] = .{ .name = name, .value = value };
+                storage.header_slices[index] = .{ .name = name, .value = value };
             }
             slot.header_count = options.headers.len;
             if (slot.fetch_buffer) |old| self.allocator.free(old);
@@ -1943,6 +1963,7 @@ pub fn Effects(comptime Msg: type) type {
             const slot_index = self.findIdleSlot() orelse return self.rejectFile(key, op, on_result);
 
             const slot = &self.slots[slot_index];
+            const storage = self.slotStorage(slot) orelse return self.rejectFile(key, op, on_result);
             // A write's buffer holds its payload copy; a read's holds
             // the content space plus one spare byte that detects
             // over-bound files without a stat round trip.
@@ -1966,7 +1987,7 @@ pub fn Effects(comptime Msg: type) type {
             slot.reaping = false;
             slot.dropped_pending = 0;
             slot.dropped_total = 0;
-            @memcpy(slot.url_storage[0..file_path.len], file_path);
+            @memcpy(storage.url_storage[0..file_path.len], file_path);
             slot.url_len = file_path.len;
             if (slot.line_buffer) |old| {
                 self.allocator.free(old);
@@ -3468,6 +3489,15 @@ pub fn Effects(comptime Msg: type) type {
             return null;
         }
 
+        /// The slot's `SlotStorage`, allocated the first time the slot
+        /// takes a spawn, fetch or file effect. Null only when that
+        /// allocation fails; the caller rejects the effect, the same as
+        /// for its other buffers. Loop-thread only.
+        fn slotStorage(self: *Self, slot: *Slot) ?*SlotStorage {
+            if (slot.storage == null) slot.storage = self.allocator.create(SlotStorage) catch return null;
+            return slot.storage.?;
+        }
+
         /// Free a fetch slot's body and line buffers and return it to
         /// `.idle` (spawn-time failures and fake cancels). Loop-thread
         /// only.
@@ -3635,8 +3665,9 @@ pub fn Effects(comptime Msg: type) type {
         /// `max_effect_stderr_tail_bytes` win). Single-writer, like
         /// `appendCollected`.
         fn appendStderrTail(slot: *Slot, bytes: []const u8) void {
+            const storage = slot.storage.?;
             for (bytes) |byte| {
-                slot.stderr_ring[slot.stderr_total % max_effect_stderr_tail_bytes] = byte;
+                storage.stderr_ring[slot.stderr_total % max_effect_stderr_tail_bytes] = byte;
                 slot.stderr_total += 1;
             }
         }
@@ -3655,9 +3686,10 @@ pub fn Effects(comptime Msg: type) type {
                 slot.stderr_total % max_effect_stderr_tail_bytes
             else
                 0;
+            const storage = slot.storage.?;
             var index: usize = 0;
             while (index < tail_len) : (index += 1) {
-                entry.line_bytes[index] = slot.stderr_ring[(start + index) % max_effect_stderr_tail_bytes];
+                entry.line_bytes[index] = storage.stderr_ring[(start + index) % max_effect_stderr_tail_bytes];
             }
             entry.line_len = @intCast(tail_len);
         }
@@ -4210,4 +4242,46 @@ test "fetch errors map onto the documented taxonomy" {
     try std.testing.expectEqual(EffectFetchOutcome.tls_failed, classifyFetchError(error.TlsInitializationFailed));
     try std.testing.expectEqual(EffectFetchOutcome.rejected, classifyFetchError(error.UnsupportedUriScheme));
     try std.testing.expectEqual(EffectFetchOutcome.protocol_failed, classifyFetchError(error.HttpHeadersInvalid));
+}
+
+test "a slot allocates its request storage with its first spawn, fetch or file effect and keeps it" {
+    const Msg = union(enum) { exit: EffectExit };
+    const Fx = Effects(Msg);
+    const fx = try std.testing.allocator.create(Fx);
+    defer std.testing.allocator.destroy(fx);
+    fx.initInPlace(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    const storedSlots = struct {
+        fn count(effects: *const Fx) usize {
+            var stored: usize = 0;
+            for (&effects.slots) |*slot| {
+                if (slot.storage != null) stored += 1;
+            }
+            return stored;
+        }
+    }.count;
+
+    // An app that runs no effect, or only clipboard effects, holds none.
+    try std.testing.expectEqual(@as(usize, 0), storedSlots(fx));
+    fx.writeClipboard(.{ .key = 1, .text = "copied" });
+    try std.testing.expectEqual(@as(usize, 0), storedSlots(fx));
+    try fx.feedClipboardResult(1, .ok, "");
+    while (fx.takeMsg()) |_| {}
+
+    fx.spawn(.{ .key = 2, .argv = &.{ "echo", "hi" }, .stdin = "in" });
+    try std.testing.expectEqual(@as(usize, 1), storedSlots(fx));
+    const request = fx.pendingSpawnAt(0).?;
+    try std.testing.expectEqualStrings("echo", request.argv[0]);
+    try std.testing.expectEqualStrings("hi", request.argv[1]);
+    try std.testing.expectEqualStrings("in", request.stdin);
+    try fx.feedExit(2, 0);
+    while (fx.takeMsg()) |_| {}
+
+    // The retired slot keeps its storage for the next effect.
+    fx.spawn(.{ .key = 3, .argv = &.{"true"} });
+    try std.testing.expectEqual(@as(usize, 1), storedSlots(fx));
+    try fx.feedExit(3, 0);
+    while (fx.takeMsg()) |_| {}
 }
