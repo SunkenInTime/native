@@ -543,6 +543,16 @@ struct NativeView {
      * idle law the macOS host enforces). */
     WeaverGpuEmission gpu_emission;
     bool gpu_presented = false;
+    /* The runtime sent pixels while this surface was on the GPU backend:
+     * the GPU path refused its content (e.g. a retained tree over an
+     * underlay with an immediate canvas). The window then stays on the
+     * software backend: the frame emission must not flip it back to GPU on
+     * renderer connectivity alone, or a surface whose every frame is pixels
+     * would restyle its window on every frame. Pixels sent on the software
+     * backend (the renderer was lost) do not set it, so recovery still
+     * promotes. A GPU present clears it. A surface whose content later
+     * becomes GPU-presentable stays on software: correct, at a CPU cost. */
+    bool gpu_pixel_presents = false;
     /* One-shot: the next scheduled emission must fire at grid
      * promptness even while minimized. Two producers set it — an input
      * dispatched to the surface (its responding frame is the
@@ -2843,7 +2853,7 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
      * — the runtime skips input-latency stamping for them. */
     event.occluded = gpuSurfaceOccludedPacingActive(view) ? 1 : 0;
     event.alpha_mode = view.gpu_alpha_mode;
-    if (view.gpu_presenter) {
+    if (view.gpu_presenter && !view.gpu_pixel_presents) {
         setGpuSurfaceBackend(host, view,
             nativeSdkSharedRendererClientEnsureConnected(view.gpu_presenter) ? 2 : 3);
     }
@@ -6678,6 +6688,11 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
     }
 
     if (layered) {
+        // A GPU surface's window is set up for DirectComposition (not
+        // layered, no redirection bitmap), where UpdateLayeredWindow fails
+        // with ERROR_INVALID_PARAMETER; pixels need the software backend.
+        if (view.gpu_backend == 2) view.gpu_pixel_presents = true;
+        setGpuSurfaceBackend(host, view, 3);
         if (!presentLayeredGpuSurface(host, owner->second, view, rgba8, dirty_left, dirty_top, dirty_right, dirty_bottom, full_update)) return 0;
     } else {
         RECT dirty = { dirty_left, dirty_top, dirty_right, dirty_bottom };
@@ -6727,6 +6742,7 @@ int native_sdk_windows_present_gpu_surface_packet_binary(Host *host, uint64_t wi
         setGpuSurfaceBackend(host, view, 3);
         return 0;
     }
+    view.gpu_pixel_presents = false;
     setGpuSurfaceBackend(host, view, 2);
     view.gpu_nonblank = 1;
     view.gpu_sample_color = ((uint32_t)clear_a << 24) | ((uint32_t)clear_r << 16) |
