@@ -1,0 +1,1 @@
+fix: **A declared window that fails to close keeps working**: when the model stops declaring a `UiApp` secondary window and the platform refuses the close, the app now keeps that window's slot and tree (the window is still on screen) and retries the close on the next rebuild. It used to free the tree's memory first, leaving the still-open window reading freed memory.

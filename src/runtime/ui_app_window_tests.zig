@@ -114,6 +114,10 @@ const Fixture = struct {
     app: core.App,
 
     fn create() !Fixture {
+        return createWithWindowView(panelWindowView);
+    }
+
+    fn createWithWindowView(window_view: @FieldType(PanelApp.Options, "window_view")) !Fixture {
         const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
         errdefer harness.destroy(std.testing.allocator);
         harness.null_platform.gpu_surfaces = true;
@@ -126,7 +130,7 @@ const Fixture = struct {
             .view_revision = panelViewRevision,
             .project_update = projectPanelUpdate,
             .windows_fn = panelWindows,
-            .window_view = panelWindowView,
+            .window_view = window_view,
         });
         const app = app_state.app();
         try harness.start(app);
@@ -305,6 +309,63 @@ test "a model that keeps declaring the window vetoes the user close (source wins
     try std.testing.expect(fixture.app_state.model.settings_open);
     const reopened = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
     try std.testing.expect(reopened.open);
+}
+
+/// The settings view with a placeholder formatted into the window's tree
+/// arena. The runtime's retained layout keeps pointing at placeholder
+/// bytes, so reading it shows whether that arena is still alive.
+fn placeholderWindowView(ui: *PanelApp.Ui, model: *const PanelModel, window_label: []const u8) PanelApp.Ui.Node {
+    std.debug.assert(std.mem.eql(u8, window_label, settings_window_label));
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.button(.{ .on_press = .bump }, "Bump"),
+        ui.textField(.{ .placeholder = ui.fmt("Search {d} settings", .{model.bumps + 12}) }),
+    });
+}
+
+fn denyCloseWindow(context: ?*anyopaque, window_id: support.platform.WindowId) anyerror!void {
+    _ = context;
+    _ = window_id;
+    return error.CloseDenied;
+}
+
+test "a declared window whose platform close fails keeps its slot and its tree" {
+    if (comptime support.platform.max_windows < 2) return error.SkipZigTest;
+
+    const fixture = try Fixture.createWithWindowView(placeholderWindowView);
+    defer fixture.destroy();
+
+    try fixture.clickSettingsButton();
+    const info = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+    try fixture.installSettingsCanvas(info.id);
+
+    // The model stops declaring the window, but the platform refuses to
+    // close it. The runtime keeps the window open with its layout, so
+    // the app has to keep the slot and the arenas that layout reads.
+    const services = &fixture.harness.runtime.options.platform.services;
+    const close_window_fn = services.close_window_fn;
+    services.close_window_fn = denyCloseWindow;
+    try fixture.clickSettingsButton();
+    try std.testing.expect(!fixture.app_state.model.settings_open);
+    const still_open = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(still_open.open);
+    try std.testing.expectEqual(@as(usize, 1), fixture.app_state.window_slot_count);
+    try std.testing.expectEqual(info.id, fixture.app_state.window_slots[0].window_id);
+
+    var placeholder: ?[]const u8 = null;
+    for (try fixture.harness.runtime.canvasWidgetSemantics(info.id, settings_canvas_label)) |node| {
+        if (node.placeholder.len > 0) placeholder = node.placeholder;
+    }
+    try std.testing.expectEqualStrings("Search 12 settings", placeholder.?);
+    const tokens = fixture.harness.runtime.tokensWithTextMeasure(fixture.app_state.effectiveTokens());
+    _ = try fixture.harness.runtime.emitCanvasWidgetDisplayList(info.id, settings_canvas_label, tokens);
+
+    // Once the platform closes windows again, the next reconcile retries
+    // the close and only then drops the slot.
+    services.close_window_fn = close_window_fn;
+    try fixture.app_state.dispatch(&fixture.harness.runtime, 1, .bump);
+    try std.testing.expectEqual(@as(usize, 0), fixture.app_state.window_slot_count);
+    const closed = fixture.settingsWindowInfo();
+    try std.testing.expect(closed == null or !closed.?.open);
 }
 
 test "input from the secondary window dispatches through its own tree with its window identity" {
