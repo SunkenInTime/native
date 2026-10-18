@@ -2,6 +2,11 @@ const std = @import("std");
 const types = @import("types.zig");
 const null_backend = @import("null_platform.zig");
 
+comptime {
+    // The C++ the Windows platform links calls back into this export.
+    if (@import("builtin").os.tag == .windows) _ = @import("windows/library_failure.zig");
+}
+
 pub const default_gpu_frame_interval_ns = types.default_gpu_frame_interval_ns;
 pub const default_gpu_first_frame_latency_budget_ns = types.default_gpu_first_frame_latency_budget_ns;
 pub const Error = types.Error;
