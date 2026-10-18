@@ -496,6 +496,11 @@ pub const plan_key_index = @import("plan_key_index.zig");
 // (see lazy_tls.zig for the working-set numbers).
 pub const lazy_tls = @import("lazy_tls.zig");
 
+// Fixed tables reserved whole and committed page by page as they are
+// touched: Windows' page allocator commits everything up front (see
+// lazy_commit.zig for the commit-charge numbers).
+pub const lazy_commit = @import("lazy_commit.zig");
+
 // Experimental markup front-end lives in `ui_markup.zig` / `ui_markup_view.zig`
 // (runtime parse + interpret: the dev/hot-reload engine) and
 // `ui_markup_compiled.zig` (comptime parse: the release engine, no parser in
@@ -772,4 +777,7 @@ pub const binary_packet_load_action_patch = serialization.binary_packet_load_act
 
 test {
     _ = @import("tests.zig");
+    _ = @import("commands.zig");
+    _ = @import("widget_invalidation.zig");
+    _ = @import("plan_key_index.zig");
 }

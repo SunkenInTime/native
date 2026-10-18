@@ -15,6 +15,7 @@ test {
     _ = @import("render_tests.zig");
     _ = @import("reference_tests.zig");
     _ = @import("vector_tests.zig");
+    _ = @import("vector.zig");
     _ = @import("font_ttf_tests.zig");
     _ = @import("svg_icon_tests.zig");
     _ = @import("png.zig");
@@ -28,4 +29,5 @@ test {
     _ = @import("layout_audit_tests.zig");
     _ = @import("a11y_audit_tests.zig");
     _ = @import("lazy_tls.zig");
+    _ = @import("lazy_commit.zig");
 }

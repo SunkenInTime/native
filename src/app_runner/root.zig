@@ -56,6 +56,9 @@ pub const RunOptions = struct {
     startup_window_layer: ?native_sdk.WindowLayer = null,
     /// Optional so false can explicitly replace a compiled true value.
     startup_click_through: ?bool = null,
+    /// Replaces the compiled show mode of the startup window; `.hidden`
+    /// keeps it off screen for the app's life.
+    startup_window_show: ?native_sdk.WindowShowMode = null,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     js_window_api: bool = false,
@@ -118,6 +121,9 @@ pub const RunOptions = struct {
         if (self.startup_click_through) |click_through| {
             info.main_window.click_through = click_through;
             if (windows.len > 0) buffers.restored_windows[0].click_through = click_through;
+        }
+        if (self.startup_window_show) |show| {
+            info.main_window.show = show;
         }
         info.main_window.primary_display_anchor = self.primary_display_anchor;
         if (windows.len > 0) buffers.restored_windows[0].primary_display_anchor = self.primary_display_anchor;
@@ -1056,7 +1062,12 @@ fn validateCaptureCommandValue(value: []const u8) !void {
     if (std.mem.indexOfAny(u8, value, "\r\n") != null) return error.CaptureActionContainsLineBreak;
 }
 
-fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, request: CaptureRequest) !void {
+// noinline, like runSessionReplay: each mode's ~665 KiB frame would
+// otherwise be inlined into runWithOptions, which stays at the base of a
+// live app's stack for its whole life. The Windows stack probe touches
+// every page of a frame on entry, so a live widget kept both resident
+// without ever running either mode.
+noinline fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, request: CaptureRequest) !void {
     var buffers: StateBuffers = undefined;
     const app_info = options.appInfo(&buffers);
     const session_recorder = setupSessionRecorder(init, app_info);
@@ -1070,8 +1081,9 @@ fn runCapture(app: native_sdk.App, options: RunOptions, init: std.process.Init, 
     } else if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
         native_sdk.platform.windows.installHeadlessCaptureServices(&capture_platform.services);
     }
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
+    defer runtime.deinit();
     var driver: CaptureDriver = .{
         .io = init.io,
         .null_platform = &null_platform,
@@ -1232,9 +1244,11 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    // stack overflows on a stack instance, so construct it on the heap,
+    // committed as it is touched (most of its tables never are).
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = null_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1287,9 +1301,11 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    // stack overflows on a stack instance, so construct it on the heap,
+    // committed as it is touched (most of its tables never are).
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = mac_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1339,9 +1355,11 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    // stack overflows on a stack instance, so construct it on the heap,
+    // committed as it is touched (most of its tables never are).
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = linux_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1390,9 +1408,11 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
-    // stack overflows on a stack instance, so construct it on the heap.
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    // stack overflows on a stack instance, so construct it on the heap,
+    // committed as it is touched (most of its tables never are).
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = windows_platform.platform(),
         .trace_sink = runtime_trace_sink,
@@ -1488,7 +1508,8 @@ fn finishSessionRecorder(recorder: ?*native_sdk.runtime.SessionRecorder) void {
 /// the world), verify fingerprint and screenshot checkpoints unless
 /// `NATIVE_SDK_SESSION_VERIFY=0`, print the report, and exit non-zero
 /// on any mismatch.
-fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.Init, journal_path: []const u8) !void {
+/// noinline for the same reason as runCapture.
+noinline fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.Init, journal_path: []const u8) !void {
     const journal_bytes = readSessionJournal(init.io, journal_path) catch |err| {
         std.debug.print("session replay: cannot read {s}: {s}\n", .{ journal_path, @errorName(err) });
         return err;
@@ -1510,8 +1531,9 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
         native_sdk.platform.macos.installHeadlessTextServices(&replay_platform.services);
         null_platform.gpu_surface_scroll_drivers = true;
     }
-    const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
-    defer std.heap.page_allocator.destroy(runtime);
+    const runtime = try native_sdk.lazy_commit.create(native_sdk.Runtime);
+    defer native_sdk.lazy_commit.destroy(runtime);
+    defer runtime.deinit();
     // Bridge policy and security must match what the recording ran
     // under (they gate replayed bridge_message dispatch); automation,
     // window-state restore, and tracing stay off — replay consumes only

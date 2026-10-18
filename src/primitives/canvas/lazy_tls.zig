@@ -9,7 +9,9 @@
 //! per thread). `LazyTls` keeps only one pointer in static TLS: the
 //! backing storage is heap-allocated the first time a thread actually
 //! asks for it, so threads that never plan a frame pay eight bytes
-//! instead of megabytes.
+//! instead of megabytes. The storage is committed as it is touched
+//! (lazy_commit.zig), so a planner that uses a few hundred of its thousands
+//! of slots is charged for those pages only.
 //!
 //! Semantics match the `threadlocal var scratch: T = .{}` it replaces:
 //! each thread gets its own instance, initialized to the struct's field
@@ -25,6 +27,7 @@
 //! creation under the same pressure.
 
 const std = @import("std");
+const lazy_commit = @import("lazy_commit.zig");
 
 pub fn LazyTls(comptime T: type) type {
     return struct {
@@ -44,7 +47,7 @@ pub fn LazyTls(comptime T: type) type {
         }
 
         fn create() *T {
-            const ptr = std.heap.page_allocator.create(T) catch
+            const ptr = lazy_commit.create(T) catch
                 @panic("out of memory allocating per-thread canvas scratch");
             inline for (@typeInfo(T).@"struct".fields) |field| {
                 if (comptime field.defaultValue()) |value| @field(ptr, field.name) = value;

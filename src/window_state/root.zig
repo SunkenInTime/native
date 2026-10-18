@@ -38,7 +38,11 @@ pub const Store = struct {
         return parseWindowsInto(bytes, output, buffer[bytes.len..]);
     }
 
-    pub fn saveWindow(self: Store, state: platform.WindowState) !void {
+    // noinline: its two 64 KiB buffers and window tables would otherwise
+    // be inlined into the runtime's per-event dispatcher, whose frame the
+    // Windows stack probe touches on every event (each frame and timer
+    // tick), not just the window moves that save.
+    pub noinline fn saveWindow(self: Store, state: platform.WindowState) !void {
         if (!has_filesystem) return;
         if (state.label.len == 0) return;
         var cwd = std.Io.Dir.cwd();

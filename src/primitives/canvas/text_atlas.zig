@@ -80,7 +80,9 @@ pub const GlyphAtlasPlanner = struct {
         const use_index = estimated_glyphs >= plan_key_index.min_entries_for_index and
             plan_key_index.fitsHashSlots(glyph_atlas_index_slots, self.entries.len);
         const plan_index: ?*GlyphAtlasIndex = if (use_index) &glyph_atlas_index_scratch.get().plan else null;
-        if (plan_index) |index| index.reset();
+        // Every insert is a distinct glyph of the estimate that fit
+        // in `entries`.
+        if (plan_index) |index| index.reset(@min(estimated_glyphs, self.entries.len));
         for (display_list.commands, 0..) |command, command_index| {
             switch (command) {
                 .draw_text => |value| try self.consumeText(value, command_index, plan_index),
@@ -129,7 +131,7 @@ pub const GlyphAtlasPlanner = struct {
     fn appendUnique(self: *GlyphAtlasPlanner, key: GlyphAtlasKey, command_index: usize, glyph_index: usize, plan_index: ?*GlyphAtlasIndex) Error!void {
         var probe: GlyphAtlasIndex.Probe = undefined;
         if (plan_index) |index| {
-            probe = GlyphAtlasIndex.probe(glyphAtlasKeyHash(key));
+            probe = index.probe(glyphAtlasKeyHash(key));
             while (index.next(&probe)) |candidate| {
                 if (glyphAtlasKeysEqual(self.entries[candidate].key, key)) return;
             }
@@ -228,13 +230,13 @@ pub const GlyphAtlasCachePlanner = struct {
             plan_key_index.fitsHashSlots(glyph_atlas_cache_index_slots, plan.entries.len + previous.len);
         const index_scratch: ?*GlyphAtlasIndexScratch = if (use_index) glyph_atlas_index_scratch.get() else null;
         if (index_scratch) |scratch| {
-            scratch.cache_previous.reset();
+            scratch.cache_previous.reset(previous.len);
             for (previous, 0..) |entry, index| {
-                var p = GlyphAtlasCacheIndex.probe(glyphAtlasKeyHash(entry.key));
+                var p = scratch.cache_previous.probe(glyphAtlasKeyHash(entry.key));
                 while (scratch.cache_previous.next(&p)) |_| {}
                 scratch.cache_previous.insert(p, @intCast(index));
             }
-            scratch.cache_entry.reset();
+            scratch.cache_entry.reset(plan.entries.len + previous.len);
         }
 
         for (plan.entries, 0..) |entry, atlas_index| {
@@ -291,7 +293,7 @@ pub const GlyphAtlasCachePlanner = struct {
     /// probe chain — the indexed equivalent of scanning
     /// `self.entries[0..self.entry_len]`.
     fn entryIndexProbe(self: *GlyphAtlasCachePlanner, entry_index: *const GlyphAtlasCacheIndex, key: GlyphAtlasKey, key_hash: u64) ?usize {
-        var p = GlyphAtlasCacheIndex.probe(key_hash);
+        var p = entry_index.probe(key_hash);
         while (entry_index.next(&p)) |candidate| {
             if (glyphAtlasKeysEqual(self.entries[candidate].key, key)) return candidate;
         }
@@ -301,7 +303,7 @@ pub const GlyphAtlasCachePlanner = struct {
     fn appendEntryMaybeIndexed(self: *GlyphAtlasCachePlanner, entry: GlyphAtlasCacheEntry, entry_index: ?*GlyphAtlasCacheIndex) Error!void {
         try self.appendEntry(entry);
         if (entry_index) |index| {
-            var p = GlyphAtlasCacheIndex.probe(glyphAtlasKeyHash(entry.key));
+            var p = index.probe(glyphAtlasKeyHash(entry.key));
             while (index.next(&p)) |_| {}
             index.insert(p, @intCast(self.entry_len - 1));
         }
@@ -368,18 +370,18 @@ const glyph_atlas_index_slots = 16384;
 const glyph_atlas_cache_index_slots = 32768;
 const GlyphAtlasIndex = plan_key_index.HashSlots(glyph_atlas_index_slots);
 const GlyphAtlasCacheIndex = plan_key_index.HashSlots(glyph_atlas_cache_index_slots);
-// Lazily heap-allocated per thread (320 KiB of probe tables): reset per
-// build, so first-use init on the planning thread is the only contract —
-// threads that never plan glyphs never allocate it.
+// Lazily heap-allocated per thread (up to 320 KiB of probe tables): each
+// build resets the prefix it needs, so threads that never plan glyphs
+// never allocate it and small plans never touch most of it.
 const GlyphAtlasIndexScratch = struct {
-    plan: GlyphAtlasIndex = .{},
-    cache_previous: GlyphAtlasCacheIndex = .{},
-    cache_entry: GlyphAtlasCacheIndex = .{},
+    plan: GlyphAtlasIndex,
+    cache_previous: GlyphAtlasCacheIndex,
+    cache_entry: GlyphAtlasCacheIndex,
 };
 const glyph_atlas_index_scratch = @import("lazy_tls.zig").LazyTls(GlyphAtlasIndexScratch);
 
 fn findGlyphAtlasCacheEntryIndexed(previous_index: *const GlyphAtlasCacheIndex, previous: []const GlyphAtlasCacheEntry, key: GlyphAtlasKey, key_hash: u64) ?usize {
-    var p = GlyphAtlasCacheIndex.probe(key_hash);
+    var p = previous_index.probe(key_hash);
     while (previous_index.next(&p)) |candidate| {
         if (glyphAtlasKeysEqual(previous[candidate].key, key)) return candidate;
     }

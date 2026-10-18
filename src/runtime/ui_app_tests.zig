@@ -2315,6 +2315,165 @@ test "ui app autofocus moves the keyboard to a freshly mounted editor through th
     try std.testing.expectEqual(button_id, harness.runtime.views[view_index].canvas_widget_focused_id);
 }
 
+// ------------------------------- tree arenas across autofocus platform calls
+
+/// The autofocus view with a placeholder formatted into the tree arena, so
+/// the tree being built points into that arena while the rebuild runs (the
+/// runtime keeps its own copy of what it retains).
+fn arenaPlaceholderAutofocusView(ui: *AutofocusApp.Ui, model: *const AutofocusModel) AutofocusApp.Ui.Node {
+    if (!model.editing) {
+        return ui.column(.{ .gap = 8, .padding = 12 }, .{
+            ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
+        });
+    }
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
+        ui.textField(.{
+            .autofocus = true,
+            .text = model.draft.text(),
+            .placeholder = ui.fmt("Untitled note {d}", .{model.edit_count + 1}),
+            .on_input = AutofocusApp.Ui.inputMsg(.draft_edit),
+        }),
+    });
+}
+
+/// What the injected focus service does when an autofocus rebuild calls
+/// it. Platform service functions receive the platform's context, not the
+/// test's, so the test hands its state over through `focus_probe`.
+const FocusProbe = struct {
+    mode: enum { nested_event, fail },
+    runtime: *core.Runtime,
+    app: core.App,
+    app_state: *AutofocusApp,
+    calls: u32 = 0,
+};
+
+var focus_probe: ?*FocusProbe = null;
+
+fn probeFocusView(context: ?*anyopaque, window_id: zero_platform.WindowId, label: []const u8) anyerror!void {
+    _ = context;
+    _ = window_id;
+    _ = label;
+    const probe = focus_probe.?;
+    probe.calls += 1;
+    switch (probe.mode) {
+        .nested_event => {
+            // Windows `SetFocus` sends WM_KILLFOCUS before it returns, so
+            // the app sees another event while the outer rebuild is still
+            // inside `setCanvasWidgetLayout`. A command nothing maps is the
+            // smallest such event.
+            try probe.runtime.dispatchPlatformEvent(probe.app, .{ .menu_command = .{ .name = "note.unmapped", .window_id = 1 } });
+            // `arena_index` flips only after the rebuild finishes, so the
+            // outer rebuild is still building into the other arena.
+            const building = probe.app_state.arenas[probe.app_state.arena_index ^ 1];
+            if (building.queryCapacity() == 0) return error.TreeArenaFreedDuringRebuild;
+        },
+        .fail => return error.FocusDenied,
+    }
+}
+
+fn autofocusViewIndex(runtime: *const core.Runtime) usize {
+    for (runtime.views[0..runtime.view_count], 0..) |view, index| {
+        if (std.mem.eql(u8, view.label, autofocus_canvas_label)) return index;
+    }
+    unreachable;
+}
+
+fn installArenaPlaceholderAutofocusApp(harness: *core.TestHarness()) !*AutofocusApp {
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(AutofocusApp);
+    errdefer std.testing.allocator.destroy(app_state);
+    app_state.* = AutofocusApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-autofocus-arena",
+        .scene = autofocus_scene,
+        .canvas_label = autofocus_canvas_label,
+        .update = autofocusUpdate,
+        .view = arenaPlaceholderAutofocusView,
+        .on_command = autofocusCommand,
+    });
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = autofocus_canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+    return app_state;
+}
+
+test "an event nested in an autofocus rebuild does not free the arena that rebuild is building into" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    const app_state = try installArenaPlaceholderAutofocusApp(harness);
+    defer std.testing.allocator.destroy(app_state);
+    defer app_state.deinit();
+    const app = app_state.app();
+
+    var probe: FocusProbe = .{ .mode = .nested_event, .runtime = &harness.runtime, .app = app, .app_state = app_state };
+    focus_probe = &probe;
+    defer focus_probe = null;
+    harness.runtime.options.platform.services.focus_view_fn = probeFocusView;
+
+    // Mounting the editor rebuilds with an autofocus edge, which calls the
+    // focus service, which delivers the nested event.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "note.new", .window_id = 1 } });
+    try std.testing.expectEqual(@as(u32, 1), probe.calls);
+
+    // The outer rebuild finished: its tree is active, focus landed, and the
+    // runtime's retained placeholder still reads the bytes the view wrote.
+    const field_id = findWidgetIdByKind(app_state.tree.?.root, .text_field).?;
+    const view_index = autofocusViewIndex(&harness.runtime);
+    try std.testing.expectEqual(field_id, harness.runtime.views[view_index].canvas_widget_focused_id);
+    var placeholder: ?[]const u8 = null;
+    for (harness.runtime.views[view_index].widgetSemantics()) |node| {
+        if (node.id == field_id) placeholder = node.placeholder;
+    }
+    try std.testing.expectEqualStrings("Untitled note 1", placeholder.?);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, autofocus_canvas_label, harness.runtime.tokensWithTextMeasure(app_state.effectiveTokens()));
+
+    // Once the outermost event returned, the previous tree's arena gave
+    // its pages back as usual.
+    try std.testing.expectEqual(@as(usize, 0), app_state.arenas[app_state.arena_index ^ 1].queryCapacity());
+}
+
+test "a rebuild that fails after handing its tree to the runtime keeps that tree's arena" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    const app_state = try installArenaPlaceholderAutofocusApp(harness);
+    defer std.testing.allocator.destroy(app_state);
+    defer app_state.deinit();
+    const app = app_state.app();
+
+    var probe: FocusProbe = .{ .mode = .fail, .runtime = &harness.runtime, .app = app, .app_state = app_state };
+    focus_probe = &probe;
+    defer focus_probe = null;
+    harness.runtime.options.platform.services.focus_view_fn = probeFocusView;
+
+    // The runtime copies the new layout before autofocus calls the focus
+    // service, so when the service fails the runtime already points into
+    // the new arena, but the rebuild never makes that arena the active one.
+    const active_before = app_state.arena_index;
+    try std.testing.expectError(error.FocusDenied, harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "note.new", .window_id = 1 } }));
+    try std.testing.expectEqual(@as(u32, 1), probe.calls);
+    try std.testing.expectEqual(active_before, app_state.arena_index);
+
+    // That arena survives the end of the event, so the runtime's retained
+    // placeholder still reads the bytes the view wrote and the next display
+    // list emission succeeds.
+    try std.testing.expect(app_state.arenas[app_state.arena_index ^ 1].queryCapacity() > 0);
+    const view_index = autofocusViewIndex(&harness.runtime);
+    var placeholder: ?[]const u8 = null;
+    for (harness.runtime.views[view_index].widgetSemantics()) |node| {
+        if (node.placeholder.len > 0) placeholder = node.placeholder;
+    }
+    try std.testing.expectEqualStrings("Untitled note 1", placeholder.?);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, autofocus_canvas_label, harness.runtime.tokensWithTextMeasure(app_state.effectiveTokens()));
+}
+
 // ----------------------------- a failed rebuild after the runtime took its tree
 
 /// The autofocus view with a placeholder formatted into the app's tree

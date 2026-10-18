@@ -6,6 +6,7 @@ const canvas_limits = @import("canvas_limits.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const widget_bridge = @import("widget_bridge.zig");
 const platform = @import("../platform/root.zig");
+const storage_allocator = @import("grown_array.zig").storage_allocator;
 
 const validateCommandName = validation.validateCommandName;
 const max_canvas_widget_nodes_per_view = canvas_limits.max_canvas_widget_nodes_per_view;
@@ -170,6 +171,10 @@ fn validateWidgetLayoutPoolBudgets(
     if (text_len > max_canvas_widget_text_bytes_per_view) return error.WidgetTextTooLarge;
 }
 
+fn canvasWidgetHasSourceTextEntry(node: canvas.WidgetLayoutNode) bool {
+    return node.widget.id != 0 and canvasWidgetEditableTextKind(node.widget.kind);
+}
+
 pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
     return struct {
         pub fn widgetLayoutTree(self: *const RuntimeView) canvas.WidgetLayoutTree {
@@ -181,19 +186,46 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         pub fn widgetSourceTextEntries(self: *const RuntimeView) []const CanvasWidgetSourceTextEntry {
-            return self.widget_source_text_entries[0..self.widget_source_text_count];
+            return self.widget_source_text_entries.slice();
         }
 
         pub fn widgetSourceScrollEntries(self: *const RuntimeView) []const canvas_widget_runtime.CanvasWidgetSourceScrollEntry {
-            return self.widget_source_scroll_entries[0..self.widget_source_scroll_count];
+            return self.widget_source_scroll_entries.slice();
         }
 
-        pub fn copyCanvasWidgetSourceScroll(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
-            const entries = canvas_widget_runtime.collectCanvasWidgetScrollOffsetEntries(
-                layout.nodes,
-                &self.widget_source_scroll_entries,
-            );
-            self.widget_source_scroll_count = entries.len;
+        /// Room for all three source mirrors of `layout`. Taken before the
+        /// retained tree is replaced: a tree installed without its mirrors
+        /// would be reconciled against the previous source on the next
+        /// rebuild.
+        pub fn reserveCanvasWidgetSourceMirrors(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
+            try self.widget_source_text_entries.ensureCapacity(storage_allocator, sourceTextEntryCount(layout.nodes));
+            try self.widget_source_scroll_entries.ensureCapacity(storage_allocator, sourceScrollEntryCount(layout.nodes));
+            try self.widget_source_control_entries.ensureCapacity(storage_allocator, sourceControlEntryCount(layout.nodes));
+        }
+
+        // The mirrors keep the first entries up to their budgets, as their
+        // fixed arrays did.
+        fn sourceTextEntryCount(nodes: []const canvas.WidgetLayoutNode) usize {
+            var count: usize = 0;
+            for (nodes) |node| {
+                if (canvasWidgetHasSourceTextEntry(node)) count += 1;
+            }
+            return @min(count, max_canvas_widget_source_text_entries_per_view);
+        }
+
+        fn sourceScrollEntryCount(nodes: []const canvas.WidgetLayoutNode) usize {
+            return @min(canvas_widget_runtime.countCanvasWidgetScrollOffsetEntries(nodes), max_canvas_widget_nodes_per_view);
+        }
+
+        fn sourceControlEntryCount(nodes: []const canvas.WidgetLayoutNode) usize {
+            return @min(canvas_widget_runtime.countCanvasWidgetSourceControlEntries(nodes), max_canvas_widget_nodes_per_view);
+        }
+
+        pub fn copyCanvasWidgetSourceScroll(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
+            // Count, then size, then fill: a failed allocation leaves the
+            // previous mirror whole.
+            try self.widget_source_scroll_entries.resize(storage_allocator, sourceScrollEntryCount(layout.nodes));
+            _ = canvas_widget_runtime.collectCanvasWidgetScrollOffsetEntries(layout.nodes, self.widget_source_scroll_entries.sliceMut());
         }
 
         /// Resolve the SOURCE layout's autofocus request (edge-triggered)
@@ -228,15 +260,13 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         pub fn widgetSourceControlEntries(self: *const RuntimeView) []const canvas_widget_runtime.CanvasWidgetSourceControlEntry {
-            return self.widget_source_control_entries[0..self.widget_source_control_count];
+            return self.widget_source_control_entries.slice();
         }
 
-        pub fn copyCanvasWidgetSourceControls(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
-            const entries = canvas_widget_runtime.collectCanvasWidgetSourceControlEntries(
-                layout.nodes,
-                &self.widget_source_control_entries,
-            );
-            self.widget_source_control_count = entries.len;
+        pub fn copyCanvasWidgetSourceControls(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
+            // Count, then size, then fill, as for the scroll mirror.
+            try self.widget_source_control_entries.resize(storage_allocator, sourceControlEntryCount(layout.nodes));
+            _ = canvas_widget_runtime.collectCanvasWidgetSourceControlEntries(layout.nodes, self.widget_source_control_entries.sliceMut());
         }
 
         pub fn copyCanvasWidgetSourceText(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
@@ -244,7 +274,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             var entry_count: usize = 0;
 
             for (layout.nodes) |node| {
-                if (node.widget.id == 0 or !canvasWidgetEditableTextKind(node.widget.kind)) continue;
+                if (!canvasWidgetHasSourceTextEntry(node)) continue;
                 if (entry_count >= entries.len) break;
                 const source_text = canvasWidgetSourceTextFingerprint(node.widget.text);
                 entries[entry_count] = .{
@@ -256,8 +286,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 entry_count += 1;
             }
 
-            @memcpy(self.widget_source_text_entries[0..entry_count], entries[0..entry_count]);
-            self.widget_source_text_count = entry_count;
+            try self.widget_source_text_entries.replace(storage_allocator, entries[0..entry_count]);
         }
 
         /// `scratch` is reconcile scratch too large for the stack at the
@@ -291,7 +320,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             }
             const previous_scroll_states = collectCanvasWidgetScrollReconcileEntries(
                 self.widgetLayoutTree().nodes,
-                self.widget_scroll_states[0..self.widget_layout_node_count],
+                self.widget_scroll_states.slice(),
                 &scratch.scroll_entries,
             );
             var previous_text_len: usize = 0;
@@ -324,6 +353,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             // backstop; the display-list side already follows this
             // pattern (`copyCanvasDisplayList` counts before it copies).
             try validateWidgetLayoutPoolBudgets(layout, &index_scratch.texts);
+            // Scroll states pair with nodes index for index; room for every
+            // node is taken here, before the reset, so a failed allocation
+            // leaves the old tree whole and the loop below cannot fail on it.
+            try self.widget_scroll_states.ensureCapacity(storage_allocator, layout.nodes.len);
 
             // Keyboard-focus return for unmounting anchored surfaces:
             // when the focus sits INSIDE an anchored menu that this
@@ -347,6 +380,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             }
 
             self.widget_layout_node_count = 0;
+            self.widget_scroll_states.clear();
             self.widget_semantics_node_count = 0;
             self.widget_text_len = 0;
             self.widget_span_len = 0;
@@ -365,13 +399,13 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 const text_copy = try self.copyWidgetLayoutNode(text_reconciled, &index_scratch.semantics);
                 const copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, layout, layout_index, &index_scratch.controls, &index_scratch.source_controls);
                 self.widget_layout_nodes[self.widget_layout_node_count] = copy;
-                self.widget_scroll_states[self.widget_layout_node_count] = canvasWidgetScrollStateForLayoutNode(copy, previous_scroll_states);
+                self.widget_scroll_states.appendAssumeCapacity(canvasWidgetScrollStateForLayoutNode(copy, previous_scroll_states));
                 self.widget_layout_node_count += 1;
             }
 
             clampCanvasWidgetLayoutScrollOffsets(
                 self.widget_layout_nodes[0..self.widget_layout_node_count],
-                self.widget_scroll_states[0..self.widget_layout_node_count],
+                self.widget_scroll_states.sliceMut(),
             );
             clampCanvasWidgetLayoutTextOffsets(
                 self.widget_layout_nodes[0..self.widget_layout_node_count],

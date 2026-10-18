@@ -113,7 +113,7 @@ const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
 
-extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, min_width: f64, min_height: f64) ?*WindowsHost;
+extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, hidden: c_int, min_width: f64, min_height: f64) ?*WindowsHost;
 extern fn native_sdk_windows_destroy(host: *WindowsHost) void;
 extern fn native_sdk_windows_run(host: *WindowsHost, callback: WindowsCallback, context: ?*anyopaque) void;
 extern fn native_sdk_windows_stop(host: *WindowsHost) void;
@@ -130,7 +130,7 @@ extern fn native_sdk_windows_emit_window_event(host: *WindowsHost, window_id: u6
 extern fn native_sdk_windows_set_security_policy(host: *WindowsHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
 extern fn native_sdk_windows_set_menus(host: *WindowsHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
 extern fn native_sdk_windows_set_shortcuts(host: *WindowsHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
-extern fn native_sdk_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, min_width: f64, min_height: f64) c_int;
+extern fn native_sdk_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, hidden: c_int, min_width: f64, min_height: f64) c_int;
 extern fn native_sdk_windows_start_window_drag(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_set_window_drag_regions(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, rects: [*]const f64, exclusions: [*]const c_int, count: usize) c_int;
 extern fn native_sdk_windows_window_chrome(host: *WindowsHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
@@ -244,7 +244,7 @@ pub const WindowsPlatform = struct {
         const window_options = app_info.resolvedMainWindow();
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
-        const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), if (window_options.transparent) 1 else 0, windowLayerInt(window_options.layer), if (window_options.click_through) 1 else 0, if (window_options.no_activate) 1 else 0, minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height)) orelse return error.CreateFailed;
+        const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), if (window_options.transparent) 1 else 0, windowLayerInt(window_options.layer), if (window_options.click_through) 1 else 0, if (window_options.no_activate) 1 else 0, if (window_options.show == .hidden) 1 else 0, minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height)) orelse return error.CreateFailed;
         return .{
             .host = host,
             .web_engine = web_engine,
@@ -443,14 +443,7 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
         .shutdown => state.emit(.app_shutdown),
         .app_activated => state.emit(.app_activated),
         .app_deactivated => state.emit(.app_deactivated),
-        .files_dropped => {
-            var paths_buffer: [platform_mod.max_drop_paths][]const u8 = undefined;
-            const paths = platform_mod.splitDropPaths(event.drop_paths[0..event.drop_paths_len], paths_buffer[0..]);
-            state.emit(.{ .files_dropped = .{
-                .window_id = event.window_id,
-                .paths = paths,
-            } });
-        },
+        .files_dropped => emitFilesDropped(state, event),
         .resize => {
             const surface: platform_mod.Surface = .{
                 .id = event.window_id,
@@ -545,6 +538,20 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .bands = event.audio_bands,
         } }),
     }
+}
+
+// noinline: its 64 KiB path table would otherwise be inlined into
+// windowsCallback, which every platform event (each frame and timer tick)
+// enters. The Windows stack probe touches every page of a frame on entry,
+// so the table kept 64 KiB of the main thread's stack resident for apps
+// that never see a drop.
+noinline fn emitFilesDropped(state: *RunState, event: *const WindowsEvent) void {
+    var paths_buffer: [platform_mod.max_drop_paths][]const u8 = undefined;
+    const paths = platform_mod.splitDropPaths(event.drop_paths[0..event.drop_paths_len], paths_buffer[0..]);
+    state.emit(.{ .files_dropped = .{
+        .window_id = event.window_id,
+        .paths = paths,
+    } });
 }
 
 /// Ordinals match the audio report kinds in webview2_host.cpp (the same
@@ -741,7 +748,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (native_sdk_windows_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), if (options.transparent) 1 else 0, windowLayerInt(options.layer), if (options.click_through) 1 else 0, if (options.no_activate) 1 else 0, minSizeFloor(options.min_width), minSizeFloor(options.min_height)) == 0) return error.CreateFailed;
+    if (native_sdk_windows_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), if (options.transparent) 1 else 0, windowLayerInt(options.layer), if (options.click_through) 1 else 0, if (options.no_activate) 1 else 0, if (options.show == .hidden) 1 else 0, minSizeFloor(options.min_width), minSizeFloor(options.min_height)) == 0) return error.CreateFailed;
     return .{
         .id = options.id,
         .label = options.label,
@@ -1238,7 +1245,9 @@ fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyer
 }
 
 /// Map the audio host's synchronous load result: 0 loaded, 1 the file is
-/// missing/unreadable, anything else a decode failure. The asynchronous
+/// missing/unreadable, 3 Media Foundation itself is unavailable (the host
+/// has logged which DLL and what to install), anything else a decode
+/// failure. The asynchronous
 /// `.loaded` acknowledgment (with the decoded duration) follows as an
 /// `.audio` event on the message loop.
 fn audioLoad(context: ?*anyopaque, path: []const u8) anyerror!void {
@@ -1247,14 +1256,16 @@ fn audioLoad(context: ?*anyopaque, path: []const u8) anyerror!void {
     return switch (native_sdk_windows_audio_load(self.host, path.ptr, path.len)) {
         0 => {},
         1 => error.AudioSourceNotFound,
+        3 => error.AudioPlaybackUnavailable,
         else => error.AudioDecodeFailed,
     };
 }
 
 /// Map the streaming host's synchronous result: 1 a verified cache entry
 /// is playing locally, 0 a progressive stream started (the `.loaded`
-/// acknowledgment follows when the topology is ready), anything else the
-/// URL itself was unusable. Network failures after this point are
+/// acknowledgment follows when the topology is ready), 3 Media
+/// Foundation is unavailable (the cache entry is left alone), anything
+/// else the URL itself was unusable. Network failures after this point are
 /// asynchronous and arrive as `.audio`/`.failed` events.
 fn audioLoadUrl(context: ?*anyopaque, url: []const u8, cache_path: []const u8, expected_bytes: u64) anyerror!platform_mod.AudioLoadResolution {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
@@ -1262,6 +1273,7 @@ fn audioLoadUrl(context: ?*anyopaque, url: []const u8, cache_path: []const u8, e
     return switch (native_sdk_windows_audio_load_url(self.host, url.ptr, url.len, cache_path.ptr, cache_path.len, expected_bytes)) {
         0 => .stream,
         1 => .cache,
+        3 => error.AudioPlaybackUnavailable,
         else => error.InvalidAudioOptions,
     };
 }
@@ -1562,7 +1574,13 @@ test "windows top-level frame delivery stays demand-driven" {
     // coalescing UI timer so compatibility layers cannot run a caret or
     // other continuous animation fast enough to starve input dispatch.
     try std.testing.expect(std.mem.indexOf(u8, host_source, "view.gpu_presenter && scheduleGpuSurfaceDeadline") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "SetTimer(view.hwnd, kGpuEmitTimerId") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "SetTimer(view.hwnd, (UINT_PTR)weaverGpuUiTimerId(generation)") != null);
+    // Both emission paths must gate on the policy (its rules are exercised
+    // in dpi_geometry_tests.cpp): emitting a superseded emission starts a
+    // second self-re-arming frame chain.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "weaverGpuEmissionAccepts(view->gpu_emission, kWeaverGpuEmissionUiTimer,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "weaverGpuUiTimerGeneration((uint64_t)wparam)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "weaverGpuEmissionAccepts(view->gpu_emission, (int)lparam, (uint32_t)wparam)") != null);
 }
 
 test "windows audio event maps kinds and payload" {

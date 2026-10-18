@@ -1,5 +1,9 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
+const grown_array = @import("grown_array.zig");
+const GrownArray = grown_array.GrownArray;
+const storage_allocator = grown_array.storage_allocator;
 const canvas_limits = @import("canvas_limits.zig");
 const launch_timing = @import("launch_timing.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
@@ -206,18 +210,18 @@ pub const RuntimeView = struct {
     /// bounds — but no host retains a command dictionary, so a packet
     /// patch must never be encoded against it. Packet adoptions clear it.
     canvas_packet_baseline_pixels: bool = false,
-    canvas_packet_baseline_count: usize = 0,
     canvas_packet_baseline_surface_size: geometry.SizeF = geometry.SizeF.init(0, 0),
     canvas_packet_baseline_scale: f32 = 1,
-    canvas_packet_baseline_keys: [max_canvas_retained_packet_commands_per_view]u64 align(storage_align) = undefined,
-    canvas_packet_baseline_fingerprints: [max_canvas_retained_packet_commands_per_view]u64 align(storage_align) = undefined,
+    /// The three baseline arrays always hold the same count.
+    canvas_packet_baseline_keys: GrownArray(u64, max_canvas_retained_packet_commands_per_view) = .{},
+    canvas_packet_baseline_fingerprints: GrownArray(u64, max_canvas_retained_packet_commands_per_view) = .{},
     /// Draw-order-parallel bounds of the retained baseline commands: the
     /// pixels each retained command covered when it last reached the
     /// glass. The frame planner derives Msg-rebuild dirty bounds from the
     /// SAME edit script the patch present ships (upserts + evicts), and
     /// an upsert/evict must repaint the command's OLD extent too — these
     /// are those extents.
-    canvas_packet_baseline_bounds: [max_canvas_retained_packet_commands_per_view]geometry.RectF align(storage_align) = undefined,
+    canvas_packet_baseline_bounds: GrownArray(geometry.RectF, max_canvas_retained_packet_commands_per_view) = .{},
     /// CPU-retained half of a hybrid immediate-canvas surface. Its hash is
     /// independent of canvas commands, so a 60 fps island cannot trigger a
     /// reraster or shared-memory upload of static chrome/text.
@@ -266,11 +270,9 @@ pub const RuntimeView = struct {
     presented_canvas_revision: u64 = 0,
     presented_canvas_surface_size: geometry.SizeF = geometry.SizeF.init(0, 0),
     presented_canvas_scale: f32 = 1,
-    presented_canvas_commands: [max_canvas_commands_per_view]PresentedCanvasCommand align(storage_align) = undefined,
-    presented_canvas_command_count: usize = 0,
+    presented_canvas_commands: GrownArray(PresentedCanvasCommand, max_canvas_commands_per_view) = .{},
     presented_canvas_has_unkeyed: bool = false,
-    canvas_render_animations: [max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation align(storage_align) = undefined,
-    canvas_render_animation_count: usize = 0,
+    canvas_render_animations: GrownArray(canvas.CanvasRenderAnimation, max_canvas_render_animations_per_view) = .{},
     /// Runtime-driven layout tweens (split fractions easing toward
     /// declared targets). Advanced once per presented frame from the
     /// frame event's timestamp; each step mutates retained layout
@@ -305,26 +307,18 @@ pub const RuntimeView = struct {
     /// Arc command ids of the spinners currently carrying the looping
     /// rotation animation, so display-list refreshes can remove the
     /// animations of spinners that unmounted (and the view goes idle).
-    canvas_widget_loop_animation_ids: [canvas_limits.max_canvas_widget_loop_animations_per_view]canvas.ObjectId align(storage_align) = undefined,
-    canvas_widget_loop_animation_count: usize = 0,
-    canvas_render_animation_dirty_bounds: [max_canvas_render_animation_dirty_bounds_per_view]CanvasRenderAnimationDirtyBounds align(storage_align) = undefined,
-    canvas_render_animation_dirty_bounds_count: usize = 0,
-    canvas_frame_render_overrides: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride align(storage_align) = undefined,
-    canvas_frame_render_override_count: usize = 0,
-    canvas_frame_path_geometry_cache: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometryCacheEntry align(storage_align) = undefined,
-    canvas_frame_path_geometry_cache_count: usize = 0,
-    canvas_frame_image_cache: [max_canvas_images_per_view]canvas.RenderImageCacheEntry align(storage_align) = undefined,
-    canvas_frame_image_cache_count: usize = 0,
-    canvas_frame_layer_cache: [max_canvas_layers_per_view]canvas.RenderLayerCacheEntry align(storage_align) = undefined,
-    canvas_frame_layer_cache_count: usize = 0,
-    canvas_frame_resource_cache: [max_canvas_resources_per_view]canvas.RenderResourceCacheEntry align(storage_align) = undefined,
-    canvas_frame_resource_cache_count: usize = 0,
-    canvas_frame_visual_effect_cache: [max_canvas_visual_effects_per_view]canvas.VisualEffectCacheEntry align(storage_align) = undefined,
-    canvas_frame_visual_effect_cache_count: usize = 0,
-    canvas_frame_glyph_atlas_cache: [max_canvas_glyphs_per_view]canvas.GlyphAtlasCacheEntry align(storage_align) = undefined,
-    canvas_frame_glyph_atlas_cache_count: usize = 0,
-    canvas_frame_text_layout_cache: [max_canvas_text_layouts_per_view]canvas.TextLayoutCacheEntry align(storage_align) = undefined,
-    canvas_frame_text_layout_cache_count: usize = 0,
+    canvas_widget_loop_animation_ids: GrownArray(canvas.ObjectId, canvas_limits.max_canvas_widget_loop_animations_per_view) = .{},
+    canvas_render_animation_dirty_bounds: GrownArray(CanvasRenderAnimationDirtyBounds, max_canvas_render_animation_dirty_bounds_per_view) = .{},
+    canvas_frame_render_overrides: GrownArray(canvas.CanvasRenderOverride, max_canvas_render_overrides_per_view) = .{},
+    canvas_frame_path_geometry_cache: GrownArray(canvas.RenderPathGeometryCacheEntry, max_canvas_path_geometries_per_view) = .{},
+    canvas_frame_image_cache: GrownArray(canvas.RenderImageCacheEntry, max_canvas_images_per_view) = .{},
+    canvas_frame_layer_cache: GrownArray(canvas.RenderLayerCacheEntry, max_canvas_layers_per_view) = .{},
+    canvas_frame_resource_cache: GrownArray(canvas.RenderResourceCacheEntry, max_canvas_resources_per_view) = .{},
+    canvas_frame_visual_effect_cache: GrownArray(canvas.VisualEffectCacheEntry, max_canvas_visual_effects_per_view) = .{},
+    canvas_frame_glyph_atlas_cache: GrownArray(canvas.GlyphAtlasCacheEntry, max_canvas_glyphs_per_view) = .{},
+    canvas_frame_text_layout_cache: GrownArray(canvas.TextLayoutCacheEntry, max_canvas_text_layouts_per_view) = .{},
+    /// Ten entries inside the small fields' page, which every view keeps
+    /// resident: growing storage would save no page here.
     canvas_frame_pipeline_cache: [max_canvas_pipelines_per_view]canvas.RenderPipelineCacheEntry = undefined,
     canvas_frame_pipeline_cache_count: usize = 0,
     canvas_frame_requires_render: bool = false,
@@ -417,7 +411,9 @@ pub const RuntimeView = struct {
     /// the runtime interns (`Runtime.swapWidgetTokens`). A copy per view
     /// was 9 KiB, the same for every view of an app.
     widget_tokens: *const canvas.DesignTokens = &default_widget_tokens,
-    widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState align(storage_align) = undefined,
+    /// One state per `widget_layout_nodes` entry, at the same index: its
+    /// length is always `widget_layout_node_count`.
+    widget_scroll_states: GrownArray(canvas.ScrollState, max_canvas_widget_nodes_per_view) = .{},
     /// Scroll nodes whose offset changed since the last app dispatch
     /// (wheel, kinetic, keyboard, accessibility): drained into
     /// `canvas_widget_scroll` events at the gpu-surface dispatch points.
@@ -445,16 +441,13 @@ pub const RuntimeView = struct {
     /// lossless (see `canvas_limits.max_canvas_widget_change_events_per_view`).
     widget_change_event_ids: [canvas_limits.max_canvas_widget_change_events_per_view]canvas.ObjectId = undefined,
     widget_change_event_count: usize = 0,
-    widget_source_text_entries: [max_canvas_widget_source_text_entries_per_view]CanvasWidgetSourceTextEntry align(storage_align) = undefined,
-    widget_source_text_count: usize = 0,
-    widget_source_scroll_entries: [canvas_limits.max_canvas_widget_nodes_per_view]CanvasWidgetSourceScrollEntry align(storage_align) = undefined,
-    widget_source_scroll_count: usize = 0,
+    widget_source_text_entries: GrownArray(CanvasWidgetSourceTextEntry, max_canvas_widget_source_text_entries_per_view) = .{},
+    widget_source_scroll_entries: GrownArray(CanvasWidgetSourceScrollEntry, canvas_limits.max_canvas_widget_nodes_per_view) = .{},
     /// SOURCE-side selected state per control on the previous rebuild:
     /// the control reconcile reads it to tell model-driven
     /// toggle-buttons (source wins) from uncontrolled ones (retained
     /// state wins).
-    widget_source_control_entries: [canvas_limits.max_canvas_widget_nodes_per_view]canvas_widget_runtime.CanvasWidgetSourceControlEntry align(storage_align) = undefined,
-    widget_source_control_count: usize = 0,
+    widget_source_control_entries: GrownArray(canvas_widget_runtime.CanvasWidgetSourceControlEntry, canvas_limits.max_canvas_widget_nodes_per_view) = .{},
     /// SOURCE-side autofocus ids on the previous rebuild: the edge
     /// detector — a rebuild only moves focus to a widget whose flag was
     /// NOT in this set (newly mounted or freshly flipped on).
@@ -507,8 +500,7 @@ pub const RuntimeView = struct {
     /// header on every state rebuild. `pushed` distinguishes "nothing
     /// pushed yet" from "pushed an empty mirror" — the first layout of
     /// a drag-free view pushes nothing at all.
-    canvas_widget_drag_regions: [canvas_limits.max_canvas_widget_window_drag_regions_per_view]platform.WindowDragRegion align(storage_align) = undefined,
-    canvas_widget_drag_region_count: usize = 0,
+    canvas_widget_drag_regions: GrownArray(platform.WindowDragRegion, canvas_limits.max_canvas_widget_window_drag_regions_per_view) = .{},
     canvas_widget_drag_regions_pushed: bool = false,
     widget_text_bytes: [max_canvas_widget_text_bytes_per_view]u8 align(storage_align) = undefined,
     widget_text_len: usize = 0,
@@ -618,6 +610,7 @@ pub const RuntimeView = struct {
     pub const copyCanvasFrameVisualEffectCache = CanvasFrameMethods.copyCanvasFrameVisualEffectCache;
     pub const copyCanvasRenderAnimations = CanvasFrameMethods.copyCanvasRenderAnimations;
     pub const replaceCanvasRenderAnimation = CanvasFrameMethods.replaceCanvasRenderAnimation;
+    pub const reserveCanvasRenderAnimations = CanvasFrameMethods.reserveCanvasRenderAnimations;
     pub const removeCanvasRenderAnimation = CanvasFrameMethods.removeCanvasRenderAnimation;
     pub const replaceCanvasRenderAnimationDirtyBounds = CanvasFrameMethods.replaceCanvasRenderAnimationDirtyBounds;
     pub const removeCanvasRenderAnimationDirtyBounds = CanvasFrameMethods.removeCanvasRenderAnimationDirtyBounds;
@@ -630,6 +623,7 @@ pub const RuntimeView = struct {
     pub const copyCanvasFramePipelineCache = CanvasFrameMethods.copyCanvasFramePipelineCache;
     pub const copyCanvasFrameGlyphAtlasCache = CanvasFrameMethods.copyCanvasFrameGlyphAtlasCache;
     pub const copyCanvasFrameTextLayoutCache = CanvasFrameMethods.copyCanvasFrameTextLayoutCache;
+    pub const reserveCanvasFrameRecord = CanvasFrameMethods.reserveCanvasFrameRecord;
     pub const recordCanvasFrame = CanvasFrameMethods.recordCanvasFrame;
     pub const recordCanvasFramePresentationComplete = CanvasFrameMethods.recordCanvasFramePresentationComplete;
     pub const refreshCanvasFrameBudgetStatus = CanvasFrameMethods.refreshCanvasFrameBudgetStatus;
@@ -654,6 +648,7 @@ pub const RuntimeView = struct {
     pub const widgetSourceTextEntries = CanvasWidgetTreeMethods.widgetSourceTextEntries;
     pub const copyCanvasWidgetSourceText = CanvasWidgetTreeMethods.copyCanvasWidgetSourceText;
     pub const widgetSourceScrollEntries = CanvasWidgetTreeMethods.widgetSourceScrollEntries;
+    pub const reserveCanvasWidgetSourceMirrors = CanvasWidgetTreeMethods.reserveCanvasWidgetSourceMirrors;
     pub const copyCanvasWidgetSourceScroll = CanvasWidgetTreeMethods.copyCanvasWidgetSourceScroll;
     pub const widgetSourceControlEntries = CanvasWidgetTreeMethods.widgetSourceControlEntries;
     pub const canvasWidgetAutofocusTarget = CanvasWidgetTreeMethods.canvasWidgetAutofocusTarget;
@@ -693,6 +688,16 @@ pub const RuntimeView = struct {
     pub const copyWidgetImmediateCommands = CanvasWidgetTreeMethods.copyWidgetImmediateCommands;
     pub const copyWidgetContextMenu = CanvasWidgetTreeMethods.copyWidgetContextMenu;
     pub const copyWidgetChart = CanvasWidgetTreeMethods.copyWidgetChart;
+
+    /// Free the storage this view's grown arrays allocated. Called when the
+    /// view's slot is released; the slot is rebuilt from defaults before reuse.
+    pub fn deinit(self: *RuntimeView) void {
+        inline for (@typeInfo(RuntimeView).@"struct".fields) |field| {
+            if (comptime @typeInfo(field.type) == .@"struct" and @hasDecl(field.type, "is_grown_array")) {
+                @field(self, field.name).deinit(storage_allocator);
+            }
+        }
+    }
 
     pub fn canvasWidgetLayoutTweensActive(self: *const RuntimeView) bool {
         return self.canvas_widget_layout_tween_count > 0;
@@ -821,7 +826,7 @@ pub const RuntimeView = struct {
             .gpu_present_patch_bytes = self.gpu_present_patch_bytes,
             .gpu_present_patch_upsert_count = self.gpu_present_patch_upsert_count,
             .gpu_present_patch_evict_count = self.gpu_present_patch_evict_count,
-            .gpu_present_retained_command_count = if (self.canvas_packet_baseline_valid) self.canvas_packet_baseline_count else 0,
+            .gpu_present_retained_command_count = if (self.canvas_packet_baseline_valid) self.canvas_packet_baseline_keys.len else 0,
             .canvas_revision = self.canvas_revision,
             .canvas_command_count = self.canvas_command_count,
             .canvas_frame_requires_render = self.canvas_frame_requires_render,

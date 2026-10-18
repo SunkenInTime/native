@@ -9,8 +9,10 @@
 #include <wincodec.h>
 #include <uxtheme.h>
 #include <dwmapi.h>
+#include "lazy_dll.h"
 #include "shared_renderer_client.h"
 #include "shared_renderer_policy.h"
+#include "gpu_emission_policy.h"
 #include "dpi_geometry.h"
 #include "dpi_diagnostic.h"
 
@@ -130,13 +132,25 @@ static UINT dpiDiagnosticOverride() {
     return g_dpi_diagnostic_override.load();
 }
 
+/* An environment-named file path, or empty when the variable is unset.
+ * Sized from the variable itself: a 32K-character stack buffer here put
+ * 64 KiB in the frame of every caller, and the stack probe makes all of it
+ * resident even when the variable is unset. */
+static std::wstring environmentPath(const wchar_t *name) {
+    const DWORD needed = GetEnvironmentVariableW(name, nullptr, 0);
+    if (needed == 0) return {};
+    std::wstring value(needed, L'\0');
+    const DWORD length = GetEnvironmentVariableW(name, value.data(), needed);
+    if (length == 0 || length >= needed) return {};
+    value.resize(length);
+    return value;
+}
+
 static void appendDpiDiagnosticLine(const char *line, size_t length) {
-    wchar_t path[32768] = {};
-    const DWORD path_length = GetEnvironmentVariableW(L"WEAVER_DPI_LOG", path,
-        ARRAYSIZE(path));
-    if (!line || length == 0 || path_length == 0 ||
-        path_length >= ARRAYSIZE(path)) return;
-    HANDLE file = CreateFileW(path, FILE_APPEND_DATA,
+    if (!line || length == 0) return;
+    const std::wstring path = environmentPath(L"WEAVER_DPI_LOG");
+    if (path.empty()) return;
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA,
         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
         FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
@@ -196,15 +210,19 @@ constexpr UINT kAudioSessionMessage = WM_APP + 45;
  * loop starves it far below the contract cadence, while posted messages
  * keep their place in the queue. */
 constexpr UINT kAudioSpectrumMessage = WM_APP + 46;
+/* A scheduled GPU-surface frame emission arriving from a deadline timer or
+ * a direct post: WPARAM is its generation, LPARAM its source (see
+ * gpu_emission_policy.h). WM_TIMER cannot carry these: DispatchMessage
+ * calls a non-zero WM_TIMER LPARAM as a timer procedure. */
+constexpr UINT kGpuEmitMessage = WM_APP + 47;
 constexpr const char *kAssetVirtualOrigin = "https://native-sdk-app.localhost";
 
 static void reportWeaverBackend(const char *backend) {
     static std::string reported;
     if (reported == backend) return;
-    WCHAR path[32768] = {};
-    const DWORD length = GetEnvironmentVariableW(L"WEAVER_BACKEND_FILE", path, (DWORD)(sizeof(path) / sizeof(path[0])));
-    if (length == 0 || length >= sizeof(path) / sizeof(path[0])) return;
-    HANDLE file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    const std::wstring path = environmentPath(L"WEAVER_BACKEND_FILE");
+    if (path.empty()) return;
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
     DWORD written = 0;
@@ -367,6 +385,8 @@ struct Window {
     int layer = 0;
     bool click_through = false;
     bool no_activate = false;
+    /* Created hidden and never shown (WindowShowMode.hidden). */
+    bool hidden = false;
     /* Desktop-layer windows are parented to the shell's wallpaper WorkerW.
      * Z-order alone survives ordinary app activation but Show Desktop hides
      * unowned top-level popups. The shell-owned parent keeps both software
@@ -381,19 +401,31 @@ struct Window {
      * behind the button cluster matches the app's header). */
     COLORREF hidden_caption_color = 0;
     bool hidden_caption_color_set = false;
-    /* UpdateLayeredWindow requires a selected 32-bpp DIB. Keep that backing
-     * store for the lifetime of one surface size: animation frames update
-     * only their dirty rows, while the compositor still receives the full
-     * cached bitmap required by the layered-window API. */
-    HDC layered_memory_dc = nullptr;
-    HBITMAP layered_bitmap = nullptr;
-    HGDIOBJ layered_previous_bitmap = nullptr;
-    void *layered_bits = nullptr;
+    /* The client size and view destination this layered window last
+     * presented at. The compositor holds the window's pixels; a change in
+     * either means the next present repaints the whole window rather
+     * than its dirty rows (see `LayeredScratch`). */
     int layered_width = 0;
     int layered_height = 0;
     WeaverPhysicalRectI layered_gpu_frame = {};
     bool layered_gpu_frame_valid = false;
     bool dpi_transition = false;
+};
+
+/* UpdateLayeredWindow reads its pixels from a selected 32-bpp DIB, but only
+ * during the call: the compositor keeps its own copy of every layered
+ * window's surface, and UpdateLayeredWindowIndirect's dirty rect replaces
+ * just the rows a frame changed. So one DIB, grown to the largest layered
+ * window, serves every window of the process; a present writes only the
+ * rows it names. A DIB per window kept a second full copy of every
+ * window's pixels resident (a 240x110 widget is 103 KiB). */
+struct LayeredScratch {
+    HDC memory_dc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ previous_bitmap = nullptr;
+    uint8_t *bits = nullptr;
+    int width = 0;
+    int height = 0;
 };
 
 static BOOL CALLBACK findWallpaperWorkerWindow(HWND top, LPARAM output_param) {
@@ -509,7 +541,7 @@ struct NativeView {
      * retires the placeholder pump — from then on frames are
      * demand-driven, so an idle surface emits ZERO frame events (the
      * idle law the macOS host enforces). */
-    bool gpu_emission_scheduled = false;
+    WeaverGpuEmission gpu_emission;
     bool gpu_presented = false;
     /* One-shot: the next scheduled emission must fire at grid
      * promptness even while minimized. Two producers set it — an input
@@ -693,6 +725,7 @@ struct Host {
     void *bridge_context = nullptr;
     bool running = false;
     std::map<uint64_t, Window> windows;
+    LayeredScratch layered_scratch;
     std::map<std::string, ChildWebView> webviews;
     std::map<std::string, NativeView> native_views;
     uint64_t next_child_order = 1;
@@ -793,6 +826,29 @@ static void copyWideField(wchar_t *dest, size_t dest_len, const std::wstring &va
     dest[count] = L'\0';
 }
 
+/* SHELL32.dll loads with the first tray icon or notification, not at
+ * process start (lazy_dll.h); FALSE when it cannot load. */
+static BOOL notifyIcon(DWORD message, NOTIFYICONDATAW *data) {
+    static const auto notify = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, Shell_NotifyIconW, "tray icons and notifications");
+    return notify ? notify(message, data) : FALSE;
+}
+
+/* ShellExecuteW's "open" verb: the default handler for a URL or file, or
+ * explorer.exe with arguments. SHELL32.dll loads on first use. */
+static bool shellOpen(const wchar_t *target, const wchar_t *arguments) {
+    static const auto execute = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, ShellExecuteW, "opening links and revealing files");
+    if (!execute) return false;
+    HINSTANCE result = execute(nullptr, L"open", target, arguments, nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<intptr_t>(result) > 32;
+}
+
+static bool addToRecentDocs(UINT flags, const void *item) {
+    static const auto add = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, SHAddToRecentDocs, "recent documents");
+    if (!add) return false;
+    add(flags, item);
+    return true;
+}
+
 static NOTIFYICONDATAW notificationIconData(Host *host) {
     NOTIFYICONDATAW data = {};
     data.cbSize = sizeof(data);
@@ -826,12 +882,12 @@ static bool setNotificationIcon(Host *host, const std::string &icon_path, const 
     data.hIcon = loadNotificationIcon(host, icon_path, &destroy_icon);
     std::wstring tip = widen(!tooltip.empty() ? tooltip : (host->app_name.empty() ? std::string("native-sdk") : host->app_name));
     copyWideField(data.szTip, ARRAYSIZE(data.szTip), tip);
-    BOOL ok = Shell_NotifyIconW(host->notification_icon_added ? NIM_MODIFY : NIM_ADD, &data);
+    BOOL ok = notifyIcon(host->notification_icon_added ? NIM_MODIFY : NIM_ADD, &data);
     if (destroy_icon && data.hIcon) DestroyIcon(data.hIcon);
     if (!ok) return false;
     if (!host->notification_icon_added) {
         data.uVersion = NOTIFYICON_VERSION_4;
-        Shell_NotifyIconW(NIM_SETVERSION, &data);
+        notifyIcon(NIM_SETVERSION, &data);
     }
     host->notification_icon_added = true;
     return true;
@@ -844,7 +900,7 @@ static bool ensureNotificationIcon(Host *host) {
 static void removeNotificationIcon(Host *host) {
     if (!host || !host->notification_icon_added) return;
     NOTIFYICONDATAW data = notificationIconData(host);
-    if (data.hWnd) Shell_NotifyIconW(NIM_DELETE, &data);
+    if (data.hWnd) notifyIcon(NIM_DELETE, &data);
     host->notification_icon_added = false;
 }
 
@@ -876,8 +932,10 @@ static void setDialogFolder(IFileDialog *dialog, const char *path, size_t path_l
     if (!dialog || !path || path_len == 0) return;
     std::wstring path_wide = widen(slice(path, path_len));
     if (path_wide.empty()) return;
+    static const auto create_item = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, SHCreateItemFromParsingName, "a file dialog's starting folder");
+    if (!create_item) return;
     IShellItem *folder = nullptr;
-    if (SUCCEEDED(SHCreateItemFromParsingName(path_wide.c_str(), nullptr, IID_PPV_ARGS(&folder))) && folder) {
+    if (SUCCEEDED(create_item(path_wide.c_str(), nullptr, IID_PPV_ARGS(&folder))) && folder) {
         dialog->SetFolder(folder);
         folder->Release();
     }
@@ -1319,14 +1377,18 @@ static void emitFileDrop(Host *host, const Window &window, const std::string &pa
     host->callback(host->callback_context, &event);
 }
 
+/* SHELL32.dll loads with the first file drop (lazy_dll.h); windows
+ * accept drops through WS_EX_ACCEPTFILES, set when they are created. */
 static std::string droppedFilePaths(HDROP drop) {
+    static const auto query_file = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, DragQueryFileW, "file drops");
     std::string paths;
-    UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+    if (!query_file) return paths;
+    UINT count = query_file(drop, 0xFFFFFFFF, nullptr, 0);
     for (UINT index = 0; index < count; ++index) {
-        UINT len = DragQueryFileW(drop, index, nullptr, 0);
+        UINT len = query_file(drop, index, nullptr, 0);
         if (len == 0) continue;
         std::wstring path((size_t)len + 1, L'\0');
-        DragQueryFileW(drop, index, path.data(), len + 1);
+        query_file(drop, index, path.data(), len + 1);
         path.resize(len);
         std::string utf8_path = narrow(path);
         if (utf8_path.empty()) continue;
@@ -1967,8 +2029,7 @@ constexpr uint64_t kGpuFrameIntervalNs = 16666667ull;
 constexpr uint64_t kGpuOccludedHeartbeatNs = 1000000000ull;
 /* Placeholder pump timer (repeating, retired by the first present). */
 constexpr UINT_PTR kGpuFrameTimerId = 1;
-/* The one-shot scheduled-emission timer (the single frame-event gate). */
-constexpr UINT_PTR kGpuEmitTimerId = 2;
+static_assert(sizeof(UINT_PTR) == 8, "GPU emission timer ids carry a 32-bit generation above a tag bit");
 
 static uint64_t gpuTimestampNs() {
     static LARGE_INTEGER frequency = {};
@@ -2629,8 +2690,10 @@ using TimeSetEventFn = UINT (WINAPI *)(UINT, UINT,
 
 static void CALLBACK gpuSurfaceDeadlineCallback(UINT, UINT, DWORD_PTR user,
     DWORD_PTR, DWORD_PTR) {
-    HWND hwnd = reinterpret_cast<HWND>(user);
-    if (hwnd) PostMessageW(hwnd, WM_TIMER, kGpuEmitTimerId, 0);
+    HWND hwnd = reinterpret_cast<HWND>(
+        static_cast<uintptr_t>(weaverGpuDeadlineHwnd((uint64_t)user)));
+    if (hwnd) PostMessageW(hwnd, kGpuEmitMessage,
+        weaverGpuDeadlineGeneration((uint64_t)user), kWeaverGpuEmissionDeadline);
 }
 
 /* Animated shared surfaces need a deadline timer, not SetTimer's UI timer
@@ -2639,7 +2702,7 @@ static void CALLBACK gpuSurfaceDeadlineCallback(UINT, UINT, DWORD_PTR user,
  * this helper only for surfaces that own a shared-renderer client: software
  * surfaces stay on the coalescing UI timer and neither load winmm nor inherit
  * multimedia-timer behavior from compatibility layers such as Wine. */
-static bool scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns) {
+static bool scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns, uint32_t generation) {
     using LoadFn = HMODULE (WINAPI *)(LPCWSTR);
     static HMODULE winmm = LoadLibraryW(L"winmm.dll");
     static TimeSetEventFn time_set_event = winmm
@@ -2649,8 +2712,29 @@ static bool scheduleGpuSurfaceDeadline(HWND hwnd, uint64_t delay_ns) {
     constexpr UINT kTimeOneShot = 0;
     constexpr UINT kTimeKillSynchronous = 0x0100;
     const UINT delay_ms = (UINT)std::max<uint64_t>(1, (delay_ns + 999999ull) / 1000000ull);
+    const uint64_t user = weaverPackGpuDeadline(
+        (uint32_t)reinterpret_cast<uintptr_t>(hwnd), generation);
     return time_set_event(delay_ms, 1, gpuSurfaceDeadlineCallback,
-        reinterpret_cast<DWORD_PTR>(hwnd), kTimeOneShot | kTimeKillSynchronous) != 0;
+        (DWORD_PTR)user, kTimeOneShot | kTimeKillSynchronous) != 0;
+}
+
+/* Process-wide, so a generation never repeats across surfaces or surface
+ * lifetimes (an HWND can be reused after its surface is destroyed). */
+static uint32_t nextGpuEmissionGeneration() {
+    static std::atomic<uint32_t> counter{ 0 };
+    uint32_t previous = counter.load(std::memory_order_relaxed);
+    uint32_t next = weaverNextGpuEmissionGeneration(previous);
+    while (!counter.compare_exchange_weak(previous, next, std::memory_order_relaxed)) {
+        next = weaverNextGpuEmissionGeneration(previous);
+    }
+    return next;
+}
+
+/* dwmapi.dll loads with the first GPU surface backend switch
+ * (lazy_dll.h); a software-only app never makes one. */
+static void dwmFlush() {
+    static const auto flush = NATIVE_SDK_LAZY_PROC(kNativeSdkDwmApi, DwmFlush, "GPU surface backend switches");
+    if (flush) flush();
 }
 
 /* The single surface-frame emission: view state (nonblank verdict, sample
@@ -2685,7 +2769,7 @@ static void setGpuSurfaceBackend(Host *host, NativeView &view, int backend) {
             SetWindowPos(owner->second.hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
-        DwmFlush();
+        dwmFlush();
         return;
     }
 
@@ -2705,7 +2789,7 @@ static void setGpuSurfaceBackend(Host *host, NativeView &view, int backend) {
             SetWindowPos(owner->second.hwnd, HWND_BOTTOM, 0, 0, 0, 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
-        DwmFlush();
+        dwmFlush();
     }
 }
 
@@ -2775,7 +2859,7 @@ static void gpuSurfaceEmitFrame(Host *host, NativeView &view, HWND hwnd) {
  * message hop out of the period. SetTimer clamps short delays up to its
  * ~10 ms floor; the clock absorbs that as jitter, not drift. */
 static void gpuSurfaceScheduleFrameEmission(NativeView &view) {
-    if (!view.hwnd || view.gpu_emission_scheduled) return;
+    if (!view.hwnd || view.gpu_emission.scheduled) return;
     const uint64_t now = gpuTimestampNs();
     /* Minimized surfaces pace on the heartbeat, not the frame grid —
      * see kGpuOccludedHeartbeatNs. Exempt: an input's responding frame
@@ -2795,15 +2879,38 @@ static void gpuSurfaceScheduleFrameEmission(NativeView &view) {
      * entire 60 Hz interval. An already-due emission is ordinary queued
      * work, so post the same WM_TIMER message directly. The scheduled flag
      * still folds all producers and the handler keeps one-shot semantics. */
-    if (delay_ns == 0) {
-        if (PostMessageW(view.hwnd, WM_TIMER, kGpuEmitTimerId, 0)) {
-            view.gpu_emission_scheduled = true;
-        }
+    const uint32_t generation = nextGpuEmissionGeneration();
+    if (delay_ns == 0 && PostMessageW(view.hwnd, kGpuEmitMessage, generation,
+            kWeaverGpuEmissionPosted)) {
+        view.gpu_emission = { true, kWeaverGpuEmissionPosted, generation };
         return;
     }
-    if ((view.gpu_presenter && scheduleGpuSurfaceDeadline(view.hwnd, delay_ns)) ||
-        SetTimer(view.hwnd, kGpuEmitTimerId, delay_ms, nullptr)) {
-        view.gpu_emission_scheduled = true;
+    /* Not due yet, or the post failed (a full queue): arm a timer instead,
+     * so a scheduled frame is never silently dropped. */
+    if (view.gpu_presenter && scheduleGpuSurfaceDeadline(view.hwnd, delay_ns, generation)) {
+        view.gpu_emission = { true, kWeaverGpuEmissionDeadline, generation };
+        return;
+    }
+    if (SetTimer(view.hwnd, (UINT_PTR)weaverGpuUiTimerId(generation), delay_ms, nullptr)) {
+        view.gpu_emission = { true, kWeaverGpuEmissionUiTimer, generation };
+    }
+}
+
+/* Re-arm the in-flight emission at the delay that applies now (input and
+ * restore). The replacement gets a new generation, so the superseded one is
+ * dropped when it arrives; if no replacement can be scheduled, the old one
+ * stays current. */
+static void gpuSurfaceRearmFrameEmission(NativeView &view) {
+    const WeaverGpuEmission previous = view.gpu_emission;
+    view.gpu_emission.scheduled = false;
+    gpuSurfaceScheduleFrameEmission(view);
+    view.gpu_emission = weaverGpuEmissionAfterRearm(previous, view.gpu_emission);
+    /* A superseded SetTimer would repeat until killed; retire it once its
+     * replacement is in place (a message it already queued is dropped by
+     * generation). Deadlines and posts are one-shot and need nothing. */
+    if (previous.scheduled && previous.source == kWeaverGpuEmissionUiTimer &&
+        view.gpu_emission.generation != previous.generation) {
+        KillTimer(view.hwnd, (UINT_PTR)weaverGpuUiTimerId(previous.generation));
     }
 }
 
@@ -2841,49 +2948,78 @@ static void paintGpuSurface(NativeView &view, HWND hwnd, HDC dc) {
  * layered window. UpdateLayeredWindow owns the top-level redirection
  * surface; the child HWND stays as the runtime's input/timer endpoint,
  * but its WM_PAINT pixels are not the glass for this window shape. */
-static void releaseLayeredPresentSurface(Window &window) {
-    if (window.layered_memory_dc && window.layered_previous_bitmap) {
-        SelectObject(window.layered_memory_dc, window.layered_previous_bitmap);
-    }
-    if (window.layered_bitmap) DeleteObject(window.layered_bitmap);
-    if (window.layered_memory_dc) DeleteDC(window.layered_memory_dc);
-    window.layered_memory_dc = nullptr;
-    window.layered_bitmap = nullptr;
-    window.layered_previous_bitmap = nullptr;
-    window.layered_bits = nullptr;
+static void forgetLayeredPresent(Window &window) {
     window.layered_width = 0;
     window.layered_height = 0;
     window.layered_gpu_frame = {};
     window.layered_gpu_frame_valid = false;
 }
 
-static bool ensureLayeredPresentSurface(Window &window, HDC screen_dc, int width, int height) {
-    if (window.layered_memory_dc && window.layered_bitmap && window.layered_bits &&
-        window.layered_width == width && window.layered_height == height) return true;
-    releaseLayeredPresentSurface(window);
-    window.layered_memory_dc = CreateCompatibleDC(screen_dc);
-    if (!window.layered_memory_dc) return false;
+static void releaseLayeredScratch(LayeredScratch &scratch) {
+    if (scratch.memory_dc && scratch.previous_bitmap) SelectObject(scratch.memory_dc, scratch.previous_bitmap);
+    if (scratch.bitmap) DeleteObject(scratch.bitmap);
+    if (scratch.memory_dc) DeleteDC(scratch.memory_dc);
+    scratch = {};
+}
+
+/* Grow-only: the scratch fits the largest layered window presented so far. */
+static bool ensureLayeredScratch(LayeredScratch &scratch, HDC screen_dc, int width, int height) {
+    if (scratch.bits && scratch.width >= width && scratch.height >= height) return true;
+    const int grown_width = std::max(width, scratch.width);
+    const int grown_height = std::max(height, scratch.height);
+    releaseLayeredScratch(scratch);
+    scratch.memory_dc = CreateCompatibleDC(screen_dc);
+    if (!scratch.memory_dc) return false;
     BITMAPINFO info = {};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = width;
-    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biWidth = grown_width;
+    info.bmiHeader.biHeight = -grown_height;
     info.bmiHeader.biPlanes = 1;
     info.bmiHeader.biBitCount = 32;
     info.bmiHeader.biCompression = BI_RGB;
-    window.layered_bitmap = CreateDIBSection(window.layered_memory_dc, &info, DIB_RGB_COLORS, &window.layered_bits, nullptr, 0);
-    if (!window.layered_bitmap || !window.layered_bits) {
-        releaseLayeredPresentSurface(window);
+    void *bits = nullptr;
+    scratch.bitmap = CreateDIBSection(scratch.memory_dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!scratch.bitmap || !bits) {
+        releaseLayeredScratch(scratch);
         return false;
     }
-    window.layered_previous_bitmap = SelectObject(window.layered_memory_dc, window.layered_bitmap);
-    window.layered_width = width;
-    window.layered_height = height;
-    memset(window.layered_bits, 0, static_cast<size_t>(width) * height * 4);
+    scratch.previous_bitmap = SelectObject(scratch.memory_dc, scratch.bitmap);
+    scratch.bits = static_cast<uint8_t *>(bits);
+    scratch.width = grown_width;
+    scratch.height = grown_height;
     return true;
 }
 
-static bool presentLayeredGpuSurface(Window &window, const NativeView &view, int dirty_left, int dirty_top, int dirty_right, int dirty_bottom, bool full_copy) {
-    if (!window.hwnd || !window.transparent || view.gpu_bgra.empty()) return false;
+/* Straight-alpha RGBA8 rows -> the BGRA UpdateLayeredWindow's AC_SRC_ALPHA
+ * blend reads: premultiplied for a premultiplied surface, and fully
+ * opaque (alpha forced to 255, colors unchanged) for an opaque one. */
+static void rowToLayeredBgra(uint8_t *dst, const uint8_t *src, int pixels, bool premultiplied) {
+    for (int x = 0; x < pixels; ++x) {
+        if (!premultiplied) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = 255;
+            dst += 4;
+            src += 4;
+            continue;
+        }
+        const uint8_t alpha = src[3];
+        dst[0] = (uint8_t)(((uint32_t)src[2] * alpha + 127) / 255);
+        dst[1] = (uint8_t)(((uint32_t)src[1] * alpha + 127) / 255);
+        dst[2] = (uint8_t)(((uint32_t)src[0] * alpha + 127) / 255);
+        dst[3] = alpha;
+        dst += 4;
+        src += 4;
+    }
+}
+
+/* A layered window keeps no pixels of its own: the frame's changed rows go
+ * straight from the renderer's RGBA output into the shared scratch DIB and
+ * the compositor keeps everything else. `full_frame` says the RGBA output
+ * covers the whole surface (a resize, the first frame, or no dirty rect). */
+static bool presentLayeredGpuSurface(Host *host, Window &window, const NativeView &view, const uint8_t *rgba8, int dirty_left, int dirty_top, int dirty_right, int dirty_bottom, bool full_frame) {
+    if (!window.hwnd || !window.transparent || !rgba8) return false;
     if (view.gpu_buf_width <= 0 || view.gpu_buf_height <= 0) return false;
 
     HDC screen_dc = GetDC(nullptr);
@@ -2896,22 +3032,33 @@ static bool presentLayeredGpuSurface(Window &window, const NativeView &view, int
         ReleaseDC(nullptr, screen_dc);
         return false;
     }
+    LayeredScratch &scratch = host->layered_scratch;
+    if (!ensureLayeredScratch(scratch, screen_dc, client_width, client_height)) {
+        ReleaseDC(nullptr, screen_dc);
+        return false;
+    }
+    const size_t stride = static_cast<size_t>(scratch.width) * 4;
     const bool resized = window.layered_width != client_width ||
         window.layered_height != client_height;
     const WeaverPhysicalRectI destination = view.gpu_geometry_physical;
     const bool destination_changed = !window.layered_gpu_frame_valid ||
         !weaverPhysicalRectsEqual(window.layered_gpu_frame, destination);
-    if (!ensureLayeredPresentSurface(window, screen_dc, client_width, client_height)) {
-        ReleaseDC(nullptr, screen_dc);
-        return false;
-    }
-    if (full_copy || resized || destination_changed) {
-        memset(window.layered_bits, 0,
-            static_cast<size_t>(client_width) * client_height * 4);
-        dirty_left = 0;
-        dirty_top = 0;
-        dirty_right = view.gpu_buf_width;
-        dirty_bottom = view.gpu_buf_height;
+    const bool whole_window = full_frame || resized || destination_changed;
+    if (whole_window) {
+        // Everything the view does not cover is transparent. A new client
+        // size or view destination comes with a geometry change that makes
+        // the runtime render the whole surface, so `full_frame` normally
+        // holds here; if it does not, only the dirty rows are known and the
+        // rest of the surface stays transparent until the next full frame.
+        for (int y = 0; y < client_height; ++y) {
+            memset(scratch.bits + static_cast<size_t>(y) * stride, 0, static_cast<size_t>(client_width) * 4);
+        }
+        if (full_frame) {
+            dirty_left = 0;
+            dirty_top = 0;
+            dirty_right = view.gpu_buf_width;
+            dirty_bottom = view.gpu_buf_height;
+        }
     }
     const int source_left = std::max(0, std::max(dirty_left, -destination.left));
     const int source_top = std::max(0, std::max(dirty_top, -destination.top));
@@ -2919,31 +3066,50 @@ static bool presentLayeredGpuSurface(Window &window, const NativeView &view, int
         std::min(dirty_right, client_width - destination.left));
     const int source_bottom = std::min(view.gpu_buf_height,
         std::min(dirty_bottom, client_height - destination.top));
-    if (source_right > source_left && source_bottom > source_top) {
-        const size_t row_bytes = static_cast<size_t>(source_right - source_left) * 4;
+    const bool copies = source_right > source_left && source_bottom > source_top;
+    if (copies) {
         for (int source_y = source_top; source_y < source_bottom; ++source_y) {
-            const int destination_y = destination.top + source_y;
-            const int destination_x = destination.left + source_left;
             const size_t source_offset =
                 (static_cast<size_t>(source_y) * view.gpu_buf_width + source_left) * 4;
             const size_t destination_offset =
-                (static_cast<size_t>(destination_y) * client_width + destination_x) * 4;
-            memcpy(static_cast<uint8_t *>(window.layered_bits) + destination_offset,
-                view.gpu_bgra.data() + source_offset, row_bytes);
+                static_cast<size_t>(destination.top + source_y) * stride +
+                static_cast<size_t>(destination.left + source_left) * 4;
+            rowToLayeredBgra(scratch.bits + destination_offset, rgba8 + source_offset, source_right - source_left, view.gpu_alpha_mode == 2);
         }
     }
+    window.layered_width = client_width;
+    window.layered_height = client_height;
     window.layered_gpu_frame = destination;
     window.layered_gpu_frame_valid = true;
+    if (!whole_window && !copies) {
+        ReleaseDC(nullptr, screen_dc);
+        return true;
+    }
 
+    // Only these rows of the scratch hold this window's pixels; the rest
+    // may hold another window's. The dirty rect keeps the compositor's
+    // copy of everything else.
+    RECT update = whole_window
+        ? RECT{ 0, 0, client_width, client_height }
+        : RECT{ destination.left + source_left, destination.top + source_top,
+                destination.left + source_right, destination.top + source_bottom };
     RECT frame = {};
     GetWindowRect(window.hwnd, &frame);
     POINT window_destination = { frame.left, frame.top };
     POINT source = { 0, 0 };
     SIZE size = { client_width, client_height };
     BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    const BOOL updated = UpdateLayeredWindow(window.hwnd, screen_dc,
-        &window_destination, &size, window.layered_memory_dc, &source, 0,
-        &blend, ULW_ALPHA);
+    UPDATELAYEREDWINDOWINFO info = {};
+    info.cbSize = sizeof(info);
+    info.hdcDst = screen_dc;
+    info.pptDst = &window_destination;
+    info.psize = &size;
+    info.hdcSrc = scratch.memory_dc;
+    info.pptSrc = &source;
+    info.pblend = &blend;
+    info.dwFlags = ULW_ALPHA;
+    info.prcDirty = &update;
+    const BOOL updated = UpdateLayeredWindowIndirect(window.hwnd, &info);
     ReleaseDC(nullptr, screen_dc);
     return updated != FALSE;
 }
@@ -3010,17 +3176,25 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
                 gpuSurfaceScheduleFrameEmission(*view);
                 return 0;
             }
-            if (wparam == kGpuEmitTimerId) {
-                /* The one scheduled emission fires: one-shot semantics
-                 * (KillTimer before the emit — SetTimer timers repeat),
-                 * and the scheduled flag clears BEFORE emitting so the
-                 * emission's engine dispatch can re-arm the scheduler. */
-                KillTimer(hwnd, kGpuEmitTimerId);
-                view->gpu_emission_scheduled = false;
+            if (weaverIsGpuUiTimerId((uint64_t)wparam)) {
+                /* One-shot semantics: kill this emission's own timer before
+                 * the emit, since SetTimer timers repeat. */
+                KillTimer(hwnd, wparam);
+                if (!weaverGpuEmissionAccepts(view->gpu_emission, kWeaverGpuEmissionUiTimer,
+                        weaverGpuUiTimerGeneration((uint64_t)wparam))) return 0;
+                view->gpu_emission.scheduled = false;
                 gpuSurfaceEmitFrame(host, *view, hwnd);
                 return 0;
             }
             break;
+        case kGpuEmitMessage:
+            /* Only the emission currently scheduled emits (see
+             * gpu_emission_policy.h). The scheduled state clears BEFORE
+             * emitting so the emission's engine dispatch can re-arm. */
+            if (!weaverGpuEmissionAccepts(view->gpu_emission, (int)lparam, (uint32_t)wparam)) return 0;
+            view->gpu_emission.scheduled = false;
+            gpuSurfaceEmitFrame(host, *view, hwnd);
+            return 0;
         case WM_PAINT: {
             PAINTSTRUCT paint = {};
             HDC dc = BeginPaint(hwnd, &paint);
@@ -3269,20 +3443,47 @@ constexpr UINT kAudioSpectrumIntervalMs = 40;
  * 100-nanosecond units. Defined locally like the WIC GUIDs. */
 static const GUID kNativeSdkAudioTimeFormat = { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
 
-/* One-time Media Foundation bring-up on the loop thread. COM and MF stay
- * up for the process lifetime: retired sessions finish closing on Media
- * Foundation worker threads, so pairing MFShutdown with host destroy
- * would race their teardown; the OS reclaims both at process exit. */
-static bool audioEnsureMediaFoundation() {
+/* The Media Foundation entry points the audio backend calls. MF.dll and
+ * MFPlat.dll load here, on the first audio load, not at process start
+ * (see lazy_dll.h). */
+struct AudioMediaFoundation {
+    decltype(&MFStartup) startup;
+    decltype(&MFCreateSourceResolver) createSourceResolver;
+    decltype(&MFCreateMediaSession) createMediaSession;
+    decltype(&MFCreateTopology) createTopology;
+    decltype(&MFCreateTopologyNode) createTopologyNode;
+    decltype(&MFCreateAudioRendererActivate) createAudioRendererActivate;
+    decltype(&MFGetService) getService;
+};
+
+/* One-time Media Foundation bring-up on the loop thread; null when Media
+ * Foundation is unavailable (Windows N editions ship without it until the
+ * Media Feature Pack is installed), already reported by the loader. COM
+ * and MF stay up for the process lifetime: retired sessions finish
+ * closing on Media Foundation worker threads, so pairing MFShutdown with
+ * host destroy would race their teardown; the OS reclaims both at
+ * process exit. */
+static const AudioMediaFoundation *audioEnsureMediaFoundation() {
     static bool attempted = false;
     static bool ready = false;
-    if (attempted) return ready;
+    static AudioMediaFoundation mf = {};
+    if (attempted) return ready ? &mf : nullptr;
     attempted = true;
+    constexpr const char *kFeature = "audio playback";
+    mf.startup = NATIVE_SDK_LAZY_PROC(kNativeSdkMfPlat, MFStartup, kFeature);
+    mf.createSourceResolver = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFCreateSourceResolver, kFeature);
+    mf.createMediaSession = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFCreateMediaSession, kFeature);
+    mf.createTopology = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFCreateTopology, kFeature);
+    mf.createTopologyNode = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFCreateTopologyNode, kFeature);
+    mf.createAudioRendererActivate = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFCreateAudioRendererActivate, kFeature);
+    mf.getService = NATIVE_SDK_LAZY_PROC(kNativeSdkMf, MFGetService, kFeature);
+    if (!mf.startup || !mf.createSourceResolver || !mf.createMediaSession || !mf.createTopology ||
+        !mf.createTopologyNode || !mf.createAudioRendererActivate || !mf.getService) return nullptr;
     /* S_FALSE (already initialized) and RPC_E_CHANGED_MODE (an MTA is
      * already active) both leave a usable COM state for MF. */
     (void)CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    ready = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_FULL));
-    return ready;
+    ready = SUCCEEDED(mf.startup(MF_VERSION, MFSTARTUP_FULL));
+    return ready ? &mf : nullptr;
 }
 
 /* Pumps one media session's event queue on Media Foundation worker
@@ -3457,12 +3658,26 @@ static void audioCreateParentDirectories(const std::wstring &path) {
     for (wchar_t &ch : directory) {
         if (ch == L'/') ch = L'\\';
     }
-    SHCreateDirectoryExW(nullptr, directory.c_str(), nullptr);
+    static const auto create_directory = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, SHCreateDirectoryExW, "the audio cache");
+    if (create_directory) create_directory(nullptr, directory.c_str(), nullptr);
 }
 
 /* One GET into the part file, cancellable between reads. Only a 200
  * installs bytes — an error page must never masquerade as a track. */
 static bool audioHttpDownload(const std::string &url, const std::wstring &part_path, const std::shared_ptr<AudioDownloadCancel> &cancel) {
+    /* WINHTTP.dll loads on the first cache fill (lazy_dll.h). */
+    constexpr const char *kFeature = "the audio cache";
+    static const auto crack_url = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpCrackUrl, kFeature);
+    static const auto open_session = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpOpen, kFeature);
+    static const auto connect_session = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpConnect, kFeature);
+    static const auto open_request = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpOpenRequest, kFeature);
+    static const auto send_request = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpSendRequest, kFeature);
+    static const auto receive_response = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpReceiveResponse, kFeature);
+    static const auto query_headers = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpQueryHeaders, kFeature);
+    static const auto read_data = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpReadData, kFeature);
+    static const auto close_handle = NATIVE_SDK_LAZY_PROC(kNativeSdkWinHttp, WinHttpCloseHandle, kFeature);
+    if (!crack_url || !open_session || !connect_session || !open_request || !send_request || !receive_response ||
+        !query_headers || !read_data || !close_handle) return false;
     std::wstring url_wide = widen(url);
     wchar_t host_name[256] = {};
     wchar_t url_path[2048] = {};
@@ -3475,24 +3690,24 @@ static bool audioHttpDownload(const std::string &url, const std::wstring &part_p
     parts.dwUrlPathLength = ARRAYSIZE(url_path) - 1;
     parts.lpszExtraInfo = url_extra;
     parts.dwExtraInfoLength = ARRAYSIZE(url_extra) - 1;
-    if (!WinHttpCrackUrl(url_wide.c_str(), (DWORD)url_wide.size(), 0, &parts)) return false;
+    if (!crack_url(url_wide.c_str(), (DWORD)url_wide.size(), 0, &parts)) return false;
     const bool secure = parts.nScheme == INTERNET_SCHEME_HTTPS;
     if (!secure && parts.nScheme != INTERNET_SCHEME_HTTP) return false;
     std::wstring object = std::wstring(url_path) + url_extra;
     if (object.empty()) object = L"/";
 
     bool ok = false;
-    HINTERNET session = WinHttpOpen(L"native-sdk-audio-cache", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    HINTERNET connection = session ? WinHttpConnect(session, host_name, parts.nPort, 0) : nullptr;
-    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET", object.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
+    HINTERNET session = open_session(L"native-sdk-audio-cache", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET connection = session ? connect_session(session, host_name, parts.nPort, 0) : nullptr;
+    HINTERNET request = connection ? open_request(connection, L"GET", object.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
     HANDLE file = INVALID_HANDLE_VALUE;
     do {
         if (!request) break;
-        if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) break;
-        if (!WinHttpReceiveResponse(request, nullptr)) break;
+        if (!send_request(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) break;
+        if (!receive_response(request, nullptr)) break;
         DWORD status_code = 0;
         DWORD status_size = sizeof(status_code);
-        if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_size, WINHTTP_NO_HEADER_INDEX)) break;
+        if (!query_headers(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_size, WINHTTP_NO_HEADER_INDEX)) break;
         if (status_code != 200) break;
         file = CreateFileW(part_path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE) break;
@@ -3500,7 +3715,7 @@ static bool audioHttpDownload(const std::string &url, const std::wstring &part_p
         for (;;) {
             if (cancel->cancelled.load()) break;
             DWORD read = 0;
-            if (!WinHttpReadData(request, buffer.data(), (DWORD)buffer.size(), &read)) break;
+            if (!read_data(request, buffer.data(), (DWORD)buffer.size(), &read)) break;
             if (read == 0) {
                 ok = true;
                 break;
@@ -3510,9 +3725,9 @@ static bool audioHttpDownload(const std::string &url, const std::wstring &part_p
         }
     } while (false);
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
-    if (request) WinHttpCloseHandle(request);
-    if (connection) WinHttpCloseHandle(connection);
-    if (session) WinHttpCloseHandle(session);
+    if (request) close_handle(request);
+    if (connection) close_handle(connection);
+    if (session) close_handle(session);
     return ok && !cancel->cancelled.load();
 }
 
@@ -4109,8 +4324,10 @@ static bool audioAttachSession(Host *host) {
     if (!source) return false;
     HWND hwnd = parentWindow(host);
     if (!hwnd) return false;
+    const AudioMediaFoundation *mf = audioEnsureMediaFoundation();
+    if (!mf) return false;
     IMFMediaSession *session = nullptr;
-    if (FAILED(MFCreateMediaSession(nullptr, &session)) || !session) return false;
+    if (FAILED(mf->createMediaSession(nullptr, &session)) || !session) return false;
     IMFPresentationDescriptor *descriptor = nullptr;
     IMFTopology *topology = nullptr;
     bool ok = false;
@@ -4118,7 +4335,7 @@ static bool audioAttachSession(Host *host) {
         if (FAILED(source->CreatePresentationDescriptor(&descriptor)) || !descriptor) break;
         UINT64 duration_hns = 0;
         if (SUCCEEDED(descriptor->GetUINT64(MF_PD_DURATION, &duration_hns))) audio.duration_ms = duration_hns / 10000ull;
-        if (FAILED(MFCreateTopology(&topology)) || !topology) break;
+        if (FAILED(mf->createTopology(&topology)) || !topology) break;
         DWORD stream_count = 0;
         if (FAILED(descriptor->GetStreamDescriptorCount(&stream_count))) break;
         DWORD audio_streams = 0;
@@ -4140,12 +4357,12 @@ static bool audioAttachSession(Host *host) {
             IMFTopologyNode *source_node = nullptr;
             IMFTopologyNode *output_node = nullptr;
             IMFActivate *renderer = nullptr;
-            const bool added = SUCCEEDED(MFCreateTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE, &source_node)) &&
+            const bool added = SUCCEEDED(mf->createTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE, &source_node)) &&
                 SUCCEEDED(source_node->SetUnknown(MF_TOPONODE_SOURCE, source)) &&
                 SUCCEEDED(source_node->SetUnknown(MF_TOPONODE_PRESENTATION_DESCRIPTOR, descriptor)) &&
                 SUCCEEDED(source_node->SetUnknown(MF_TOPONODE_STREAM_DESCRIPTOR, stream)) &&
-                SUCCEEDED(MFCreateTopologyNode(MF_TOPOLOGY_OUTPUT_NODE, &output_node)) &&
-                SUCCEEDED(MFCreateAudioRendererActivate(&renderer)) &&
+                SUCCEEDED(mf->createTopologyNode(MF_TOPOLOGY_OUTPUT_NODE, &output_node)) &&
+                SUCCEEDED(mf->createAudioRendererActivate(&renderer)) &&
                 SUCCEEDED(output_node->SetObject(renderer)) &&
                 SUCCEEDED(topology->AddNode(source_node)) &&
                 SUCCEEDED(topology->AddNode(output_node)) &&
@@ -4205,8 +4422,10 @@ static void audioStartTransport(Host *host, bool has_position, uint64_t position
 static void audioApplyVolume(Host *host) {
     AudioState &audio = host->audio;
     if (!audio.session) return;
+    const AudioMediaFoundation *mf = audioEnsureMediaFoundation();
+    if (!mf) return;
     IMFAudioStreamVolume *volume = nullptr;
-    if (FAILED(MFGetService(audio.session, MR_STREAM_VOLUME_SERVICE, IID_IMFAudioStreamVolume, reinterpret_cast<void **>(&volume))) || !volume) return;
+    if (FAILED(mf->getService(audio.session, MR_STREAM_VOLUME_SERVICE, IID_IMFAudioStreamVolume, reinterpret_cast<void **>(&volume))) || !volume) return;
     UINT32 channels = 0;
     if (SUCCEEDED(volume->GetChannelCount(&channels)) && channels > 0 && channels <= 16) {
         float levels[16];
@@ -4218,14 +4437,17 @@ static void audioApplyVolume(Host *host) {
 
 /* Synchronous local-file load: 0 loaded (the asynchronous LOADED
  * acknowledgment follows at topology ready), 1 missing file, 2
- * undecodable — the macOS host's result contract. */
+ * undecodable — the macOS host's result contract — plus 3 when Media
+ * Foundation itself is unavailable (says nothing about the file). */
+constexpr int kAudioLoadMediaFoundationUnavailable = 3;
 static int audioLoadPathInternal(Host *host, const std::string &path) {
     audioReleaseSession(host, true);
     std::wstring wide = widen(path);
     if (!regularFileExists(wide)) return 1;
-    if (!audioEnsureMediaFoundation()) return 2;
+    const AudioMediaFoundation *mf = audioEnsureMediaFoundation();
+    if (!mf) return kAudioLoadMediaFoundationUnavailable;
     IMFSourceResolver *resolver = nullptr;
-    if (FAILED(MFCreateSourceResolver(&resolver)) || !resolver) return 2;
+    if (FAILED(mf->createSourceResolver(&resolver)) || !resolver) return 2;
     MF_OBJECT_TYPE type = MF_OBJECT_INVALID;
     IUnknown *object = nullptr;
     /* A cache entry's name is a hash, so resolution must sniff content
@@ -4256,6 +4478,11 @@ static int audioLoadPathInternal(Host *host, const std::string &path) {
 static int audioLoadUrlInternal(Host *host, const std::string &url, const std::string &cache_path, uint64_t expected_bytes) {
     audioReleaseSession(host, true);
     if (url.find("://") == std::string::npos) return 2;
+    /* Before the cache check: without Media Foundation nothing can be
+     * decoded, and a valid cache entry must not be mistaken for a corrupt
+     * one and deleted. */
+    const AudioMediaFoundation *mf = audioEnsureMediaFoundation();
+    if (!mf) return kAudioLoadMediaFoundationUnavailable;
     if (!cache_path.empty()) {
         std::wstring cache_wide = widen(cache_path);
         bool exists = false;
@@ -4271,11 +4498,10 @@ static int audioLoadUrlInternal(Host *host, const std::string &url, const std::s
             DeleteFileW(cache_wide.c_str());
         }
     }
-    if (!audioEnsureMediaFoundation()) return 2;
     HWND hwnd = parentWindow(host);
     if (!hwnd) return 2;
     IMFSourceResolver *resolver = nullptr;
-    if (FAILED(MFCreateSourceResolver(&resolver)) || !resolver) return 2;
+    if (FAILED(mf->createSourceResolver(&resolver)) || !resolver) return 2;
     AudioState &audio = host->audio;
     audio.active = true;
     audio.url_source = true;
@@ -4896,7 +5122,7 @@ static bool createChildWebView(Host *host, const std::string &key) {
                                 if (found != host->webviews.end() && isInternalAssetUrl(found->second, uri)) return S_OK;
                                 if (uri.empty() || uri.rfind("about:", 0) == 0 || policyListMatches(host->allowed_origins, uri)) return S_OK;
                                 if (host->external_link_action == 1 && policyListMatches(host->allowed_external_urls, uri)) {
-                                    ShellExecuteW(nullptr, L"open", uri_wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                                    shellOpen(uri_wide.c_str(), nullptr);
                                 }
                                 args->put_Cancel(TRUE);
                                 return S_OK;
@@ -5338,7 +5564,16 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) {
                 HDROP drop = reinterpret_cast<HDROP>(wparam);
                 std::string paths = droppedFilePaths(drop);
-                DragFinish(drop);
+                static const auto finish_drop = NATIVE_SDK_LAZY_PROC(kNativeSdkShell32, DragFinish, "file drops");
+                /* The HDROP is the GlobalAlloc block the drop source
+                 * handed us; DragFinish is GlobalFree with shell
+                 * bookkeeping. Without SHELL32 free it directly so an
+                 * undeliverable drop still never leaks. */
+                if (finish_drop) {
+                    finish_drop(drop);
+                } else {
+                    GlobalFree(drop);
+                }
                 if (!paths.empty()) {
                     for (auto &entry : host->windows) {
                         if (entry.second.hwnd == hwnd) {
@@ -5388,10 +5623,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                     const Window *resized_window = windowForHwnd(host, hwnd);
                     for (auto &view_entry : host->native_views) {
                         NativeView &surface = view_entry.second;
-                        if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission_scheduled) continue;
+                        if (surface.kind != kViewGpuSurface || !surface.hwnd || !surface.gpu_emission.scheduled) continue;
                         if (!resized_window || surface.window_id != resized_window->id) continue;
-                        surface.gpu_emission_scheduled = false;
-                        gpuSurfaceScheduleFrameEmission(surface);
+                        gpuSurfaceRearmFrameEmission(surface);
                     }
                 }
             }
@@ -5477,7 +5711,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host) {
                 for (auto &entry : host->windows) {
                     if (entry.second.hwnd == hwnd) {
-                        releaseLayeredPresentSurface(entry.second);
+                        forgetLayeredPresent(entry.second);
                         destroyNativeViewsForWindow(host, entry.first);
                         destroyChildWebViewsForWindow(host, entry.first);
                         entry.second.hwnd = nullptr;
@@ -5535,6 +5769,10 @@ static bool createNativeWindow(Host *host, Window &window) {
     if (window.transparent || window.click_through) ex_style |= WS_EX_LAYERED;
     if (window.click_through) ex_style |= WS_EX_TRANSPARENT;
     if (window.no_activate) ex_style |= WS_EX_NOACTIVATE;
+    /* Every window accepts file drops (WM_DROPFILES). This is the style
+     * DragAcceptFiles sets; setting it here keeps SHELL32.dll from loading
+     * until a drop actually arrives. */
+    ex_style |= WS_EX_ACCEPTFILES;
     /* The requested frame is a CONTENT size in LOGICAL points (the
      * other hosts size the content area); scale it to physical pixels
      * at the DPI of the monitor containing the requested origin, then grow
@@ -5573,7 +5811,6 @@ static bool createNativeWindow(Host *host, Window &window) {
         host->instance,
         host);
     if (!hwnd) return false;
-    DragAcceptFiles(hwnd, TRUE);
     window.hwnd = hwnd;
     applyMenusToWindow(host, window);
     if (windowUsesHiddenTitlebar(window)) {
@@ -5585,7 +5822,7 @@ static bool createNativeWindow(Host *host, Window &window) {
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
     attachDesktopWindow(window);
-    ShowWindow(hwnd, window.no_activate ? SW_SHOWNOACTIVATE : SW_SHOW);
+    if (!window.hidden) ShowWindow(hwnd, window.no_activate ? SW_SHOWNOACTIVATE : SW_SHOW);
     if (window.layer == 1) {
         SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     } else if (window.layer == 2) {
@@ -5607,7 +5844,7 @@ size_t native_sdk_windows_clipboard_read_data(Host *host, const char *mime_type,
 int native_sdk_windows_clipboard_write_data(Host *host, const char *mime_type, size_t mime_type_len, const char *bytes, size_t bytes_len);
 void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id);
 
-Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, double min_width, double min_height) {
+Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int hidden, double min_width, double min_height) {
     (void)restore_frame;
     INITCOMMONCONTROLSEX controls = {};
     controls.dwSize = sizeof(controls);
@@ -5642,6 +5879,7 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     window.layer = window_layer;
     window.click_through = click_through != 0;
     window.no_activate = no_activate != 0;
+    window.hidden = hidden != 0;
     window.min_width = min_width;
     window.min_height = min_height;
     host->windows[window.id] = window;
@@ -5669,6 +5907,7 @@ void native_sdk_windows_destroy(Host *host) {
     audioReleaseSession(host, true);
     removeNotificationIcon(host);
     destroyAllWindows(host);
+    releaseLayeredScratch(host->layered_scratch);
     const bool com_initialized = host->com_initialized;
     delete host;
     if (com_initialized) CoUninitialize();
@@ -5948,7 +6187,7 @@ void native_sdk_windows_set_shortcuts(Host *host, const char *const *ids, const 
     }
 }
 
-int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, double min_width, double min_height) {
+int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int hidden, double min_width, double min_height) {
     (void)restore_frame;
     if (!host || host->windows.find(window_id) != host->windows.end()) return 0;
     Window window;
@@ -5965,6 +6204,7 @@ int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char 
     window.layer = window_layer;
     window.click_through = click_through != 0;
     window.no_activate = no_activate != 0;
+    window.hidden = hidden != 0;
     window.min_width = min_width;
     window.min_height = min_height;
     /* Register BEFORE creating: createNativeWindow's post-create frame
@@ -6133,6 +6373,13 @@ int native_sdk_windows_close_window(Host *host, uint64_t window_id) {
     destroyNativeViewsForWindow(host, window_id);
     destroyChildWebViewsForWindow(host, window_id);
     DestroyWindow(found->second.hwnd);
+    /* The runtime reopens a label under a new id, so nothing looks this
+     * entry up again: erase it, or every closed window leaves one behind
+     * (224 bytes each). Here, not in WM_DESTROY, which runs inside loops
+     * over this map (destroyAllWindows) and calls back into the app; a
+     * nested close of this id returns early, and erasing another entry
+     * leaves those loops' iterators valid. */
+    host->windows.erase(found);
     return 1;
 }
 
@@ -6328,9 +6575,8 @@ int native_sdk_windows_note_gpu_surface_input(Host *host, uint64_t window_id, co
     if (found == host->native_views.end() || found->second.kind != kViewGpuSurface || !found->second.hwnd) return 0;
     NativeView &view = found->second;
     view.gpu_prompt_frame_pending = true;
-    if (view.gpu_emission_scheduled) {
-        view.gpu_emission_scheduled = false;
-        gpuSurfaceScheduleFrameEmission(view);
+    if (view.gpu_emission.scheduled) {
+        gpuSurfaceRearmFrameEmission(view);
     }
     return 1;
 }
@@ -6384,10 +6630,16 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
      * over the top band and composites its own caption material wherever
      * the redirection surface's alpha is 0 — the app's pixels must read
      * as opaque there or the whole header band would vanish under DWM
-     * chrome (only the punched button hole yields on purpose). */
-    view.gpu_bgra.resize(width * height * 4);
+     * chrome (only the punched button hole yields on purpose). Layered
+     * windows convert straight into the shared layered DIB instead and
+     * retain nothing (`presentLayeredGpuSurface`). */
+    if (layered) {
+        std::vector<uint8_t>().swap(view.gpu_bgra);
+    } else {
+        view.gpu_bgra.resize(width * height * 4);
+    }
     uint8_t *dst = view.gpu_bgra.data();
-    for (int y = dirty_top; y < dirty_bottom; ++y) {
+    if (!layered) for (int y = dirty_top; y < dirty_bottom; ++y) {
         for (int x = dirty_left; x < dirty_right; ++x) {
             const size_t index = (size_t)y * width + (size_t)x;
             const uint8_t *src = rgba8 + index * 4;
@@ -6411,18 +6663,22 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
      * button cluster matched to the header the app just presented. */
     if (owner != host->windows.end()) syncHiddenCaptionColor(host, owner->second, view, rgba8, width, height);
 
+    // The sample pixel is only this frame's when it lies in the rendered
+    // rows: outside them the renderer's buffer may hold another view's.
+    const bool sample_rendered = (int)(height / 2) >= dirty_top && (int)(height / 2) < dirty_bottom &&
+        (int)(width / 2) >= dirty_left && (int)(width / 2) < dirty_right;
     const size_t sample_index = ((height / 2) * width + width / 2) * 4;
     const uint8_t sr = rgba8[sample_index + 0];
     const uint8_t sg = rgba8[sample_index + 1];
     const uint8_t sb = rgba8[sample_index + 2];
     const uint8_t sa = rgba8[sample_index + 3];
-    if (sr != 0 || sg != 0 || sb != 0) {
+    if (sample_rendered && (sr != 0 || sg != 0 || sb != 0)) {
         view.gpu_nonblank = 1;
         view.gpu_sample_color = ((uint32_t)sa << 24) | ((uint32_t)sr << 16) | ((uint32_t)sg << 8) | (uint32_t)sb;
     }
 
     if (layered) {
-        if (!presentLayeredGpuSurface(owner->second, view, dirty_left, dirty_top, dirty_right, dirty_bottom, full_update)) return 0;
+        if (!presentLayeredGpuSurface(host, owner->second, view, rgba8, dirty_left, dirty_top, dirty_right, dirty_bottom, full_update)) return 0;
     } else {
         RECT dirty = { dirty_left, dirty_top, dirty_right, dirty_bottom };
         InvalidateRect(view.hwnd, full_update ? nullptr : &dirty, FALSE);
@@ -6738,7 +6994,7 @@ int native_sdk_windows_show_notification(Host *host, const char *title, size_t t
     data.dwInfoFlags = NIIF_INFO;
     copyWideField(data.szInfoTitle, ARRAYSIZE(data.szInfoTitle), title_wide);
     copyWideField(data.szInfo, ARRAYSIZE(data.szInfo), body_wide);
-    return Shell_NotifyIconW(NIM_MODIFY, &data) ? 1 : 0;
+    return notifyIcon(NIM_MODIFY, &data) ? 1 : 0;
 }
 
 int native_sdk_windows_create_tray(Host *host, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len) {
@@ -6778,8 +7034,7 @@ int native_sdk_windows_open_external_url(Host *host, const char *url, size_t url
     (void)host;
     if (!url || url_len == 0) return 0;
     std::wstring target = widen(slice(url, url_len));
-    HINSTANCE result = ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    return reinterpret_cast<intptr_t>(result) > 32 ? 1 : 0;
+    return shellOpen(target.c_str(), nullptr) ? 1 : 0;
 }
 
 int native_sdk_windows_reveal_path(Host *host, const char *path, size_t path_len) {
@@ -6787,22 +7042,19 @@ int native_sdk_windows_reveal_path(Host *host, const char *path, size_t path_len
     if (!path || path_len == 0) return 0;
     std::wstring target = widen(slice(path, path_len));
     std::wstring args = L"/select,\"" + target + L"\"";
-    HINSTANCE result = ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
-    return reinterpret_cast<intptr_t>(result) > 32 ? 1 : 0;
+    return shellOpen(L"explorer.exe", args.c_str()) ? 1 : 0;
 }
 
 int native_sdk_windows_add_recent_document(Host *host, const char *path, size_t path_len) {
     (void)host;
     if (!path || path_len == 0) return 0;
     std::wstring target = widen(slice(path, path_len));
-    SHAddToRecentDocs(SHARD_PATHW, target.c_str());
-    return 1;
+    return addToRecentDocs(SHARD_PATHW, target.c_str()) ? 1 : 0;
 }
 
 int native_sdk_windows_clear_recent_documents(Host *host) {
     (void)host;
-    SHAddToRecentDocs(SHARD_PIDL, nullptr);
-    return 1;
+    return addToRecentDocs(SHARD_PIDL, nullptr) ? 1 : 0;
 }
 
 int native_sdk_windows_set_credential(Host *host, const char *service, size_t service_len, const char *account, size_t account_len, const char *secret, size_t secret_len) {

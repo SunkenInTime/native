@@ -147,6 +147,7 @@ const Harness = struct {
             .update_fx = fetchUpdate,
             .view = fetchView,
         });
+        app_state.effects.allocator = std.testing.allocator;
         const app = app_state.app();
         try harness.start(app);
         try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
