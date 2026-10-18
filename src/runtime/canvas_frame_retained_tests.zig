@@ -557,7 +557,7 @@ test "runtime next canvas frame tracks presented state and resource cache" {
     try std.testing.expect(first_frame.requiresRender());
     try std.testing.expectEqual(@as(usize, 1), first_frame.resource_cache_plan.uploadCount());
     try std.testing.expectEqual(@as(u64, 1), harness.runtime.views[0].presented_canvas_revision);
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_resource_cache_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_resource_cache.len);
 
     const clean_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 2 }, frame_storage);
     try std.testing.expect(!clean_frame.full_repaint);
@@ -566,7 +566,7 @@ test "runtime next canvas frame tracks presented state and resource cache" {
     try std.testing.expectEqual(@as(usize, 0), clean_frame.batch_plan.batchCount());
     try std.testing.expectEqual(@as(usize, 0), clean_frame.changes.len);
     try std.testing.expectEqual(@as(usize, 0), clean_frame.resource_cache_plan.retainCount());
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_resource_cache_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_resource_cache.len);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_frame_profile_work_units);
 
     const moved_commands = [_]canvas.CanvasCommand{.{ .fill_rect = .{
