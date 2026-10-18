@@ -29,4 +29,5 @@ test {
     _ = @import("layout_audit_tests.zig");
     _ = @import("a11y_audit_tests.zig");
     _ = @import("lazy_tls.zig");
+    _ = @import("lazy_commit.zig");
 }
