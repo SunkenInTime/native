@@ -182,15 +182,6 @@ extern fn native_sdk_windows_audio_seek(host: *WindowsHost, position_ms: u64) c_
 extern fn native_sdk_windows_audio_set_volume(host: *WindowsHost, volume: f64) c_int;
 extern fn native_sdk_windows_audio_spectrum_supported(host: *WindowsHost) c_int;
 
-/// The host loads some system DLLs on first use (lazy_dll.h). When one
-/// cannot load, the host calls this with a message naming the feature, the
-/// DLL, the function and the Windows error; the feature's call then fails
-/// the way it already fails. std.log so a host's logFn (the widget runtime
-/// routes it to the per-widget log file) keeps the line.
-export fn native_sdk_windows_report_library_failure(message: [*]const u8, message_len: usize) void {
-    std.log.err("{s}", .{message[0..message_len]});
-}
-
 const WindowsOpenDialogOpts = extern struct {
     title: [*]const u8,
     title_len: usize,
