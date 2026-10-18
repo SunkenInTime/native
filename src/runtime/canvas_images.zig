@@ -85,13 +85,23 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
             if (rgba8.len != byte_len) return error.InvalidImageDimensions;
             if (byte_len > max_registered_canvas_image_pixel_bytes) return error.ImageTooLarge;
 
-            const index = findCanvasImageIndex(self, id) orelse blk: {
+            // Slots past `canvas_image_count` hold nothing: a new id gets
+            // fresh pixels, a replaced one keeps its buffer when it fits.
+            const index = if (findCanvasImageIndex(self, id)) |replaced| blk: {
+                if (self.canvas_image_pixels[replaced].len != byte_len) {
+                    const pixels = try std.heap.page_allocator.alloc(u8, byte_len);
+                    std.heap.page_allocator.free(self.canvas_image_pixels[replaced]);
+                    self.canvas_image_pixels[replaced] = pixels;
+                }
+                break :blk replaced;
+            } else blk: {
                 if (self.canvas_image_count >= max_registered_canvas_images) return error.ImageRegistryFull;
-                const index = self.canvas_image_count;
+                const added = self.canvas_image_count;
+                self.canvas_image_pixels[added] = try std.heap.page_allocator.alloc(u8, byte_len);
                 self.canvas_image_count += 1;
-                break :blk index;
+                break :blk added;
             };
-            @memcpy(self.canvas_image_pixels[index][0..byte_len], rgba8);
+            @memcpy(self.canvas_image_pixels[index], rgba8);
             self.canvas_image_entries[index] = .{
                 .id = id,
                 .width = width,
@@ -140,13 +150,9 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         pub fn unregisterCanvasImage(self: *Runtime, id: canvas.ImageId) bool {
             const index = findCanvasImageIndex(self, id) orelse return false;
             const last = self.canvas_image_count - 1;
-            if (index != last) {
-                self.canvas_image_entries[index] = self.canvas_image_entries[last];
-                @memcpy(
-                    self.canvas_image_pixels[index][0..self.canvas_image_entries[index].byte_len],
-                    self.canvas_image_pixels[last][0..self.canvas_image_entries[index].byte_len],
-                );
-            }
+            std.heap.page_allocator.free(self.canvas_image_pixels[index]);
+            self.canvas_image_pixels[index] = self.canvas_image_pixels[last];
+            if (index != last) self.canvas_image_entries[index] = self.canvas_image_entries[last];
             self.canvas_image_entries[last] = .{};
             self.canvas_image_count = last;
             // Best-effort drop of the platform-side texture: platforms
@@ -229,7 +235,7 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         /// frames so the repaint is not gated on other input.
         fn noteCanvasImagesChanged(self: *Runtime) void {
             const frame_methods = canvas_frame_module.RuntimeCanvasFrames(Runtime);
-            for (self.views[0..self.view_count], 0..) |*view, index| {
+            for (self.views[0..self.view_count], 0..) |view, index| {
                 if (!view.open or view.kind != .gpu_surface) continue;
                 view.presented_canvas_valid = false;
                 self.invalidateFor(.state, view.frame);

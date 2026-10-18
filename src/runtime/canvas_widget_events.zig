@@ -9,6 +9,7 @@ const canvas_limits = @import("canvas_limits.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const widget_bridge = @import("widget_bridge.zig");
+const storage_allocator = @import("grown_array.zig").storage_allocator;
 
 const GpuSurfaceInputEvent = runtime_api.GpuSurfaceInputEvent;
 const CanvasWidgetPointerEvent = runtime_api.CanvasWidgetPointerEvent;
@@ -65,7 +66,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 .hover, .down, .wheel => {},
             }
 
-            const route = try self.views[index].widgetLayoutTree().routePointerEventWithTokens(pointer, self.views[index].widget_tokens, output);
+            const route = try self.views[index].widgetLayoutTree().routePointerEventWithTokens(pointer, self.views[index].widget_tokens.*, output);
             return .{
                 .window_id = input_event.window_id,
                 .view_label = self.views[index].label,
@@ -356,7 +357,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const target_id: canvas.ObjectId = if (pointer_event.target) |target| target.id else 0;
             const hover_target = layout_tree.hoverTargetForHit(pointer_event.target);
             const hover_target_id: canvas.ObjectId = if (hover_target) |value| value.id else 0;
-            const hit_target = layout_tree.hoverTargetForHit(layout_tree.hitTestWithTokens(pointer_event.pointer.point, self.views[index].widget_tokens));
+            const hit_target = layout_tree.hoverTargetForHit(layout_tree.hitTestWithTokens(pointer_event.pointer.point, self.views[index].widget_tokens.*));
             const hit_target_id: canvas.ObjectId = if (hit_target) |value| value.id else 0;
             const hit_cursor = platformCursorFromCanvas(layout_tree.cursorForHit(hit_target));
             var next_hovered_id = self.views[index].canvas_widget_hovered_id;
@@ -437,7 +438,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const node = layout.findById(hovered_id) orelse return null;
             var widget = node.widget;
             widget.frame = node.frame;
-            return canvas.chartWidgetHoverIndex(widget, self.views[view_index].widget_tokens, point);
+            return canvas.chartWidgetHoverIndex(widget, self.views[view_index].widget_tokens.*, point);
         }
 
         pub fn syncCanvasWidgetCursorForView(self: *Runtime, view_index: usize) anyerror!void {
@@ -464,17 +465,19 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             if (view_index >= self.view_count) return;
             if (self.views[view_index].kind != .gpu_surface) return;
             if (self.options.platform.services.set_window_drag_regions_fn == null) return;
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             var regions: [canvas_limits.max_canvas_widget_window_drag_regions_per_view]platform.WindowDragRegion = undefined;
             const count = collectCanvasWidgetWindowDragRegions(view.widgetLayoutTree(), &regions);
             if (view.canvas_widget_drag_regions_pushed) {
-                if (count == view.canvas_widget_drag_region_count and windowDragRegionsEqual(regions[0..count], view.canvas_widget_drag_regions[0..count])) return;
+                if (count == view.canvas_widget_drag_regions.len and windowDragRegionsEqual(regions[0..count], view.canvas_widget_drag_regions.slice())) return;
             } else if (count == 0) {
                 return;
             }
+            // Room for the mirror before the platform sees the regions, so
+            // the mirror always says what the platform holds.
+            try view.canvas_widget_drag_regions.ensureCapacity(storage_allocator, count);
             try self.options.platform.services.setWindowDragRegions(view.window_id, view.label, regions[0..count]);
-            @memcpy(view.canvas_widget_drag_regions[0..count], regions[0..count]);
-            view.canvas_widget_drag_region_count = count;
+            try view.canvas_widget_drag_regions.replace(storage_allocator, regions[0..count]);
             view.canvas_widget_drag_regions_pushed = true;
         }
 
@@ -484,7 +487,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // Tokens matter here: chart hover chrome (axis gutters, the
             // floating detail card) measures text through the view's
             // live tokens, so the dirty region must measure the same way.
-            const local_dirty = self.views[view_index].widgetLayoutTree().renderStateDirtyBoundsWithTokens(previous, next, self.views[view_index].widget_tokens);
+            const local_dirty = self.views[view_index].widgetLayoutTree().renderStateDirtyBoundsWithTokens(previous, next, self.views[view_index].widget_tokens.*);
             invalidateForCanvasWidgetRenderStateDirty(self, view_index, local_dirty);
             const publish_accessibility = previous.focused_id != next.focused_id;
             _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwnedWithAccessibility(self, view_index, publish_accessibility);
@@ -687,7 +690,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         fn applyCanvasWidgetClearButtonPress(self: *Runtime, index: usize, target_id: canvas.ObjectId, point: geometry.PointF) anyerror!bool {
             const node_index = self.views[index].canvasWidgetNodeIndexById(target_id) orelse return false;
             const widget = self.views[index].widget_layout_nodes[node_index].widget;
-            const hit_rect = canvas.textInputClearButtonHitRect(widget, self.views[index].widget_tokens) orelse return false;
+            const hit_rect = canvas.textInputClearButtonHitRect(widget, self.views[index].widget_tokens.*) orelse return false;
             if (!hit_rect.containsPoint(point)) return false;
             const dirty = try self.views[index].applyCanvasWidgetTextEdit(target_id, .clear) orelse return true;
             if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {
@@ -1020,7 +1023,7 @@ fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {
 }
 
 fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
-    for (self.views[0..self.view_count], 0..) |*view, index| {
+    for (self.views[0..self.view_count], 0..) |view, index| {
         if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
     }
     return null;

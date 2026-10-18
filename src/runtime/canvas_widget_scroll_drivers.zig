@@ -62,7 +62,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
             if (view_index >= self.view_count) return;
             if (self.views[view_index].kind != .gpu_surface or !self.views[view_index].open) return;
             if (!canvasWidgetScrollDriversSupported(self)) return;
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
 
             var drivers: [platform.max_gpu_surface_scroll_drivers]platform.GpuSurfaceScrollDriver = undefined;
             var ids: [platform.max_gpu_surface_scroll_drivers]u64 = undefined;
@@ -122,7 +122,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, event.window_id, event.label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
             self.views[index].recordGpuSurfaceInputTimestamp(event.timestamp_ns);
-            recordScrollDriverOffset(&self.views[index], event.driver_id, event.offset_y);
+            recordScrollDriverOffset(self.views[index], event.driver_id, event.offset_y);
 
             const node_index = self.views[index].canvasWidgetNodeIndexById(event.driver_id) orelse return;
             const dirty = try self.views[index].applyCanvasWidgetScrollDriverOffset(node_index, event.offset_y) orelse return;
@@ -195,7 +195,7 @@ fn canvasDirtyRegionForView(view_frame: geometry.RectF, local_dirty: geometry.Re
 }
 
 fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
-    for (self.views[0..self.view_count], 0..) |*view, index| {
+    for (self.views[0..self.view_count], 0..) |view, index| {
         if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
     }
     return null;

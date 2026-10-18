@@ -128,22 +128,22 @@ test "runtime next canvas frame retains and evicts glyph atlas cache" {
     try std.testing.expectEqual(@as(usize, 1), first_frame.glyph_atlas_cache_plan.uploadCount());
     try std.testing.expectEqual(@as(usize, 0), first_frame.glyph_atlas_cache_plan.retainCount());
     try std.testing.expectEqual(@as(usize, 0), first_frame.glyph_atlas_cache_plan.evictCount());
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_cache_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_cache.len);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_upload_count);
     try std.testing.expectEqual(@as(usize, 1), first_frame.text_layout_cache_plan.uploadCount());
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_cache_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_cache.len);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_upload_count);
 
     const clean_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 2 }, frame_storage);
     try std.testing.expectEqual(@as(usize, 0), clean_frame.glyph_atlas_cache_plan.uploadCount());
     try std.testing.expectEqual(@as(usize, 0), clean_frame.glyph_atlas_cache_plan.retainCount());
     try std.testing.expectEqual(@as(usize, 0), clean_frame.glyph_atlas_cache_plan.evictCount());
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_cache_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_cache.len);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_frame_glyph_atlas_retain_count);
     try std.testing.expectEqual(@as(usize, 0), clean_frame.text_layout_cache_plan.uploadCount());
     try std.testing.expectEqual(@as(usize, 0), clean_frame.text_layout_cache_plan.retainCount());
     try std.testing.expectEqual(@as(usize, 0), clean_frame.text_layout_cache_plan.evictCount());
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_cache_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_cache.len);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_frame_text_layout_retain_count);
 
     const next_commands = [_]canvas.CanvasCommand{.{ .draw_text = .{
@@ -160,14 +160,14 @@ test "runtime next canvas frame retains and evicts glyph atlas cache" {
     try std.testing.expectEqual(@as(usize, 1), changed_frame.glyph_atlas_cache_plan.uploadCount());
     try std.testing.expectEqual(@as(usize, 0), changed_frame.glyph_atlas_cache_plan.retainCount());
     try std.testing.expectEqual(@as(usize, 1), changed_frame.glyph_atlas_cache_plan.evictCount());
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_cache_count);
-    try std.testing.expectEqual(@as(u32, 'B'), harness.runtime.views[0].canvas_frame_glyph_atlas_cache[0].key.glyph_id);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_cache.len);
+    try std.testing.expectEqual(@as(u32, 'B'), harness.runtime.views[0].canvas_frame_glyph_atlas_cache.slice()[0].key.glyph_id);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_upload_count);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_glyph_atlas_evict_count);
     try std.testing.expectEqual(@as(usize, 1), changed_frame.text_layout_cache_plan.uploadCount());
     try std.testing.expectEqual(@as(usize, 0), changed_frame.text_layout_cache_plan.retainCount());
     try std.testing.expectEqual(@as(usize, 1), changed_frame.text_layout_cache_plan.evictCount());
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_cache_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_cache.len);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_upload_count);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_evict_count);
 }
@@ -307,7 +307,7 @@ test "runtime canvas frame scratch storage includes text layout caches" {
     try std.testing.expectEqual(@as(usize, 1), first_frame.text_layout_plan.planCount());
     try std.testing.expectEqual(@as(usize, 1), first_frame.text_layout_plan.lineCount());
     try std.testing.expectEqual(@as(usize, 1), first_frame.text_layout_cache_plan.uploadCount());
-    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_cache_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_cache.len);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_upload_count);
 
     const next_commands = [_]canvas.CanvasCommand{.{ .draw_text = .{
@@ -326,7 +326,7 @@ test "runtime canvas frame scratch storage includes text layout caches" {
     try std.testing.expectEqual(@as(usize, 1), changed_frame.text_layout_cache_plan.uploadCount());
     try std.testing.expectEqual(@as(usize, 1), changed_frame.text_layout_cache_plan.retainCount());
     try std.testing.expectEqual(@as(usize, 0), changed_frame.text_layout_cache_plan.evictCount());
-    try std.testing.expectEqual(@as(usize, 2), harness.runtime.views[0].canvas_frame_text_layout_cache_count);
+    try std.testing.expectEqual(@as(usize, 2), harness.runtime.views[0].canvas_frame_text_layout_cache.len);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_upload_count);
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.views[0].canvas_frame_text_layout_retain_count);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_frame_text_layout_evict_count);

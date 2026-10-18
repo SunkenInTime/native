@@ -301,6 +301,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// titlebar-control channel's scope, not this field's.
             /// Platforms without the concept keep standard chrome.
             titlebar: app_manifest.WindowTitlebarStyle = .standard,
+            /// Desktop-widget surface flags, the same fields and meaning
+            /// as the scene's `ShellWindow`: per-pixel alpha, stacking
+            /// layer, pointer pass-through, and showing without taking
+            /// focus. Applied at creation, like the title.
+            transparent: bool = false,
+            layer: app_manifest.WindowLayer = .normal,
+            click_through: bool = false,
+            no_activate: bool = false,
+            /// This window's canvas renderer. Null renders through the main
+            /// canvas's declared backend, like every other gpu option.
+            gpu_backend: ?app_manifest.GpuSurfaceBackend = null,
             /// Msg dispatched when the USER closes the window (never for
             /// a reconcile close the model itself initiated). The
             /// dismissal precedent: the window is already gone as an
@@ -443,15 +454,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// can keep the retained trees instead of rebuilding and laying
             /// them out. Apps with paint-only mutable leaves may pair this
             /// with `project_update` to refresh those leaves before the
-            /// rebuild is skipped.
+            /// rebuild is skipped. With `window_view_revision` set, this
+            /// covers the main canvas only.
             view_revision: ?*const fn (model: *const ModelT) u64 = null,
+            /// The `view_revision` of one declared window, keyed by its
+            /// label: the fields that window's `window_view` reads. Set it
+            /// when declared windows render independent parts of the model
+            /// (one window per document, per widget): a dispatched Msg then
+            /// rebuilds only the windows whose revision moved, instead of
+            /// every open window, and same-revision windows go through
+            /// `project_update` like the main canvas.
+            window_view_revision: ?*const fn (model: *const ModelT, window_label: []const u8) u64 = null,
             /// Project a same-revision update into retained runtime state.
             /// Return true when the update is fully represented and no view
             /// rebuild is required; false takes the ordinary rebuild path.
             /// This hook is never consulted until a successful view build has
             /// recorded a revision. The window id and canvas label identify
-            /// the primary retained canvas being projected, regardless of
-            /// which window originated the message.
+            /// the retained canvas being projected, regardless of which
+            /// window originated the message: the primary canvas, and with
+            /// `window_view_revision` each same-revision declared window.
             project_update: ?*const fn (runtime: *Runtime, window_id: platform.WindowId, canvas_label: []const u8, model: *const ModelT, msg: MsgT) anyerror!bool = null,
             /// TEA's init command: runs exactly once, on the installing
             /// frame, after the effects channel is bound and before the
@@ -588,6 +609,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Called after presenting every frame except the installing
             /// one.
             on_frame: ?*const fn (model: *const ModelT, frame: platform.GpuFrame) ?MsgT = null,
+            /// `on_frame` for declared windows, keyed by window label.
+            /// The resulting Msg dispatches from that window.
+            window_on_frame: ?*const fn (model: *const ModelT, window_label: []const u8, frame: platform.GpuFrame) ?MsgT = null,
             /// Optional mapping from native top-level window frame
             /// reports into messages. The platform owns live movement;
             /// this hook observes the resulting logical frame and scale
@@ -596,12 +620,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             on_window_frame: ?*const fn (frame: core.WindowFrameEvent) ?MsgT = null,
             /// Reads runtime-owned widget state (slider values, scroll
             /// offsets) back into the model before update and rebuild so
-            /// the next source tree does not stomp it. Main canvas only:
-            /// declared secondary windows' widget state is runtime-owned
-            /// between rebuilds but has no sync hook yet — keep
-            /// continuous controls in the secondary windows model-driven
-            /// (echo `on_change`/`on_scroll` values back into `value`).
+            /// the next source tree does not stomp it. Main canvas only;
+            /// declared windows use `window_sync`.
             sync: ?*const fn (model: *ModelT, layout: canvas.WidgetLayoutTree) void = null,
+            /// `sync` for declared windows, keyed by window label. Runs
+            /// before a rebuild of that window and before `update` for a
+            /// Msg dispatched from that window (its input, its frames):
+            /// only that window's own events move its runtime-owned
+            /// widget state. Without it, keep continuous controls in
+            /// declared windows model-driven (echo `on_change`/`on_scroll`
+            /// values back into `value`).
+            window_sync: ?*const fn (model: *ModelT, window_label: []const u8, layout: canvas.WidgetLayoutTree) void = null,
             /// Model-derived webview panes, re-applied after every rebuild
             /// (so also on resize and every dispatched Msg): each pane
             /// snaps its scene-declared webview to a canvas widget's
@@ -644,7 +673,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Per-window view for declared secondary windows, keyed by
             /// the descriptor's window label — the `view` seam with the
             /// window identity alongside. Rebuilt for every open window
-            /// on every dispatched Msg. Markup deliberately binds ONE
+            /// on every dispatched Msg, unless `window_view_revision`
+            /// says the window's inputs did not move. Markup deliberately binds ONE
             /// window's content (the main canvas): there is no `window`
             /// element in the closed grammar because windows are shell
             /// concerns, not view-tree concerns — a markup-authored
@@ -698,7 +728,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             pixel_snap_scale: f32 = 1,
             tree: ?Ui.Tree = null,
             arena_index: usize = 0,
+            /// Same rule as `Self.inactive_tree_published`, for this
+            /// window's arena pair.
+            inactive_tree_published: bool = false,
             arenas: [2]std.heap.ArenaAllocator,
+            /// `window_view_revision` at this window's last build;
+            /// meaningful only once `projected_revision_known`.
+            projected_revision: u64 = 0,
+            projected_revision_known: bool = false,
 
             fn init(backing: std.mem.Allocator) WindowSlot {
                 return .{ .arenas = .{
@@ -726,6 +763,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         options: Options,
         arenas: [2]std.heap.ArenaAllocator,
         arena_index: usize = 0,
+        /// Set while the runtime may hold pointers into the inactive
+        /// arena: a rebuild sets it just before handing the new tree's
+        /// layout to the runtime and clears it once that arena becomes
+        /// the active one. A rebuild that fails in between leaves it set,
+        /// so `releaseInactiveTrees` keeps the arena the runtime still
+        /// reads from.
+        inactive_tree_published: bool = false,
+        /// How many app callbacks (`eventFn`, `frameRequestedFn`) are on
+        /// the stack. A platform call made during a rebuild can deliver
+        /// another event synchronously (Windows `SetFocus` sends
+        /// WM_KILLFOCUS), so callbacks nest; only the outermost one
+        /// releases the inactive trees.
+        callback_depth: usize = 0,
         tree: ?Ui.Tree = null,
         canvas_size: geometry.SizeF = .{ .width = 1, .height = 1 },
         canvas_window_id: platform.WindowId = 1,
@@ -800,6 +850,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (features.runtime_markup) .{} else {},
         layout_nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
         gpu_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasGpuCommand = undefined,
+        /// Scratch for `scheduleAnimations`, which runs on every rebuild.
+        /// As a 272 KiB stack local it sat in `rebuild`'s frame, and the
+        /// Windows stack probe made every page resident in every app,
+        /// whether or not it declares animations. Here it costs nothing
+        /// until an app's animations use it.
+        render_animations: [canvas_limits.max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined,
         /// Packet transport buffer, sized for the larger of the two wire
         /// encodings (the compact binary bound; the JSON bound is
         /// smaller and the runtime clamps JSON encodes to it), so a
@@ -882,7 +938,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// declarable window; a build declaring more variable lists than
         /// slots drops the excess to estimate-only math with a debug
         /// warning.
-        virtual_extent_tables: [canvas.max_virtual_windows]canvas.VirtualExtentTable = [_]canvas.VirtualExtentTable{.{}} ** canvas.max_virtual_windows,
+        ///
+        /// Only `virtual_extent_tables[0..virtual_extent_table_count]`
+        /// is initialized: a table is reset when a list first claims it.
+        /// Resetting all of them up front wrote 16 pages (64 KiB) in
+        /// every app, since each ~48 KiB table keeps fields on both
+        /// sides of its arrays; an app without variable-extent lists
+        /// now writes none.
+        virtual_extent_tables: [canvas.max_virtual_windows]canvas.VirtualExtentTable = undefined,
+        virtual_extent_table_count: usize = 0,
         /// Live model-declared secondary windows (`Options.windows_fn`),
         /// keyed by window label.
         window_slots: [max_ui_windows]WindowSlot,
@@ -890,6 +954,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Scratch handed to `windows_fn`; on the app struct so returned
         /// descriptor slices outlive the apply.
         windows_scratch: WindowsScratch = .{},
+        /// Set while `applyWindows` runs; a nested call returns early
+        /// (see `applyWindows`).
+        applying_windows: bool = false,
 
         /// By-value construction. The Model parameter and the returned
         /// app both ride the caller's stack unless result-location
@@ -970,8 +1037,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 },
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
-                .effects = Effects.init(backing),
+                // Set in place below. A by-value `Effects.init` writes every
+                // page of its undefined rings, which most apps never use,
+                // and routes its 493 KiB through the caller's stack.
+                .effects = undefined,
             };
+            self.effects.initInPlace(backing);
         }
 
         fn assertOptions(options: Options) void {
@@ -1026,6 +1097,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn frameRequestedFn(context: *anyopaque, runtime: *Runtime) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(context));
+            self.callback_depth += 1;
+            defer self.leaveCallback();
             const map = self.options.on_frame_requested orelse return;
             if (map(&self.model)) |msg| {
                 try self.dispatch(runtime, self.canvas_window_id, msg);
@@ -1103,9 +1176,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Apply a message and rebuild the widget tree. Runtime-owned
         /// widget state is synced into the model first so `update` sees
         /// current slider values and scroll offsets.
-        pub fn dispatch(self: *Self, runtime: *Runtime, _: platform.WindowId, msg: MsgT) anyerror!void {
+        pub fn dispatch(self: *Self, runtime: *Runtime, window_id: platform.WindowId, msg: MsgT) anyerror!void {
             self.bindEffectsChannel(runtime);
             self.syncModel(runtime, self.canvas_window_id);
+            if (self.windowSlotIndexByWindowId(window_id)) |index| self.syncWindowSlot(runtime, &self.window_slots[index]);
             self.applyMsg(msg);
             self.publishAudioState(runtime);
             // Before the installing frame there is nothing to render
@@ -1118,20 +1192,38 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (!self.installed) return;
             if (self.projectedViewRevisionMatches()) {
                 if (self.options.project_update) |project_update| {
-                    if (try project_update(runtime, self.canvas_window_id, self.options.canvas_label, &self.model, msg)) {
-                        // project_update only targets the primary retained
-                        // canvas. Reconcile the declared window set (including
-                        // a user-closed window the model still declares), then
-                        // rebuild installed secondary trees because they have
-                        // no projection hook of their own.
+                    const projected = project_update(runtime, self.canvas_window_id, self.options.canvas_label, &self.model, msg) catch |err| projected: {
+                        // Independent windows: the main canvas's failed
+                        // projection is its own; it rebuilds below.
+                        if (self.options.window_view_revision == null) return err;
+                        ui_app_log.warn("main canvas '{s}' failed to project an update: {s}", .{ self.options.canvas_label, @errorName(err) });
+                        break :projected false;
+                    };
+                    if (projected) {
+                        // The primary canvas is projected. Reconcile the
+                        // declared window set (including a user-closed
+                        // window the model still declares), then bring the
+                        // declared windows up to date.
                         self.applyWindows(runtime);
-                        try self.rebuildWindowSlots(runtime);
+                        try self.refreshWindowSlots(runtime, msg);
                         return;
                     }
-                } else return;
+                } else if (self.options.window_view_revision == null) {
+                    return;
+                } else {
+                    self.applyWindows(runtime);
+                    try self.refreshWindowSlots(runtime, msg);
+                    return;
+                }
             }
-            try self.rebuild(runtime, self.canvas_window_id);
-            try self.rebuildWindowSlots(runtime);
+            self.rebuild(runtime, self.canvas_window_id) catch |err| {
+                // With independent windows the main canvas is one window
+                // among many: its failure is logged and stays its own.
+                if (self.options.window_view_revision == null) return err;
+                ui_app_log.warn("main canvas '{s}' failed to rebuild and keeps its last tree: {s}", .{ self.options.canvas_label, @errorName(err) });
+                self.applyWindows(runtime);
+            };
+            try self.refreshWindowSlots(runtime, msg);
             // A Msg dispatched FROM a secondary window still rebuilt the
             // main canvas above: one model owns every window's view.
         }
@@ -1157,15 +1249,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (!self.effects.hasPending()) return;
             self.bindEffectsChannel(runtime);
             self.syncModel(runtime, self.canvas_window_id);
+            const independent = self.options.window_view_revision != null;
             var dispatched = false;
             while (self.effects.takeMsg()) |msg| {
                 self.applyMsg(msg);
                 dispatched = true;
+                // Independent windows see every Msg: a paint-only change
+                // projects through `project_update` like a dispatch.
+                if (independent) try self.refreshWindowSlots(runtime, msg);
             }
             self.publishAudioState(runtime);
             if (dispatched) {
-                try self.rebuild(runtime, self.canvas_window_id);
-                try self.rebuildWindowSlots(runtime);
+                if (!independent) {
+                    try self.rebuild(runtime, self.canvas_window_id);
+                    try self.refreshWindowSlots(runtime, null);
+                } else {
+                    self.rebuild(runtime, self.canvas_window_id) catch |err| {
+                        ui_app_log.warn("main canvas '{s}' failed to rebuild and keeps its last tree: {s}", .{ self.options.canvas_label, @errorName(err) });
+                    };
+                }
             }
         }
 
@@ -1268,8 +1370,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         /// Rebuild the widget tree from the model and hand it to the
         /// runtime, which copies and reconciles it. The previous tree's
-        /// arena stays alive until the following rebuild so the handler
-        /// table remains valid between events. Apps with a `chrome` hook
+        /// arena stays alive until the event that rebuilt it is handled,
+        /// so a Msg made from that tree can still be dispatched; then its
+        /// pages go back (`releaseInactiveTrees`). Apps with a `chrome` hook
         /// also rebuild the retained display list (chrome prefix + widget
         /// commands + chrome suffix) here.
         ///
@@ -1365,6 +1468,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             launch_timing.lapOnce("first_view_built");
 
+            // From here the runtime may hold pointers into the new arena,
+            // even if a later step fails before it becomes the active one.
+            self.inactive_tree_published = true;
             if (self.options.chrome) |chrome| {
                 try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
             } else {
@@ -1376,6 +1482,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
             self.tree = tree;
             self.arena_index = next_index;
+            self.inactive_tree_published = false;
             // The fallback menu's target vanished from this build (the
             // model dropped the row, or its menu emptied): the open state
             // has nothing to present, so it closes.
@@ -1543,7 +1650,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn virtualExtentTableForId(self: *const Self, id: canvas.ObjectId) ?*canvas.VirtualExtentTable {
             if (id == 0) return null;
-            for (&self.virtual_extent_tables) |*table| {
+            for (self.virtual_extent_tables[0..self.virtual_extent_table_count]) |*table| {
                 if (table.id == id) return @constCast(table);
             }
             return null;
@@ -1551,11 +1658,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn claimVirtualExtentTable(self: *Self, id: canvas.ObjectId) ?*canvas.VirtualExtentTable {
             if (id == 0) return null;
-            for (&self.virtual_extent_tables) |*table| {
+            const claimed = self.virtual_extent_tables[0..self.virtual_extent_table_count];
+            for (claimed) |*table| {
                 if (table.id == id) return table;
             }
-            for (&self.virtual_extent_tables) |*table| {
+            for (claimed) |*table| {
                 if (table.id == 0) return table;
+            }
+            if (self.virtual_extent_table_count < self.virtual_extent_tables.len) {
+                const table = &self.virtual_extent_tables[self.virtual_extent_table_count];
+                table.reset();
+                self.virtual_extent_table_count += 1;
+                return table;
             }
             // All slots busy: recycle one whose list the LAST build no
             // longer declared (per-document lists come and go; their
@@ -1722,6 +1836,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// failed window create never takes the render loop down.
         fn applyWindows(self: *Self, runtime: *Runtime) void {
             const windows_fn = self.options.windows_fn orelse return;
+            // Creating a window pumps platform messages (the Windows
+            // host gets WM_MOVE/WM_SIZE synchronously while it creates
+            // and shows the window) whose frame events dispatch Msgs,
+            // and each dispatch reconciles again — before this call has
+            // recorded the new window's slot. The nested pass would
+            // re-create the same label (a DuplicateWindowLabel warning)
+            // and overwrite `windows_scratch` under the `declared` slice
+            // this call is still walking. The outer call finishes the
+            // reconcile.
+            if (self.applying_windows) return;
+            self.applying_windows = true;
+            defer self.applying_windows = false;
             var declared = windows_fn(&self.model, &self.windows_scratch);
             if (declared.len > max_ui_windows) {
                 ui_app_log.warn(
@@ -1735,8 +1861,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // slot (and its runtime window label) before creations run.
             var index: usize = 0;
             while (index < self.window_slot_count) {
-                if (declaredWindowIndex(declared, self.window_slots[index].label()) == null) {
-                    self.closeWindowSlot(runtime, index);
+                if (declaredWindowIndex(declared, self.window_slots[index].label()) == null and
+                    self.closeWindowSlot(runtime, index))
+                {
+                    // The last slot moved into `index`; check it next.
                     continue;
                 }
                 index += 1;
@@ -1814,6 +1942,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .titlebar = descriptor.titlebar,
                 .min_width = descriptor.min_width,
                 .min_height = descriptor.min_height,
+                .transparent = descriptor.transparent,
+                .layer = descriptor.layer,
+                .click_through = descriptor.click_through,
+                .no_activate = descriptor.no_activate,
                 // Deterministic reopen: the descriptor is the geometry
                 // channel, not a persisted frame store.
                 .restore_state = false,
@@ -1838,6 +1970,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             slot.pixel_snap_scale = self.pixel_snap_scale;
             slot.tree = null;
             slot.arena_index = 0;
+            slot.inactive_tree_published = false;
+            slot.projected_revision_known = false;
             self.window_slot_count += 1;
         }
 
@@ -1862,17 +1996,26 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     view.gpu_alpha_mode = scene_view.gpu_alpha_mode;
                     view.gpu_color_space = scene_view.gpu_color_space;
                     view.gpu_vsync = scene_view.gpu_vsync;
+                    if (descriptor.gpu_backend) |backend| view.gpu_backend = backend;
                     return view;
                 }
             }
+            if (descriptor.gpu_backend) |backend| view.gpu_backend = backend;
             return view;
         }
 
-        /// Remove the slot and close its runtime window (the reconcile
-        /// close: the model stopped declaring it, so no `on_close` Msg —
-        /// the model already knows).
-        fn closeWindowSlot(self: *Self, runtime: *Runtime, index: usize) void {
-            const window_id = self.window_slots[index].window_id;
+        /// Close the slot's runtime window, then remove the slot (the
+        /// reconcile close: the model stopped declaring it, so no
+        /// `on_close` Msg — the model already knows). Returns whether the
+        /// slot was removed. If the platform refuses the close, the
+        /// runtime keeps the window open with its retained layout, which
+        /// can point into the slot's arenas, so the slot stays as it is
+        /// and the next reconcile tries again.
+        fn closeWindowSlot(self: *Self, runtime: *Runtime, index: usize) bool {
+            runtime.closeWindow(self.window_slots[index].window_id) catch |err| {
+                ui_app_log.warn("declared window '{s}' close failed: {s}; it stays open and the next rebuild retries the close", .{ self.window_slots[index].label(), @errorName(err) });
+                return false;
+            };
             const last = self.window_slot_count - 1;
             var removed = self.window_slots[index];
             self.window_slots[index] = self.window_slots[last];
@@ -1880,9 +2023,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.window_slot_count = last;
             removed.arenas[0].deinit();
             removed.arenas[1].deinit();
-            runtime.closeWindow(window_id) catch |err| {
-                ui_app_log.warn("declared window close failed: {s}", .{@errorName(err)});
-            };
+            return true;
         }
 
         /// Drop a slot whose runtime window is ALREADY gone (the user
@@ -1910,8 +2051,48 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
         }
 
+        /// After a model change: rebuild each installed declared window
+        /// whose `window_view_revision` moved; a same-revision window is
+        /// projected through `project_update` when the change came from a
+        /// Msg, and otherwise kept as is. Without `window_view_revision`
+        /// every window rebuilds (`rebuildWindowSlots`).
+        ///
+        /// Independent windows do not wait on each other: a window whose
+        /// projection or rebuild fails is logged and keeps its last tree,
+        /// and the rest still refresh. The failure stays that window's: it
+        /// is not returned into the dispatch of whichever window's event
+        /// triggered the refresh.
+        fn refreshWindowSlots(self: *Self, runtime: *Runtime, msg: ?MsgT) anyerror!void {
+            const window_view_revision = self.options.window_view_revision orelse return self.rebuildWindowSlots(runtime);
+            for (self.window_slots[0..self.window_slot_count]) |*slot| {
+                if (!slot.installed) continue;
+                self.refreshWindowSlot(runtime, slot, window_view_revision, msg) catch |err| {
+                    ui_app_log.warn("declared window '{s}' failed to refresh and keeps its last tree: {s}", .{ slot.label(), @errorName(err) });
+                };
+            }
+        }
+
+        fn refreshWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot, window_view_revision: *const fn (model: *const ModelT, window_label: []const u8) u64, msg: ?MsgT) anyerror!void {
+            if (slot.projected_revision_known and window_view_revision(&self.model, slot.label()) == slot.projected_revision) {
+                const project_update = self.options.project_update orelse return;
+                const event = msg orelse return;
+                if (try project_update(runtime, slot.window_id, slot.canvasLabel(), &self.model, event)) return;
+            }
+            try self.rebuildWindowSlot(runtime, slot);
+        }
+
+        /// Read one declared window's runtime-owned widget state back into
+        /// the model (`window_sync`).
+        fn syncWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) void {
+            const window_sync = self.options.window_sync orelse return;
+            if (slot.tree == null) return;
+            const layout = runtime.canvasWidgetLayout(slot.window_id, slot.canvasLabel()) catch return;
+            window_sync(&self.model, slot.label(), layout);
+        }
+
         fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
             const window_view = self.options.window_view orelse return;
+            self.syncWindowSlot(runtime, slot);
             const tokens = runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot));
             const next_index = slot.arena_index ^ 1;
             _ = slot.arenas[next_index].reset(.retain_capacity);
@@ -1930,12 +2111,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
                 return err;
             };
+            slot.inactive_tree_published = true;
             _ = try runtime.setCanvasWidgetLayout(slot.window_id, slot.canvasLabel(), layout);
             if (slot.installed and self.rebuildEmitsTokens(runtime, slot.window_id, slot.canvasLabel(), tokens)) {
                 _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
             }
             slot.tree = tree;
             slot.arena_index = next_index;
+            slot.inactive_tree_published = false;
+            if (self.options.window_view_revision) |window_view_revision| {
+                slot.projected_revision = window_view_revision(&self.model, slot.label());
+                slot.projected_revision_known = true;
+            }
             // Same close-on-vanish rule as the main canvas rebuild.
             if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
                 self.clearContextMenuFallback();
@@ -2046,7 +2233,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// runtime then regenerates the widget span on internal state
         /// changes while preserving the chrome via
         /// `emitCanvasWidgetDisplayListWithChrome`.
-        fn installChromeDisplayList(self: *Self, runtime: *Runtime, window_id: platform.WindowId, chrome: ChromeOptions, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) anyerror!void {
+        ///
+        /// noinline: its frame is ~1 MiB of display-list scratch, and inlined
+        /// into `rebuild` the Windows stack probe made all of it resident in
+        /// every app, including apps that never declare chrome.
+        noinline fn installChromeDisplayList(self: *Self, runtime: *Runtime, window_id: platform.WindowId, chrome: ChromeOptions, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) anyerror!void {
             var chrome_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
             var chrome_builder = canvas.Builder.init(&chrome_commands);
             try chrome.build(&self.model, &chrome_builder, self.canvas_size, tokens);
@@ -2074,9 +2265,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn scheduleAnimations(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
             const animations_fn = self.options.animations orelse return;
             const tree = &(self.tree orelse return);
-            var animations: [canvas_limits.max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined;
-            const count = animations_fn(&self.model, tree, self.frame_timestamp_ns, &animations);
-            _ = try runtime.setCanvasRenderAnimations(window_id, self.options.canvas_label, animations[0..count]);
+            const count = animations_fn(&self.model, tree, self.frame_timestamp_ns, &self.render_animations);
+            _ = try runtime.setCanvasRenderAnimations(window_id, self.options.canvas_label, self.render_animations[0..count]);
         }
 
         /// Re-declare the model-derived layout tweens after a rebuild.
@@ -2649,6 +2839,43 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn eventFn(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(context));
+            self.callback_depth += 1;
+            defer self.leaveCallback();
+            return self.handleEvent(runtime, event_value);
+        }
+
+        fn leaveCallback(self: *Self) void {
+            self.callback_depth -= 1;
+            if (self.callback_depth == 0) self.releaseInactiveTrees();
+        }
+
+        /// Each window rebuilds into one of two arenas and keeps the other
+        /// alive, because a Msg made from the previous tree can still be
+        /// dispatched after a rebuild within the same event. Once the event is
+        /// handled, nothing points into that previous tree, so its arena gives
+        /// its pages back instead of keeping a dead tree resident until the
+        /// next rebuild (a clock's is five pages per window).
+        ///
+        /// Two rules keep this from freeing memory that is still in use.
+        /// It runs only when the outermost app callback returns: a platform
+        /// call inside a rebuild can deliver a nested event (Windows
+        /// `SetFocus` sends WM_KILLFOCUS during autofocus), and the outer
+        /// rebuild is still writing into the arena that looks inactive. And
+        /// it skips an arena whose tree was handed to the runtime by a
+        /// rebuild that then failed: the runtime keeps pointers into it
+        /// (placeholders, immediate commands), so that arena is kept, as
+        /// before this release existed, until the next rebuild replaces it.
+        fn releaseInactiveTrees(self: *Self) void {
+            if (!self.inactive_tree_published) {
+                _ = self.arenas[self.arena_index ^ 1].reset(.free_all);
+            }
+            for (self.window_slots[0..self.window_slot_count]) |*slot| {
+                if (slot.inactive_tree_published) continue;
+                _ = slot.arenas[slot.arena_index ^ 1].reset(.free_all);
+            }
+        }
+
+        fn handleEvent(self: *Self, runtime: *Runtime, event_value: Event) anyerror!void {
             switch (event_value) {
                 .command => |command| {
                     const map = self.options.on_command orelse return;
@@ -2767,6 +2994,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// the runtime, translating each failure into a teaching error
         /// naming the font and what is wrong before propagating it.
         fn registerDeclaredFonts(self: *Self, runtime: *Runtime) anyerror!void {
+            // Every face gets its attempt: one bad file must not leave the
+            // faces after it unregistered. The first failure is returned.
+            var first_failure: ?anyerror = null;
             for (self.options.fonts) |font| {
                 runtime.registerCanvasFont(font.id, font.ttf) catch |err| {
                     switch (err) {
@@ -2803,9 +3033,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             .{ font.name, font.id, @errorName(err) },
                         ),
                     }
-                    return err;
+                    if (first_failure == null) first_failure = err;
                 };
             }
+            if (first_failure) |err| return err;
         }
 
         fn handleFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
@@ -2830,7 +3061,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // every frame.
                 if (!self.fonts_registered) {
                     self.fonts_registered = true;
-                    try registerDeclaredFonts(self, runtime);
+                    // Independent windows install whatever faces loaded:
+                    // each failure was logged by name, and the windows
+                    // whose faces registered must not wait on it.
+                    registerDeclaredFonts(self, runtime) catch |err| {
+                        if (self.options.window_view_revision == null) return err;
+                    };
                 }
                 if (self.options.init_fx) |init_fx| {
                     if (!self.init_fx_ran) {
@@ -2852,9 +3088,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (self.chromeInsetsMsg(runtime, frame_event.window_id)) |msg| {
                     self.applyMsg(msg);
                 }
-                try self.rebuild(runtime, frame_event.window_id);
-                if (self.options.chrome == null) {
-                    _ = try runtime.emitCanvasWidgetDisplayList(frame_event.window_id, self.options.canvas_label, runtime.tokensWithTextMeasure(self.effectiveTokens()));
+                if (self.rebuild(runtime, frame_event.window_id)) |_| {
+                    if (self.options.chrome == null) {
+                        _ = try runtime.emitCanvasWidgetDisplayList(frame_event.window_id, self.options.canvas_label, runtime.tokensWithTextMeasure(self.effectiveTokens()));
+                    }
+                } else |err| {
+                    // With independent windows the main canvas is one
+                    // window among many: it installs without a tree (the
+                    // next rebuild retries it) and the declared windows
+                    // still open. Otherwise its failure is the app's.
+                    if (self.options.window_view_revision == null) return err;
+                    ui_app_log.warn("main canvas '{s}' failed its first build: {s}; declared windows install without it", .{ self.options.canvas_label, @errorName(err) });
+                    self.applyWindows(runtime);
                 }
                 self.installed = true;
                 self.startMarkupWatch(runtime);
@@ -2919,6 +3164,21 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // holds the stale scale (`rebuildEmitsTokens`).
                 slot.pixel_snap_scale = scale;
                 try self.rebuildWindowSlot(runtime, slot);
+            }
+            if (!installing) {
+                // The main canvas's order: the frame's Msg mutates first,
+                // then this frame presents the resulting generation.
+                if (self.options.window_on_frame) |window_on_frame| {
+                    if (runtime.gpuSurfaceFrame(slot.window_id, slot.canvasLabel())) |gpu_frame| {
+                        if (window_on_frame(&self.model, slot.label(), gpu_frame)) |msg| {
+                            try self.dispatch(runtime, frame_event.window_id, msg);
+                            // The Msg may have closed this window or moved
+                            // its slot; present only a window still declared.
+                            const current = self.windowSlotByCanvasLabel(frame_event.label) orelse return;
+                            return self.presentFrame(runtime, frame_event, current.canvasLabel(), installing);
+                        }
+                    } else |_| {}
+                }
             }
             try self.presentFrame(runtime, frame_event, slot.canvasLabel(), installing);
         }
@@ -3470,4 +3730,50 @@ fn effectsMinimizeWindowByLabel(context: *anyopaque, window_label: []const u8) b
     const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
     runtime.minimizeWindow(window_id) catch return false;
     return true;
+}
+
+
+test "extent claims reset released and recycled tables" {
+    const ReviewApp = UiApp(struct {}, enum { noop });
+    const app = try std.testing.allocator.create(ReviewApp);
+    defer std.testing.allocator.destroy(app);
+    // Only fields used by the claim/lookup methods; poison all table bytes.
+    @memset(std.mem.sliceAsBytes(&app.virtual_extent_tables), 0xa5);
+    app.virtual_extent_table_count = 0;
+    app.virtual_window_count = 0;
+    try std.testing.expect(app.virtualExtentTableForId(1) == null);
+    const first = app.claimVirtualExtentTable(1).?;
+    try std.testing.expectEqual(@as(usize, 1), app.virtual_extent_table_count);
+    _ = first.sync(.{.id = 1, .item_count = 1000, .uniform_estimate = 10});
+    first.beginCorrections(2, null);
+    first.recordMeasured(0, 300);
+    first.endCorrections();
+    try std.testing.expect(first.totalExtent() > 10000);
+    try std.testing.expectEqual(first, app.claimVirtualExtentTable(1).?);
+    // Release and claim with both a new and the original list identity.
+    first.reset();
+    for ([_]u64{2,1}) |id| {
+        const table = app.claimVirtualExtentTable(id).?;
+        try std.testing.expectEqual(first, table);
+        _ = table.sync(.{.id = id, .item_count = 3, .uniform_estimate = 7});
+        try std.testing.expectEqual(@as(f32,21), table.totalExtent());
+        try std.testing.expectEqual(@as(usize,0), table.measured_count);
+        try std.testing.expectEqual(@as(f32,0), table.pending_offset_delta);
+        table.reset();
+    }
+    // Fill all slots, with poisoned old measurements, then force recycling.
+    for (0..canvas.max_virtual_windows) |i| {
+        const table = app.claimVirtualExtentTable(@intCast(10+i)).?;
+        _ = table.sync(.{.id = @intCast(10+i), .item_count = 1000, .uniform_estimate = 10});
+        table.beginCorrections(2, null);
+        table.recordMeasured(0, 300);
+        table.endCorrections();
+    }
+    try std.testing.expectEqual(canvas.max_virtual_windows, app.virtual_extent_table_count);
+    const recycled = app.claimVirtualExtentTable(100).?;
+    try std.testing.expectEqual(first, recycled);
+    _ = recycled.sync(.{.id = 100, .item_count = 3, .uniform_estimate = 7});
+    try std.testing.expectEqual(@as(f32,21), recycled.totalExtent());
+    try std.testing.expectEqual(@as(usize,0), recycled.measured_count);
+    try std.testing.expectEqual(@as(f32,0), recycled.pending_offset_delta);
 }

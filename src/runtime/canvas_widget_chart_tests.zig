@@ -247,3 +247,28 @@ test "chart budgets fail loudly by name" {
         harness.runtime.setCanvasWidgetLayout(1, "canvas", point_layout),
     );
 }
+
+test "a display-list refresh nested inside another fails loudly instead of sharing its scratch" {
+    // Every view's refresh shares one Runtime scratch. A refresh started
+    // while another is mid-flight (say, from a text-measurement callback)
+    // would overwrite the outer one's commands, so it must fail by name.
+    const harness = try startChartHarness(&chart_app_state);
+    defer harness.destroy(std.testing.allocator);
+    var values = [_]f32{ 0.2, 0.4, 0.8 };
+    const series = [_]canvas.ChartSeries{.{ .kind = .bar, .values = &values }};
+    const children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .chart,
+        .frame = geometry.RectF.init(10, 10, 200, 60),
+        .chart = .{ .series = &series },
+    }};
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 320, 240), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    harness.runtime.display_list_refresh_active = true;
+    try std.testing.expectError(error.DisplayListRefreshReentered, harness.runtime.emitCanvasWidgetDisplayListWithStoredTokens(1, "canvas"));
+    harness.runtime.display_list_refresh_active = false;
+    _ = try harness.runtime.emitCanvasWidgetDisplayListWithStoredTokens(1, "canvas");
+    try std.testing.expect(!harness.runtime.display_list_refresh_active);
+}
