@@ -543,12 +543,15 @@ struct NativeView {
      * idle law the macOS host enforces). */
     WeaverGpuEmission gpu_emission;
     bool gpu_presented = false;
-    /* The runtime's last present for this surface was pixels (a frame the
-     * GPU path refuses, e.g. a retained tree over an underlay with an
-     * immediate canvas). The window then stays on the software backend:
-     * the frame emission must not flip it back to GPU on renderer
-     * connectivity alone, or a surface whose every frame is pixels would
-     * restyle its window on every frame. A GPU present clears it. */
+    /* The runtime sent pixels while this surface was on the GPU backend:
+     * the GPU path refused its content (e.g. a retained tree over an
+     * underlay with an immediate canvas). The window then stays on the
+     * software backend: the frame emission must not flip it back to GPU on
+     * renderer connectivity alone, or a surface whose every frame is pixels
+     * would restyle its window on every frame. Pixels sent on the software
+     * backend (the renderer was lost) do not set it, so recovery still
+     * promotes. A GPU present clears it. A surface whose content later
+     * becomes GPU-presentable stays on software: correct, at a CPU cost. */
     bool gpu_pixel_presents = false;
     /* One-shot: the next scheduled emission must fire at grid
      * promptness even while minimized. Two producers set it — an input
@@ -6688,7 +6691,7 @@ int native_sdk_windows_present_gpu_surface_pixels(Host *host, uint64_t window_id
         // A GPU surface's window is set up for DirectComposition (not
         // layered, no redirection bitmap), where UpdateLayeredWindow fails
         // with ERROR_INVALID_PARAMETER; pixels need the software backend.
-        view.gpu_pixel_presents = true;
+        if (view.gpu_backend == 2) view.gpu_pixel_presents = true;
         setGpuSurfaceBackend(host, view, 3);
         if (!presentLayeredGpuSurface(host, owner->second, view, rgba8, dirty_left, dirty_top, dirty_right, dirty_bottom, full_update)) return 0;
     } else {
