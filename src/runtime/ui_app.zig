@@ -1321,6 +1321,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return tokens;
         }
 
+        // The next two are noinline because DesignTokens is ~9 KiB and each
+        // by-value hop copies it. Inlined, those copies sat in the frames of
+        // the per-event and per-frame handlers, which the Windows stack
+        // probe touches in full on every entry, though the paths run once
+        // per install, theme change, or opaque clear.
+        noinline fn emitDisplayListWithTokens(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
+            _ = try runtime.emitCanvasWidgetDisplayList(window_id, self.options.canvas_label, runtime.tokensWithTextMeasure(self.effectiveTokens()));
+        }
+
+        noinline fn backgroundColor(self: *const Self) canvas.Color {
+            return self.effectiveTokens().colors.background;
+        }
+
         /// The design tokens for a secondary window's rebuild: the same
         /// app-owned appearance as `effectiveTokens`, restamped with the
         /// SLOT's device scale. Each window snaps hairlines against its
@@ -2905,7 +2918,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     if (changed and self.installed and self.followsSystemAppearance()) {
                         try self.rebuild(runtime, self.canvas_window_id);
                         if (self.options.chrome == null) {
-                            _ = try runtime.emitCanvasWidgetDisplayList(self.canvas_window_id, self.options.canvas_label, runtime.tokensWithTextMeasure(self.effectiveTokens()));
+                            try self.emitDisplayListWithTokens(runtime, self.canvas_window_id);
                         }
                     }
                 },
@@ -3090,7 +3103,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
                 if (self.rebuild(runtime, frame_event.window_id)) |_| {
                     if (self.options.chrome == null) {
-                        _ = try runtime.emitCanvasWidgetDisplayList(frame_event.window_id, self.options.canvas_label, runtime.tokensWithTextMeasure(self.effectiveTokens()));
+                        try self.emitDisplayListWithTokens(runtime, frame_event.window_id);
                     }
                 } else |err| {
                     // With independent windows the main canvas is one
@@ -3200,7 +3213,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const clear_color = if (frame_event.alpha_mode == .premultiplied)
                 canvas.Color.rgba8(0, 0, 0, 0)
             else
-                self.effectiveTokens().colors.background;
+                self.backgroundColor();
             var packet_attempted = false;
             if (!software_backend and services.gpu_surface_hybrid_layers and runtime.canvasViewHasHybridLayers(frame_event.window_id, canvas_label)) {
                 packet_attempted = true;

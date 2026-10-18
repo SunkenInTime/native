@@ -2,8 +2,10 @@
 //! draw commands, real font glyphs, and SVG icons.
 //!
 //! Design constraints:
-//! - std-only and allocation-free: fixed-capacity buffers on the caller's
-//!   stack, no allocator anywhere.
+//! - std-only and fixed-capacity, with no allocator in the API: small
+//!   buffers live on the caller's stack; the ~112 KiB `Rasterizer` is one
+//!   process-wide instance, allocated on the first path (a call that
+//!   cannot have it uses a stack copy).
 //! - Deterministic across platforms: the raster core uses only `+ - * /`
 //!   and `@sqrt` (all IEEE-754 correctly rounded). Round caps/joins and
 //!   arcs are lowered to cubic Beziers via the quarter-circle kappa
@@ -460,10 +462,15 @@ const Edge = struct {
 };
 
 /// Fixed-capacity edge accumulator plus the anti-aliased scanline sweep.
-/// Instantiate on the stack (`var raster: Rasterizer = .{};`); it holds
-/// no pointers and is reusable via `resetEdges`.
+/// It holds no pointers and is reusable via `resetEdges`. At ~112 KiB it
+/// is too big for a stack frame on a per-frame path (the Windows stack
+/// probe touches every page of a frame on entry): `fillPath` and
+/// `strokePath` share one heap instance (`SharedRasterizer`), where only
+/// the edges and row pixels a path writes ever become resident.
 pub const Rasterizer = struct {
     edges: [max_edges]Edge = undefined,
+    /// One pixel row of coverage for `sweep`.
+    row: [max_raster_width]f32 = undefined,
     edge_count: usize = 0,
     min_x: f32 = 0,
     min_y: f32 = 0,
@@ -521,7 +528,7 @@ pub const Rasterizer = struct {
     /// Sweep the accumulated edges, emitting `sink.pixel(x, y, coverage)`
     /// for every pixel inside `clip` with coverage > 0. Coverage is in
     /// (0, 1]; `sub_samples` vertical subsamples, exact horizontal spans.
-    pub fn sweep(self: *const Rasterizer, rule: FillRule, clip: ClipRect, sink: anytype) Error!void {
+    pub fn sweep(self: *Rasterizer, rule: FillRule, clip: ClipRect, sink: anytype) Error!void {
         if (self.edge_count == 0) return;
         const y_begin = @max(clip.y0, floorI(self.min_y));
         const y_end = @min(clip.y1, ceilI(self.max_y));
@@ -533,7 +540,7 @@ pub const Rasterizer = struct {
 
         const x_origin = @as(f32, @floatFromInt(x_begin));
         const weight = 1.0 / @as(f32, @floatFromInt(sub_samples));
-        var row: [max_raster_width]f32 = undefined;
+        const row = &self.row;
 
         var y = y_begin;
         while (y < y_end) : (y += 1) {
@@ -643,10 +650,61 @@ pub fn fillPath(
     clip: ClipRect,
     sink: anytype,
 ) Error!void {
+    const raster = shared_rasterizer.claim() orelse
+        return fillPathOwnRasterizer(elements, transform, rule, tolerance, clip, sink);
+    defer shared_rasterizer.release();
+    try accumulateFillEdges(raster, elements, transform, tolerance);
+    try raster.sweep(rule, clip, sink);
+}
+
+noinline fn fillPathOwnRasterizer(
+    elements: []const PathElement,
+    transform: Affine,
+    rule: FillRule,
+    tolerance: f32,
+    clip: ClipRect,
+    sink: anytype,
+) Error!void {
     var raster: Rasterizer = .{};
     try accumulateFillEdges(&raster, elements, transform, tolerance);
     try raster.sweep(rule, clip, sink);
 }
+
+/// The one process-wide Rasterizer behind `fillPath` and `strokePath`.
+/// It is not per-thread: a thread that exits leaves nothing behind, and
+/// the cost stays one ~112 KiB allocation (resident only where a path
+/// writes) however many threads rasterize. A call that cannot have it
+/// (another thread or an enclosing sink holds it, or allocating it failed)
+/// rasterizes on its own stack instead, which is how every call worked
+/// before: slower to enter, same pixels, never an error of its own.
+const SharedRasterizer = struct {
+    claimed: std.atomic.Value(bool) = .init(false),
+    instance: ?*Rasterizer = null,
+    /// Where `instance` comes from. Tests swap in a failing or counting
+    /// allocator.
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+
+    /// The shared Rasterizer with its edges reset, or null when the caller
+    /// should use its own. Pair a non-null result with `release`.
+    fn claim(self: *SharedRasterizer) ?*Rasterizer {
+        if (self.claimed.swap(true, .acquire)) return null;
+        // Only the claimant reads or writes `instance`. No field defaults
+        // are applied, so creating it writes none of its pages;
+        // `resetEdges` is all the state a sweep reads before writing.
+        if (self.instance == null) self.instance = self.allocator.create(Rasterizer) catch null;
+        const raster = self.instance orelse {
+            self.claimed.store(false, .release);
+            return null;
+        };
+        raster.resetEdges();
+        return raster;
+    }
+
+    fn release(self: *SharedRasterizer) void {
+        self.claimed.store(false, .release);
+    }
+};
+var shared_rasterizer: SharedRasterizer = .{};
 
 /// Accumulate a filled path's edges into an existing rasterizer (lets a
 /// caller union several paths — e.g. all glyph contours of one text run —
@@ -699,6 +757,21 @@ pub fn strokePath(
     sink: anytype,
 ) Error!void {
     if (!(style.width > 0)) return;
+    const raster = shared_rasterizer.claim() orelse
+        return strokePathOwnRasterizer(elements, transform, style, tolerance, clip, sink);
+    defer shared_rasterizer.release();
+    try accumulateStrokeEdges(raster, elements, transform, style, tolerance);
+    try raster.sweep(.nonzero, clip, sink);
+}
+
+noinline fn strokePathOwnRasterizer(
+    elements: []const PathElement,
+    transform: Affine,
+    style: StrokeStyle,
+    tolerance: f32,
+    clip: ClipRect,
+    sink: anytype,
+) Error!void {
     var raster: Rasterizer = .{};
     try accumulateStrokeEdges(&raster, elements, transform, style, tolerance);
     try raster.sweep(.nonzero, clip, sink);
@@ -916,4 +989,104 @@ fn emitDisc(raster: *Rasterizer, center: PointF, radius: f32, tolerance: f32) Er
     // drop it to avoid a zero-length edge.
     if (count > 1) count -= 1;
     try raster.addPolygon(points[0..count]);
+}
+
+
+// ---------------------------------------------------------------------------
+// Shared rasterizer
+// ---------------------------------------------------------------------------
+
+const TestGrid = struct {
+    coverage: [16 * 16]f32 = @splat(0),
+
+    pub fn pixel(self: *TestGrid, x: i32, y: i32, value: f32) void {
+        if (x < 0 or y < 0 or x >= 16 or y >= 16) return;
+        self.coverage[@as(usize, @intCast(y)) * 16 + @as(usize, @intCast(x))] = value;
+    }
+};
+
+const test_clip: ClipRect = .{ .x0 = 0, .y0 = 0, .x1 = 16, .y1 = 16 };
+
+fn testShape() !PathBuilder(8) {
+    var builder = PathBuilder(8){};
+    try builder.moveTo(PointF.init(1.5, 1.25));
+    try builder.lineTo(PointF.init(9.5, 2));
+    try builder.lineTo(PointF.init(6, 11.75));
+    try builder.close();
+    return builder;
+}
+
+/// Fill then stroke the test shape into one grid.
+fn drawTestShape(grid: *TestGrid) !void {
+    const shape = try testShape();
+    try fillPath(shape.slice(), Affine.identity(), .nonzero, default_tolerance, test_clip, grid);
+    try strokePath(shape.slice(), Affine.identity(), .{ .width = 1.5 }, default_tolerance, test_clip, grid);
+}
+
+/// The same drawing on a Rasterizer of the test's own, the reference.
+fn drawTestShapeOwnRasterizer(grid: *TestGrid) !void {
+    const shape = try testShape();
+    try fillPathOwnRasterizer(shape.slice(), Affine.identity(), .nonzero, default_tolerance, test_clip, grid);
+    try strokePathOwnRasterizer(shape.slice(), Affine.identity(), .{ .width = 1.5 }, default_tolerance, test_clip, grid);
+}
+
+test "a path still draws when the shared rasterizer cannot be allocated" {
+    const saved = shared_rasterizer;
+    defer shared_rasterizer = saved;
+    var failing = std.testing.FailingAllocator.init(std.heap.page_allocator, .{ .fail_index = 0 });
+    shared_rasterizer = .{ .allocator = failing.allocator() };
+
+    var expected = TestGrid{};
+    try drawTestShapeOwnRasterizer(&expected);
+    var grid = TestGrid{};
+    try drawTestShape(&grid);
+
+    try std.testing.expectEqualSlices(f32, &expected.coverage, &grid.coverage);
+    try std.testing.expect(failing.allocations == 0);
+    try std.testing.expect(shared_rasterizer.instance == null);
+    try std.testing.expect(!shared_rasterizer.claimed.load(.acquire));
+}
+
+test "threads that rasterize share one rasterizer and leave none behind" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const saved = shared_rasterizer;
+    defer shared_rasterizer = saved;
+    var counting = std.testing.FailingAllocator.init(std.heap.page_allocator, .{});
+    shared_rasterizer = .{ .allocator = counting.allocator() };
+    defer if (shared_rasterizer.instance) |raster| counting.allocator().destroy(raster);
+
+    var expected = TestGrid{};
+    try drawTestShapeOwnRasterizer(&expected);
+    var main_grid = TestGrid{};
+    try drawTestShape(&main_grid);
+    try std.testing.expectEqualSlices(f32, &expected.coverage, &main_grid.coverage);
+
+    const Worker = struct {
+        fn run(grid: *TestGrid, ok: *bool) void {
+            drawTestShape(grid) catch return;
+            ok.* = true;
+        }
+    };
+    var grids: [8]TestGrid = @splat(.{});
+    var ok: [8]bool = @splat(false);
+    var threads: [8]std.Thread = undefined;
+    var started: usize = 0;
+    {
+        // Join whatever started, even if a later spawn fails, before the
+        // cleanup above frees the rasterizer the workers draw with.
+        defer for (threads[0..started]) |thread| thread.join();
+        for (&threads, &grids, &ok) |*thread, *grid, *done| {
+            thread.* = try std.Thread.spawn(.{}, Worker.run, .{ grid, done });
+            started += 1;
+        }
+    }
+
+    for (grids, ok) |grid, done| {
+        try std.testing.expect(done);
+        try std.testing.expectEqualSlices(f32, &expected.coverage, &grid.coverage);
+    }
+    // One allocation for the process, however many threads drew: nothing
+    // is left behind by the threads that exited.
+    try std.testing.expectEqual(@as(usize, 1), counting.allocations);
+    try std.testing.expect(!shared_rasterizer.claimed.load(.acquire));
 }

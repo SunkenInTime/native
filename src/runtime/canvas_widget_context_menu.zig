@@ -240,7 +240,10 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             }
         }
 
-        fn applyDefaultEditAction(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, target_id: canvas.ObjectId, item_id: u32) anyerror!void {
+        // noinline: the paste arm's clipboard buffer (64 KiB) would
+        // otherwise be inlined into the runtime's per-event dispatcher,
+        // whose frame the Windows stack probe touches on every event.
+        noinline fn applyDefaultEditAction(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, target_id: canvas.ObjectId, item_id: u32) anyerror!void {
             switch (item_id) {
                 default_item_copy => {
                     const text = editableSelectionText(self, view_index, target_id) orelse return;
