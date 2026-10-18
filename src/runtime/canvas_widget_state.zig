@@ -53,7 +53,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const previous_layout = self.views[index].widgetLayoutTree();
             const source_semantics = try layout.collectSemantics(&self.canvas_widget_source_semantics_scratch);
             const reconciled_nodes = &self.canvas_widget_reconcile_nodes;
-            const tokens = self.views[index].widget_tokens;
+            const tokens = self.views[index].widget_tokens.*;
             // Reconcile scratch lives on the Runtime, not the stack: at
             // the 1024-node budget these arrays total several hundred
             // KiB, and the single-threaded event loop makes the shared
@@ -112,10 +112,11 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const disclosure_plan = planCanvasWidgetDisclosureTween(self, index, previous_layout, reconciled_layout);
             const previous_cursor = self.views[index].canvas_widget_cursor;
             const previous_widget_revision = self.views[index].widget_revision;
+            try self.views[index].reserveCanvasWidgetSourceMirrors(layout);
             try self.views[index].copyWidgetLayoutTree(reconciled_layout, &self.canvas_widget_copy_scratch);
             try self.views[index].copyCanvasWidgetSourceText(layout);
-            self.views[index].copyCanvasWidgetSourceScroll(layout);
-            self.views[index].copyCanvasWidgetSourceControls(layout);
+            try self.views[index].copyCanvasWidgetSourceScroll(layout);
+            try self.views[index].copyCanvasWidgetSourceControls(layout);
             // Push the reconciled regions (frames, content extents,
             // diverged offsets) to the native scroll drivers.
             ScrollDriverMethods(Runtime).syncCanvasWidgetScrollDriversForView(self, index);
@@ -461,7 +462,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         /// the reconciled tree is retained.
         fn planCanvasWidgetDisclosureTween(self: *Runtime, view_index: usize, previous: canvas.WidgetLayoutTree, next: canvas.WidgetLayoutTree) CanvasWidgetDisclosurePlan {
             var plan = CanvasWidgetDisclosurePlan{};
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             const was_active = view.canvas_widget_disclosure_tween.active;
             const retire_or_none: CanvasWidgetDisclosureAction = if (was_active) .retire else .none;
 
@@ -559,7 +560,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         /// every rebuild — applied or ignored, a note never outlives
         /// the rebuild that had the chance to animate it.
         fn applyCanvasWidgetDisclosureTweenPlan(self: *Runtime, view_index: usize, plan: CanvasWidgetDisclosurePlan) anyerror!void {
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             view.canvas_widget_disclosure_pending_count = 0;
             switch (plan.action) {
                 .none => {},
@@ -573,11 +574,11 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                         .spring = view.widget_tokens.motion.spring,
                     };
                     const tween = &view.canvas_widget_disclosure_tween;
-                    @memcpy(tween.revealing_ids[0..plan.revealing_id_count], plan.revealing_ids[0..plan.revealing_id_count]);
+                    @memcpy(view.canvas_widget_disclosure_revealing_ids[0..plan.revealing_id_count], plan.revealing_ids[0..plan.revealing_id_count]);
                     tween.revealing_id_count = plan.revealing_id_count;
-                    @memcpy(tween.moves[0..plan.move_count], plan.moves[0..plan.move_count]);
+                    @memcpy(view.canvas_widget_disclosure_moves[0..plan.move_count], plan.moves[0..plan.move_count]);
                     tween.move_count = plan.move_count;
-                    for (tween.moves[0..tween.move_count]) |move| {
+                    for (view.canvas_widget_disclosure_moves[0..tween.move_count]) |move| {
                         if (move.node_index >= view.widget_layout_node_count) continue;
                         const node = &view.widget_layout_nodes[move.node_index];
                         node.frame.y = move.from_y;
@@ -599,10 +600,10 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         /// the user never sees the one-frame pop, and the clock keeps
         /// running.
         fn refreshCanvasWidgetDisclosurePose(self: *Runtime, view_index: usize) anyerror!void {
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             const tween = &view.canvas_widget_disclosure_tween;
             var moved = false;
-            for (tween.moves[0..tween.move_count]) |*move| {
+            for (view.canvas_widget_disclosure_moves[0..tween.move_count]) |*move| {
                 if (move.node_index >= view.widget_layout_node_count) continue;
                 const node = &view.widget_layout_nodes[move.node_index];
                 move.to_y = node.frame.y;
@@ -635,7 +636,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         pub fn advanceCanvasWidgetDisclosureTweenForFrame(self: *Runtime, view_index: usize, timestamp_ns: u64) anyerror!void {
             if (view_index >= self.view_count) return;
             if (self.views[view_index].kind != .gpu_surface) return;
-            const view = &self.views[view_index];
+            const view = self.views[view_index];
             if (!view.canvas_widget_disclosure_tween.active) return;
             const tween = &view.canvas_widget_disclosure_tween;
 
@@ -650,7 +651,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             tween.progress = progress;
 
             var dirty: ?geometry.RectF = null;
-            for (tween.moves[0..tween.move_count]) |move| {
+            for (view.canvas_widget_disclosure_moves[0..tween.move_count]) |move| {
                 if (move.node_index >= view.widget_layout_node_count) continue;
                 const node = &view.widget_layout_nodes[move.node_index];
                 const y = if (done) move.to_y else move.from_y + (move.to_y - move.from_y) * progress;
@@ -754,8 +755,8 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             try validateViewLabel(label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-            if (std.meta.eql(self.views[index].widget_tokens, tokens)) return self.views[index].info();
-            self.views[index].widget_tokens = tokens;
+            if (std.meta.eql(self.views[index].widget_tokens.*, tokens)) return self.views[index].info();
+            self.views[index].widget_tokens = self.swapWidgetTokens(self.views[index].widget_tokens, tokens);
             self.views[index].widget_revision += 1;
             if (self.views[index].canvas_display_list_widget_owned) {
                 _ = try CanvasWidgetDisplayMethods(Runtime).refreshCanvasWidgetDisplayList(self, index);
@@ -768,7 +769,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             try validateViewLabel(label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-            return self.views[index].widget_tokens;
+            return self.views[index].widget_tokens.*;
         }
 
         pub fn canvasWidgetTextGeometry(self: *const Runtime, window_id: platform.WindowId, label: []const u8, id: canvas.ObjectId) anyerror!canvas.WidgetTextGeometry {
@@ -779,7 +780,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             const node = self.views[index].widgetLayoutTree().findById(id) orelse return error.InvalidCommand;
             if (!canvasWidgetEditableTextKind(node.widget.kind)) return error.InvalidCommand;
-            return canvas.textGeometryForWidget(node.widget, self.views[index].widget_tokens);
+            return canvas.textGeometryForWidget(node.widget, self.views[index].widget_tokens.*);
         }
 
         pub fn editCanvasWidgetText(self: *Runtime, window_id: platform.WindowId, label: []const u8, id: canvas.ObjectId, edit: canvas.TextInputEvent) anyerror!platform.ViewInfo {
@@ -839,7 +840,7 @@ fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {
 }
 
 fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
-    for (self.views[0..self.view_count], 0..) |*view, index| {
+    for (self.views[0..self.view_count], 0..) |view, index| {
         if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
     }
     return null;

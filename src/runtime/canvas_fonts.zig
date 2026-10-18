@@ -100,8 +100,9 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
             if (self.canvas_font_count >= max_registered_canvas_fonts) return error.FontRegistryFull;
 
             const index = self.canvas_font_count;
-            const pooled = self.canvas_font_bytes[index][0..ttf.len];
-            @memcpy(pooled, ttf);
+            const pooled = try std.heap.page_allocator.dupe(u8, ttf);
+            var committed = false;
+            defer if (!committed) std.heap.page_allocator.free(pooled);
             const face = canvas.font_ttf.Face.parse(pooled) catch return error.FontParseFailed;
 
             // Host sync BEFORE committing the slot: platforms with
@@ -119,6 +120,8 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
                 else => return err,
             };
 
+            self.canvas_font_bytes[index] = pooled;
+            committed = true;
             self.canvas_font_faces[index] = face;
             self.canvas_font_entries[index] = .{ .id = id, .byte_len = ttf.len };
             self.canvas_font_count = index + 1;
@@ -218,7 +221,7 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
             // cached advance batch and retained wrap result.
             canvas.bumpTextMeasureGeneration();
             const frame_methods = canvas_frame_module.RuntimeCanvasFrames(Runtime);
-            for (self.views[0..self.view_count], 0..) |*view, index| {
+            for (self.views[0..self.view_count], 0..) |view, index| {
                 if (!view.open or view.kind != .gpu_surface) continue;
                 view.presented_canvas_valid = false;
                 self.invalidateFor(.state, view.frame);

@@ -251,7 +251,7 @@ test "runtime dispatches canvas widget scroll events for wheel and kinetic scrol
     // The wheel left momentum; the first frame after input skips the
     // kinetic step (pending-input frame), the second one steps it and
     // delivers a fresh event with the advanced offset.
-    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].velocity > 0);
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states.slice()[0].velocity > 0);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
         .window_id = 1,
         .label = "canvas",
@@ -398,7 +398,7 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     }
     try std.testing.expect(saw_scrolled_button);
 
-    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].velocity > 0);
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states.slice()[0].velocity > 0);
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
     harness.null_platform.gpu_surface_frame_request_count = 0;
@@ -439,7 +439,7 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     try std.testing.expectApproxEqAbs(@as(f32, -47.04), kinetic_layout.nodes[1].frame.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, -3.04), kinetic_layout.nodes[2].frame.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 40.96), kinetic_layout.nodes[3].frame.y, 0.01);
-    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].velocity > 0);
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states.slice()[0].velocity > 0);
 
     const kinetic_display_list = try harness.runtime.canvasDisplayList(1, "canvas");
     var saw_kinetic_scrolled_button = false;
@@ -469,7 +469,7 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     try std.testing.expectApproxEqAbs(@as(f32, -48), kinetic_layout.nodes[1].frame.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, -4), kinetic_layout.nodes[2].frame.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 40), kinetic_layout.nodes[3].frame.y, 0.01);
-    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states.slice()[0].velocity);
 
     var settle_frame: usize = 0;
     while (settle_frame < 48) : (settle_frame += 1) {
@@ -477,7 +477,7 @@ test "runtime wheel input scrolls retained canvas scroll views" {
         harness.runtime.dirty_region_count = 0;
         _ = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
         kinetic_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
-        if (@abs(kinetic_layout.nodes[0].widget.value - 48) <= 0.01 and harness.runtime.views[0].widget_scroll_states[0].velocity == 0) break;
+        if (@abs(kinetic_layout.nodes[0].widget.value - 48) <= 0.01 and harness.runtime.views[0].widget_scroll_states.slice()[0].velocity == 0) break;
     }
 
     try std.testing.expect(settle_frame < 48);
@@ -485,7 +485,7 @@ test "runtime wheel input scrolls retained canvas scroll views" {
     try std.testing.expectApproxEqAbs(@as(f32, -48), kinetic_layout.nodes[1].frame.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, -4), kinetic_layout.nodes[2].frame.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 40), kinetic_layout.nodes[3].frame.y, 0.01);
-    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states.slice()[0].velocity);
 
     const settled_revision = harness.runtime.views[0].widget_revision;
     harness.runtime.invalidated = false;
@@ -745,13 +745,13 @@ test "runtime applies stored design token scroll physics" {
     var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqual(@as(f32, 20), retained.nodes[0].widget.value);
     try std.testing.expectEqual(@as(f32, -20), retained.nodes[1].frame.y);
-    try std.testing.expectEqual(@as(f32, 80), harness.runtime.views[0].widget_scroll_states[0].velocity);
+    try std.testing.expectEqual(@as(f32, 80), harness.runtime.views[0].widget_scroll_states.slice()[0].velocity);
 
     _ = try harness.runtime.stepCanvasWidgetKineticScroll(1, "canvas", 16);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectApproxEqAbs(@as(f32, 21.28), retained.nodes[0].widget.value, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, -21.28), retained.nodes[1].frame.y, 0.001);
-    try std.testing.expectEqual(@as(f32, 80), harness.runtime.views[0].widget_scroll_states[0].velocity);
+    try std.testing.expectEqual(@as(f32, 80), harness.runtime.views[0].widget_scroll_states.slice()[0].velocity);
 }
 
 test "runtime refreshes hovered canvas widget after scroll clipping" {
@@ -959,7 +959,7 @@ test "runtime clears focused canvas widget after kinetic scroll clipping" {
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
     try harness.runtime.focusView(1, "canvas");
     harness.runtime.views[0].canvas_widget_focused_id = 2;
-    harness.runtime.views[0].widget_scroll_states[0].velocity = 2500;
+    harness.runtime.views[0].widget_scroll_states.sliceMut()[0].velocity = 2500;
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
 
     harness.runtime.invalidated = false;
@@ -1129,7 +1129,7 @@ test "runtime reconciles canvas widget scroll momentum across layout replacement
         .y = 20,
         .delta_y = 24,
     } });
-    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].velocity > 0);
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states.slice()[0].velocity > 0);
 
     const scrolled = try harness.runtime.canvasWidgetLayout(1, "canvas");
     const current_offset = scrolled.findById(1).?.widget.value;
@@ -1152,7 +1152,7 @@ test "runtime reconciles canvas widget scroll momentum across layout replacement
 
     const refreshed = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqual(@as(f32, 24), refreshed.findById(1).?.widget.value);
-    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[2].velocity > 0);
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states.slice()[2].velocity > 0);
 
     harness.runtime.invalidated = false;
     harness.runtime.dirty_region_count = 0;
@@ -1225,8 +1225,8 @@ test "runtime clamps canvas scroll offset after layout replacement shrinks conte
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
     try std.testing.expectEqual(@as(f32, 0), retained.findById(2).?.frame.y);
-    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].offset);
-    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states.slice()[0].offset);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states.slice()[0].velocity);
 
     const snapshot = harness.runtime.automationSnapshot("Widgets");
     try std.testing.expectEqual(@as(usize, 2), snapshot.widgets.len);
@@ -1324,8 +1324,8 @@ test "runtime chains wheel input from saturated nested canvas scroll views" {
     try std.testing.expectEqualDeep(geometry.RectF.init(0, -60, 180, 32), retained.nodes[2].frame);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, -16, 180, 32), retained.nodes[3].frame);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 96, 180, 32), retained.nodes[4].frame);
-    try std.testing.expect(harness.runtime.views[0].widget_scroll_states[0].velocity > 0);
-    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[1].velocity);
+    try std.testing.expect(harness.runtime.views[0].widget_scroll_states.slice()[0].velocity > 0);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states.slice()[1].velocity);
 }
 
 test "runtime leaves virtualized canvas scroll views app driven" {

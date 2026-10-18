@@ -633,7 +633,7 @@ fn setFocusedView(self: anytype, window_id: platform.WindowId, label: []const u8
     if (runtimeFindWindowIndexById(self, window_id)) |window_index| {
         self.windows[window_index].main_focused = std.mem.eql(u8, label, "main");
     }
-    for (self.views[0..self.view_count], 0..) |*view, view_index| {
+    for (self.views[0..self.view_count], 0..) |view, view_index| {
         if (view.window_id != window_id) continue;
         const previous_state = view.canvasWidgetRenderState();
         view.focused = std.mem.eql(u8, view.label, label);
@@ -655,7 +655,7 @@ fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {
 }
 
 fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
-    for (self.views[0..self.view_count], 0..) |*view, index| {
+    for (self.views[0..self.view_count], 0..) |view, index| {
         if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
     }
     return null;

@@ -8,6 +8,7 @@ const platform = @import("../platform/root.zig");
 
 const validateWindowFrame = validation.validateWindowFrame;
 const WindowSourcePolicy = runtime_state.WindowSourcePolicy;
+const RuntimeWindow = runtime_state.RuntimeWindow;
 const copySourceInto = runtime_state.copySourceInto;
 const RuntimeShellLayout = shell_layout.RuntimeShellLayout;
 const combinedViewportInsets = shell_layout.combinedViewportInsets;
@@ -90,7 +91,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             if (self.window_count >= platform.max_windows) return error.WindowLimitReached;
             if (label.len == 0) return error.InvalidWindowOptions;
             const index = self.window_count;
-            self.windows[index] = .{};
+            resetWindowSlot(&self.windows[index]);
             const copied_label = try copyInto(&self.windows[index].label_storage, label);
             const copied_title = try copyInto(&self.windows[index].title_storage, title);
             self.windows[index].info = .{
@@ -111,6 +112,18 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             self.window_count += 1;
             self.next_window_id = @max(self.next_window_id, id + 1);
             return index;
+        }
+
+        /// `self.windows[index] = .{}` copies RuntimeWindow's whole default
+        /// image, 76 KiB of it the undefined label, title and source
+        /// buffers, and makes every page resident in every window. Set the
+        /// fields one at a time and leave the `_storage` buffers untouched:
+        /// each is written by the copy that fills it.
+        fn resetWindowSlot(window: *RuntimeWindow) void {
+            inline for (std.meta.fields(RuntimeWindow)) |field| {
+                if (comptime std.mem.endsWith(u8, field.name, "_storage")) continue;
+                @field(window, field.name) = field.defaultValue().?;
+            }
         }
 
         pub fn removeWindowAt(self: *Runtime, index: usize) void {

@@ -114,6 +114,10 @@ const Fixture = struct {
     app: core.App,
 
     fn create() !Fixture {
+        return createWithWindowView(panelWindowView);
+    }
+
+    fn createWithWindowView(window_view: @FieldType(PanelApp.Options, "window_view")) !Fixture {
         const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
         errdefer harness.destroy(std.testing.allocator);
         harness.null_platform.gpu_surfaces = true;
@@ -126,7 +130,7 @@ const Fixture = struct {
             .view_revision = panelViewRevision,
             .project_update = projectPanelUpdate,
             .windows_fn = panelWindows,
-            .window_view = panelWindowView,
+            .window_view = window_view,
         });
         const app = app_state.app();
         try harness.start(app);
@@ -305,6 +309,63 @@ test "a model that keeps declaring the window vetoes the user close (source wins
     try std.testing.expect(fixture.app_state.model.settings_open);
     const reopened = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
     try std.testing.expect(reopened.open);
+}
+
+/// The settings view with a placeholder formatted into the window's tree
+/// arena. The runtime's retained layout keeps pointing at placeholder
+/// bytes, so reading it shows whether that arena is still alive.
+fn placeholderWindowView(ui: *PanelApp.Ui, model: *const PanelModel, window_label: []const u8) PanelApp.Ui.Node {
+    std.debug.assert(std.mem.eql(u8, window_label, settings_window_label));
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.button(.{ .on_press = .bump }, "Bump"),
+        ui.textField(.{ .placeholder = ui.fmt("Search {d} settings", .{model.bumps + 12}) }),
+    });
+}
+
+fn denyCloseWindow(context: ?*anyopaque, window_id: support.platform.WindowId) anyerror!void {
+    _ = context;
+    _ = window_id;
+    return error.CloseDenied;
+}
+
+test "a declared window whose platform close fails keeps its slot and its tree" {
+    if (comptime support.platform.max_windows < 2) return error.SkipZigTest;
+
+    const fixture = try Fixture.createWithWindowView(placeholderWindowView);
+    defer fixture.destroy();
+
+    try fixture.clickSettingsButton();
+    const info = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+    try fixture.installSettingsCanvas(info.id);
+
+    // The model stops declaring the window, but the platform refuses to
+    // close it. The runtime keeps the window open with its layout, so
+    // the app has to keep the slot and the arenas that layout reads.
+    const services = &fixture.harness.runtime.options.platform.services;
+    const close_window_fn = services.close_window_fn;
+    services.close_window_fn = denyCloseWindow;
+    try fixture.clickSettingsButton();
+    try std.testing.expect(!fixture.app_state.model.settings_open);
+    const still_open = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(still_open.open);
+    try std.testing.expectEqual(@as(usize, 1), fixture.app_state.window_slot_count);
+    try std.testing.expectEqual(info.id, fixture.app_state.window_slots[0].window_id);
+
+    var placeholder: ?[]const u8 = null;
+    for (try fixture.harness.runtime.canvasWidgetSemantics(info.id, settings_canvas_label)) |node| {
+        if (node.placeholder.len > 0) placeholder = node.placeholder;
+    }
+    try std.testing.expectEqualStrings("Search 12 settings", placeholder.?);
+    const tokens = fixture.harness.runtime.tokensWithTextMeasure(fixture.app_state.effectiveTokens());
+    _ = try fixture.harness.runtime.emitCanvasWidgetDisplayList(info.id, settings_canvas_label, tokens);
+
+    // Once the platform closes windows again, the next reconcile retries
+    // the close and only then drops the slot.
+    services.close_window_fn = close_window_fn;
+    try fixture.app_state.dispatch(&fixture.harness.runtime, 1, .bump);
+    try std.testing.expectEqual(@as(usize, 0), fixture.app_state.window_slot_count);
+    const closed = fixture.settingsWindowInfo();
+    try std.testing.expect(closed == null or !closed.?.open);
 }
 
 test "input from the secondary window dispatches through its own tree with its window identity" {
@@ -566,4 +627,153 @@ test "window-action effects resolve labels to live windows and drive the real ve
     // main window still answers after the secondary's churn.
     try app_state.dispatch(&harness.runtime, 1, .minimize_main);
     try std.testing.expectEqual(@as(u32, 3), app_state.effects.windowActionState().minimize_count);
+}
+
+// ------------------------------------ re-entrant reconcile fixture
+//
+// A real host delivers window messages synchronously while it creates a
+// window (the Windows host emits frame events from WM_MOVE/WM_SIZE), so
+// a frame Msg dispatches - and rebuilds - before `createWindow` returns.
+// The null platform's create hook replays that ordering.
+
+const ReentryModel = struct {
+    open: bool = false,
+    frames: u32 = 0,
+};
+
+const ReentryMsg = union(enum) {
+    open_window,
+    frame_reported,
+};
+
+const ReentryApp = ui_app_model.UiApp(ReentryModel, ReentryMsg);
+
+/// Counts `windows_fn` calls: each one is a window reconcile that ran.
+var reentry_reconciles: usize = 0;
+
+fn reentryUpdate(model: *ReentryModel, msg: ReentryMsg) void {
+    switch (msg) {
+        .open_window => model.open = true,
+        .frame_reported => model.frames += 1,
+    }
+}
+
+fn reentryView(ui: *ReentryApp.Ui, model: *const ReentryModel) ReentryApp.Ui.Node {
+    _ = model;
+    return ui.text(.{}, "main");
+}
+
+fn reentryWindows(model: *const ReentryModel, scratch: *ReentryApp.WindowsScratch) []const ReentryApp.WindowDescriptor {
+    reentry_reconciles += 1;
+    var count: usize = 0;
+    if (model.open) {
+        scratch.windows[count] = .{
+            .label = settings_window_label,
+            .canvas_label = settings_canvas_label,
+            .width = 320,
+            .height = 240,
+        };
+        count += 1;
+    }
+    return scratch.windows[0..count];
+}
+
+fn reentryWindowView(ui: *ReentryApp.Ui, model: *const ReentryModel, window_label: []const u8) ReentryApp.Ui.Node {
+    _ = model;
+    _ = window_label;
+    return ui.text(.{}, "settings");
+}
+
+fn reentryFrameMap(frame: core.WindowFrameEvent) ?ReentryMsg {
+    _ = frame;
+    return .frame_reported;
+}
+
+const ReentryHook = struct {
+    harness: *core.TestHarness(),
+    app: core.App,
+    creates: usize = 0,
+    nested_reconciles: usize = 0,
+
+    fn run(context: *anyopaque, info: support.platform.WindowInfo) anyerror!void {
+        const self: *ReentryHook = @ptrCast(@alignCast(context));
+        self.creates += 1;
+        const before = reentry_reconciles;
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .window_frame_changed = .{
+            .id = info.id,
+            .label = info.label,
+            .title = info.title,
+            .frame = info.frame,
+            .scale_factor = info.scale_factor,
+            .open = true,
+            .focused = false,
+        } });
+        self.nested_reconciles += reentry_reconciles - before;
+    }
+};
+
+test "a frame Msg dispatched while a declared window is being created does not reconcile again" {
+    if (comptime support.platform.max_windows < 2) return error.SkipZigTest;
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try ReentryApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-window-reentry",
+        .scene = panel_scene,
+        .canvas_label = canvas_label,
+        .update = reentryUpdate,
+        .view = reentryView,
+        .windows_fn = reentryWindows,
+        .window_view = reentryWindowView,
+        .on_window_frame = reentryFrameMap,
+    });
+    defer app_state.destroy();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    var hook: ReentryHook = .{ .harness = harness, .app = app };
+    harness.null_platform.create_window_hook = .{ .context = &hook, .run = ReentryHook.run };
+
+    try app_state.dispatch(&harness.runtime, 1, .open_window);
+
+    // The frame Msg really dispatched from inside the create...
+    try std.testing.expectEqual(@as(usize, 1), hook.creates);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.frames);
+    // ...and its rebuild left the window set to the reconcile already
+    // running: a nested pass would not find the slot yet and try to
+    // create the same label again (DuplicateWindowLabel).
+    try std.testing.expectEqual(@as(usize, 0), hook.nested_reconciles);
+    try std.testing.expectEqual(@as(usize, 1), app_state.window_slot_count);
+
+    // The outer reconcile recorded the window: a later frame Msg finds
+    // it live and creates nothing.
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var settings_windows: usize = 0;
+    var settings_id: support.platform.WindowId = 0;
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (std.mem.eql(u8, info.label, settings_window_label)) {
+            settings_windows += 1;
+            settings_id = info.id;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), settings_windows);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = .{
+        .id = settings_id,
+        .label = settings_window_label,
+        .title = "",
+        .frame = geometry.RectF.init(10, 10, 320, 240),
+        .scale_factor = 2,
+        .open = true,
+        .focused = false,
+    } });
+    try std.testing.expectEqual(@as(u32, 2), app_state.model.frames);
+    try std.testing.expectEqual(@as(usize, 1), hook.creates);
 }

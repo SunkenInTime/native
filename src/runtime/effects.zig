@@ -440,8 +440,9 @@ pub const EffectClipboardResult = struct {
 /// fixed table: they do NOT consume `max_effects` slots or worker
 /// threads (a timer is a platform service arm, not a blocking effect),
 /// and timer keys are their own namespace — an fx timer key never
-/// collides with a spawn/fetch/file key.
-pub const max_effect_timers: usize = 16;
+/// collides with a spawn/fetch/file key. A multi-window widget host runs
+/// one app for every widget window, so the table holds 16 per window.
+pub const max_effect_timers: usize = 16 * platform.max_windows_per_effects_table;
 
 /// Whether an fx timer fires once and retires or keeps firing until
 /// `cancelTimer`.
@@ -1236,6 +1237,29 @@ pub fn Effects(comptime Msg: type) type {
             }
         };
 
+        /// A slot's request bytes and stderr tail: the bulk of a slot
+        /// (13.5 KiB of 13.7). It lives on the heap apart from the slot,
+        /// allocated by the first spawn, fetch or file effect the slot
+        /// accepts and kept for the slot's later effects, so an app that
+        /// never runs one never makes these pages resident, and the 16
+        /// slot headers sit together in about one page. Clipboard
+        /// effects never touch it. Every field is written before it is
+        /// read; the lengths live in `Slot`.
+        const SlotStorage = struct {
+            argv_slices: [max_effect_argv][]const u8,
+            argv_storage: [max_effect_argv_bytes]u8,
+            stdin_storage: [max_effect_stdin_bytes]u8,
+            /// Ring of the child's most recent stderr bytes. Written by
+            /// the stderr reader (worker-side thread in real mode, loop
+            /// thread in fake mode); read only after the child is done.
+            stderr_ring: [max_effect_stderr_tail_bytes]u8,
+            /// A fetch's URL — and a file effect's path (they never
+            /// coexist in one slot; `max_effect_file_path_bytes` fits).
+            url_storage: [max_effect_url_bytes]u8,
+            header_storage: [max_effect_fetch_header_bytes]u8,
+            header_slices: [max_effect_fetch_headers]std.http.Header,
+        };
+
         const Slot = struct {
             state: std.atomic.Value(SlotState) = std.atomic.Value(SlotState).init(.idle),
             generation: u32 = 0,
@@ -1266,10 +1290,10 @@ pub fn Effects(comptime Msg: type) type {
             /// thread in fake mode; never both).
             dropped_pending: u32 = 0,
             dropped_total: u32 = 0,
-            argv_slices: [max_effect_argv][]const u8 = undefined,
+            /// See `SlotStorage`. Set before the slot's first spawn,
+            /// fetch or file effect runs; freed only by `deinit`.
+            storage: ?*SlotStorage = null,
             argv_count: usize = 0,
-            argv_storage: [max_effect_argv_bytes]u8 = undefined,
-            stdin_storage: [max_effect_stdin_bytes]u8 = undefined,
             stdin_len: usize = 0,
             // ---- line-framing fields (.lines spawns, .stream fetches) ----
             /// Effective per-line bound: the default or the accepted
@@ -1289,10 +1313,6 @@ pub fn Effects(comptime Msg: type) type {
             collect_buffer: ?[]u8 = null,
             collect_len: usize = 0,
             collect_truncated: bool = false,
-            /// Ring of the child's most recent stderr bytes. Written by
-            /// the stderr reader (worker-side thread in real mode, loop
-            /// thread in fake mode); read only after the child is done.
-            stderr_ring: [max_effect_stderr_tail_bytes]u8 = undefined,
             /// Total stderr bytes seen; beyond the ring capacity means
             /// the tail is truncated.
             stderr_total: usize = 0,
@@ -1305,12 +1325,7 @@ pub fn Effects(comptime Msg: type) type {
             /// `.buffered` delivers it whole on the terminal entry.
             fetch_response_mode: FetchResponseMode = .buffered,
             method: std.http.Method = .GET,
-            /// A fetch's URL — and a file effect's path (they never
-            /// coexist in one slot; `max_effect_file_path_bytes` fits).
-            url_storage: [max_effect_url_bytes]u8 = undefined,
             url_len: usize = 0,
-            header_storage: [max_effect_fetch_header_bytes]u8 = undefined,
-            header_slices: [max_effect_fetch_headers]std.http.Header = undefined,
             header_count: usize = 0,
             timeout_ms: u32 = default_effect_fetch_timeout_ms,
             /// Heap buffer per accepted fetch: request payload copy
@@ -1334,19 +1349,19 @@ pub fn Effects(comptime Msg: type) type {
             fetch_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
             fn argv(slot: *const Slot) []const []const u8 {
-                return slot.argv_slices[0..slot.argv_count];
+                return slot.storage.?.argv_slices[0..slot.argv_count];
             }
 
             fn stdinBytes(slot: *const Slot) []const u8 {
-                return slot.stdin_storage[0..slot.stdin_len];
+                return slot.storage.?.stdin_storage[0..slot.stdin_len];
             }
 
             fn fetchUrl(slot: *const Slot) []const u8 {
-                return slot.url_storage[0..slot.url_len];
+                return slot.storage.?.url_storage[0..slot.url_len];
             }
 
             fn fetchHeaders(slot: *const Slot) []const std.http.Header {
-                return slot.header_slices[0..slot.header_count];
+                return slot.storage.?.header_slices[0..slot.header_count];
             }
 
             fn fetchPayload(slot: *const Slot) []const u8 {
@@ -1355,7 +1370,7 @@ pub fn Effects(comptime Msg: type) type {
             }
 
             fn filePath(slot: *const Slot) []const u8 {
-                return slot.url_storage[0..slot.url_len];
+                return slot.storage.?.url_storage[0..slot.url_len];
             }
         };
 
@@ -1452,6 +1467,21 @@ pub fn Effects(comptime Msg: type) type {
             return .{ .allocator = allocator };
         }
 
+        /// `init` in place: every field from its default except the two
+        /// rings, which are written before they are read. Returning `Self`
+        /// by value builds all of it, rings included, and copies it, so
+        /// every ring page becomes resident in every app.
+        pub fn initInPlace(self: *Self, allocator: std.mem.Allocator) void {
+            inline for (std.meta.fields(Self)) |field| {
+                if (comptime std.mem.eql(u8, field.name, "queue") or std.mem.eql(u8, field.name, "pending_exits")) continue;
+                if (comptime std.mem.eql(u8, field.name, "allocator")) {
+                    self.allocator = allocator;
+                } else {
+                    @field(self, field.name) = field.defaultValue().?;
+                }
+            }
+        }
+
         /// Kill every running effect, wait for the workers to finish
         /// (draining their final queue posts), and release the executor
         /// io. Bounded: gives up waiting after ~5s.
@@ -1524,6 +1554,10 @@ pub fn Effects(comptime Msg: type) type {
                 if (slot.line_buffer) |buffer| {
                     self.allocator.free(buffer);
                     slot.line_buffer = null;
+                }
+                if (slot.storage) |storage| {
+                    self.allocator.destroy(storage);
+                    slot.storage = null;
                 }
             }
             if (self.drain_fetch_body) |buffer| {
@@ -1718,6 +1752,7 @@ pub fn Effects(comptime Msg: type) type {
             const slot_index = self.findIdleSlot() orelse return self.reject(options);
 
             const slot = &self.slots[slot_index];
+            const storage = self.slotStorage(slot) orelse return self.reject(options);
             slot.generation = self.next_generation;
             self.next_generation +%= 1;
             if (self.next_generation == 0) self.next_generation = 1;
@@ -1738,11 +1773,11 @@ pub fn Effects(comptime Msg: type) type {
             slot.argv_count = options.argv.len;
             var offset: usize = 0;
             for (options.argv, 0..) |arg, index| {
-                @memcpy(slot.argv_storage[offset .. offset + arg.len], arg);
-                slot.argv_slices[index] = slot.argv_storage[offset .. offset + arg.len];
+                @memcpy(storage.argv_storage[offset .. offset + arg.len], arg);
+                storage.argv_slices[index] = storage.argv_storage[offset .. offset + arg.len];
                 offset += arg.len;
             }
-            @memcpy(slot.stdin_storage[0..stdin_bytes.len], stdin_bytes);
+            @memcpy(storage.stdin_storage[0..stdin_bytes.len], stdin_bytes);
             slot.stdin_len = stdin_bytes.len;
             slot.output_mode = options.output;
             slot.collect_len = 0;
@@ -1819,6 +1854,7 @@ pub fn Effects(comptime Msg: type) type {
             const slot_index = self.findIdleSlot() orelse return self.rejectFetch(options);
 
             const slot = &self.slots[slot_index];
+            const storage = self.slotStorage(slot) orelse return self.rejectFetch(options);
             // Stream fetches never buffer a body: the buffer holds only
             // the request payload copy.
             const body_space: usize = if (options.response == .stream) 0 else max_effect_body_bytes;
@@ -1854,17 +1890,17 @@ pub fn Effects(comptime Msg: type) type {
             slot.reaping = false;
             slot.dropped_pending = 0;
             slot.dropped_total = 0;
-            @memcpy(slot.url_storage[0..options.url.len], options.url);
+            @memcpy(storage.url_storage[0..options.url.len], options.url);
             slot.url_len = options.url.len;
             var offset: usize = 0;
             for (options.headers, 0..) |header, index| {
-                @memcpy(slot.header_storage[offset .. offset + header.name.len], header.name);
-                const name = slot.header_storage[offset .. offset + header.name.len];
+                @memcpy(storage.header_storage[offset .. offset + header.name.len], header.name);
+                const name = storage.header_storage[offset .. offset + header.name.len];
                 offset += header.name.len;
-                @memcpy(slot.header_storage[offset .. offset + header.value.len], header.value);
-                const value = slot.header_storage[offset .. offset + header.value.len];
+                @memcpy(storage.header_storage[offset .. offset + header.value.len], header.value);
+                const value = storage.header_storage[offset .. offset + header.value.len];
                 offset += header.value.len;
-                slot.header_slices[index] = .{ .name = name, .value = value };
+                storage.header_slices[index] = .{ .name = name, .value = value };
             }
             slot.header_count = options.headers.len;
             if (slot.fetch_buffer) |old| self.allocator.free(old);
@@ -1927,6 +1963,7 @@ pub fn Effects(comptime Msg: type) type {
             const slot_index = self.findIdleSlot() orelse return self.rejectFile(key, op, on_result);
 
             const slot = &self.slots[slot_index];
+            const storage = self.slotStorage(slot) orelse return self.rejectFile(key, op, on_result);
             // A write's buffer holds its payload copy; a read's holds
             // the content space plus one spare byte that detects
             // over-bound files without a stat round trip.
@@ -1950,7 +1987,7 @@ pub fn Effects(comptime Msg: type) type {
             slot.reaping = false;
             slot.dropped_pending = 0;
             slot.dropped_total = 0;
-            @memcpy(slot.url_storage[0..file_path.len], file_path);
+            @memcpy(storage.url_storage[0..file_path.len], file_path);
             slot.url_len = file_path.len;
             if (slot.line_buffer) |old| {
                 self.allocator.free(old);
@@ -3452,6 +3489,15 @@ pub fn Effects(comptime Msg: type) type {
             return null;
         }
 
+        /// The slot's `SlotStorage`, allocated the first time the slot
+        /// takes a spawn, fetch or file effect. Null only when that
+        /// allocation fails; the caller rejects the effect, the same as
+        /// for its other buffers. Loop-thread only.
+        fn slotStorage(self: *Self, slot: *Slot) ?*SlotStorage {
+            if (slot.storage == null) slot.storage = self.allocator.create(SlotStorage) catch return null;
+            return slot.storage.?;
+        }
+
         /// Free a fetch slot's body and line buffers and return it to
         /// `.idle` (spawn-time failures and fake cancels). Loop-thread
         /// only.
@@ -3619,8 +3665,9 @@ pub fn Effects(comptime Msg: type) type {
         /// `max_effect_stderr_tail_bytes` win). Single-writer, like
         /// `appendCollected`.
         fn appendStderrTail(slot: *Slot, bytes: []const u8) void {
+            const storage = slot.storage.?;
             for (bytes) |byte| {
-                slot.stderr_ring[slot.stderr_total % max_effect_stderr_tail_bytes] = byte;
+                storage.stderr_ring[slot.stderr_total % max_effect_stderr_tail_bytes] = byte;
                 slot.stderr_total += 1;
             }
         }
@@ -3639,9 +3686,10 @@ pub fn Effects(comptime Msg: type) type {
                 slot.stderr_total % max_effect_stderr_tail_bytes
             else
                 0;
+            const storage = slot.storage.?;
             var index: usize = 0;
             while (index < tail_len) : (index += 1) {
-                entry.line_bytes[index] = slot.stderr_ring[(start + index) % max_effect_stderr_tail_bytes];
+                entry.line_bytes[index] = storage.stderr_ring[(start + index) % max_effect_stderr_tail_bytes];
             }
             entry.line_len = @intCast(tail_len);
         }
@@ -4194,4 +4242,234 @@ test "fetch errors map onto the documented taxonomy" {
     try std.testing.expectEqual(EffectFetchOutcome.tls_failed, classifyFetchError(error.TlsInitializationFailed));
     try std.testing.expectEqual(EffectFetchOutcome.rejected, classifyFetchError(error.UnsupportedUriScheme));
     try std.testing.expectEqual(EffectFetchOutcome.protocol_failed, classifyFetchError(error.HttpHeadersInvalid));
+}
+
+test "a slot allocates its request storage with its first spawn, fetch or file effect and keeps it" {
+    const Msg = union(enum) { exit: EffectExit };
+    const Fx = Effects(Msg);
+    const fx = try std.testing.allocator.create(Fx);
+    defer std.testing.allocator.destroy(fx);
+    fx.initInPlace(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    const storedSlots = struct {
+        fn count(effects: *const Fx) usize {
+            var stored: usize = 0;
+            for (&effects.slots) |*slot| {
+                if (slot.storage != null) stored += 1;
+            }
+            return stored;
+        }
+    }.count;
+
+    // An app that runs no effect, or only clipboard effects, holds none.
+    try std.testing.expectEqual(@as(usize, 0), storedSlots(fx));
+    fx.writeClipboard(.{ .key = 1, .text = "copied" });
+    try std.testing.expectEqual(@as(usize, 0), storedSlots(fx));
+    try fx.feedClipboardResult(1, .ok, "");
+    while (fx.takeMsg()) |_| {}
+
+    fx.spawn(.{ .key = 2, .argv = &.{ "echo", "hi" }, .stdin = "in" });
+    try std.testing.expectEqual(@as(usize, 1), storedSlots(fx));
+    const request = fx.pendingSpawnAt(0).?;
+    try std.testing.expectEqualStrings("echo", request.argv[0]);
+    try std.testing.expectEqualStrings("hi", request.argv[1]);
+    try std.testing.expectEqualStrings("in", request.stdin);
+    try fx.feedExit(2, 0);
+    while (fx.takeMsg()) |_| {}
+
+    // The retired slot keeps its storage for the next effect.
+    fx.spawn(.{ .key = 3, .argv = &.{"true"} });
+    try std.testing.expectEqual(@as(usize, 1), storedSlots(fx));
+    try fx.feedExit(3, 0);
+    while (fx.takeMsg()) |_| {}
+}
+
+
+test "slot allocation failures recover, recycle across effect kinds, and deinit twice" {
+    const Msg = union(enum) { exit: EffectExit, response: EffectResponse, file: EffectFileResult };
+    const Fx = Effects(Msg);
+    const H = struct {
+        fn exited(v: EffectExit) Msg { return .{ .exit = v }; }
+        fn response(v: EffectResponse) Msg { return .{ .response = v }; }
+        fn file(v: EffectFileResult) Msg { return .{ .file = v }; }
+        fn start(fx: *Fx, mode: usize) void {
+            switch (mode) {
+                0 => fx.spawn(.{ .key = 1, .argv = &.{"echo", "new"}, .stdin = "stdin", .on_exit = exited }),
+                1 => fx.spawn(.{ .key = 1, .argv = &.{"echo"}, .output = .collect, .on_exit = exited }),
+                2 => fx.spawn(.{ .key = 1, .argv = &.{"echo"}, .max_line_bytes = max_effect_line_bytes + 1, .on_exit = exited }),
+                3 => fx.fetch(.{ .key = 1, .url = "http://localhost/new", .headers = &.{.{.name = "X-Test", .value = "fresh"}}, .body = "body", .on_response = response }),
+                4 => fx.fetch(.{ .key = 1, .url = "http://localhost/stream", .body = "body", .response = .stream, .max_line_bytes = max_effect_line_bytes + 1, .on_response = response }),
+                5 => fx.readFile(.{ .key = 1, .path = "review-new.txt", .on_result = file }),
+                6 => fx.writeFile(.{ .key = 1, .path = "review-new.txt", .bytes = "payload", .on_result = file }),
+                else => unreachable,
+            }
+        }
+        fn rejected(msg: Msg) bool {
+            return switch (msg) { .exit => |v| v.reason == .rejected, .response => |v| v.outcome == .rejected, .file => |v| v.outcome == .rejected };
+        }
+    };
+    const allocations = [_]usize{1,2,2,2,3,2,2};
+    for (allocations, 0..) |count, mode| {
+        for (0..count) |fail_at| {
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{.fail_index = fail_at});
+            const fx = try std.testing.allocator.create(Fx);
+            defer std.testing.allocator.destroy(fx);
+            fx.initInPlace(failing.allocator());
+            defer fx.deinit();
+            fx.executor = .fake;
+            H.start(fx, mode);
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expect(H.rejected(fx.takeMsg().?));
+            try std.testing.expect(fx.takeMsg() == null);
+            try std.testing.expectEqual(Fx.SlotState.idle, fx.slots[0].state.load(.acquire));
+            if (fail_at == 0) try std.testing.expect(fx.slots[0].storage == null);
+            failing.fail_index = std.math.maxInt(usize);
+            H.start(fx, mode);
+            try std.testing.expectEqual(Fx.SlotState.running, fx.slots[0].state.load(.acquire));
+            const storage = fx.slots[0].storage.?;
+            fx.cancel(1);
+            try std.testing.expect(!H.rejected(fx.takeMsg().?));
+            while (fx.takeMsg()) |_| {}
+            // Cycle every kind through the same retained allocation.
+            for (0..allocations.len) |next_mode| {
+                H.start(fx, next_mode);
+                try std.testing.expectEqual(storage, fx.slots[0].storage.?);
+                switch (next_mode) {
+                    0,1,2 => {
+                        try std.testing.expectEqualStrings("echo", fx.pendingSpawnAt(0).?.argv[0]);
+                        if (next_mode == 1) try fx.feedStderr(1, "new stderr");
+                        try fx.feedExit(1, 7);
+                    },
+                    3,4 => {
+                        const request = fx.pendingFetchAt(0).?;
+                        try std.testing.expectEqualStrings("body", request.body);
+                        try fx.feedResponseOutcome(1, .connect_failed, 0, "");
+                    },
+                    5,6 => {
+                        try std.testing.expectEqualStrings("review-new.txt", fx.pendingFileAt(0).?.path);
+                        try fx.feedFileResult(1, .not_found, "");
+                    },
+                    else => unreachable,
+                }
+                try std.testing.expect(fx.takeMsg() != null);
+                while (fx.takeMsg()) |_| {}
+            }
+            H.start(fx, mode); // deinit with an accepted effect still active
+            fx.deinit();
+            fx.deinit();
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            for (&fx.slots) |*slot| try std.testing.expect(slot.storage == null);
+        }
+    }
+}
+
+
+test "real Windows subprocess storage survives stdin stderr cancel failure and teardown" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const Msg = union(enum) { exit: EffectExit, line: EffectLine };
+    const Fx = Effects(Msg);
+    const H = struct {
+        fn exited(v: EffectExit) Msg { return .{.exit = v}; }
+        fn line(v: EffectLine) Msg { return .{.line = v}; }
+        fn next(fx: *Fx) !Msg {
+            for (0..1000) |_| {
+                if (fx.takeMsg()) |msg| return msg;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
+            }
+            return error.ReviewTimedOut;
+        }
+        fn settled(fx: *Fx) !void {
+            for (0..1000) |_| {
+                if (fx.slots[0].state.load(.acquire) != .running) return;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
+            }
+            return error.ReviewTimedOut;
+        }
+    };
+    const fx = try std.testing.allocator.create(Fx);
+    defer std.testing.allocator.destroy(fx);
+    fx.initInPlace(std.testing.allocator);
+    defer fx.deinit();
+    const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    fx.spawn(.{.key = 1, .argv = &.{powershell, "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write([Console]::In.ReadToEnd()); [Console]::Error.Write('real stderr'); exit 7"}, .stdin = "real stdin", .output = .collect, .on_exit = H.exited});
+    const storage = fx.slots[0].storage.?;
+    const result = (try H.next(fx)).exit;
+    try std.testing.expectEqual(EffectExitReason.exited, result.reason);
+    try std.testing.expectEqual(@as(i32,7), result.code);
+    try std.testing.expectEqualStrings("real stdin", result.output);
+    try std.testing.expectEqualStrings("real stderr", result.stderr_tail);
+    try H.settled(fx);
+
+    fx.spawn(.{.key = 2, .argv = &.{"E:\\w\\review-native50-51\\does-not-exist.exe"}, .output = .collect, .on_exit = H.exited});
+    const failed = (try H.next(fx)).exit;
+    try std.testing.expectEqual(EffectExitReason.spawn_failed, failed.reason);
+    try std.testing.expectEqualStrings("", failed.stderr_tail);
+    try H.settled(fx);
+    try std.testing.expectEqual(storage, fx.slots[0].storage.?);
+
+    fx.spawn(.{.key = 3, .argv = &.{powershell, "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.WriteLine('ready'); Start-Sleep -Seconds 30"}, .on_line = H.line, .on_exit = H.exited});
+    try std.testing.expectEqualStrings("ready\r", (try H.next(fx)).line.line);
+    fx.cancel(3);
+    try std.testing.expectEqual(EffectExitReason.cancelled, (try H.next(fx)).exit.reason);
+    try H.settled(fx);
+    try std.testing.expectEqual(storage, fx.slots[0].storage.?);
+
+    fx.spawn(.{.key = 4, .argv = &.{powershell, "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.WriteLine('ready'); Start-Sleep -Seconds 30"}, .on_line = H.line, .on_exit = H.exited});
+    try std.testing.expectEqualStrings("ready\r", (try H.next(fx)).line.line);
+    fx.deinit(); // stop a live real worker, then free slot storage
+    fx.deinit();
+    try std.testing.expect(fx.slots[0].storage == null);
+}
+
+test "every slot keeps independent storage and frees it at teardown" {
+    const Fx = Effects(void);
+    const fx = try std.testing.allocator.create(Fx);
+    defer std.testing.allocator.destroy(fx);
+    var tracking = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    fx.initInPlace(tracking.allocator());
+    defer fx.deinit();
+    fx.executor = .fake;
+    for (0..max_effects) |i| {
+        switch (i % 3) {
+            0 => fx.spawn(.{.key = @intCast(i + 1), .argv = &.{"echo"}, .output = .collect}),
+            1 => fx.fetch(.{.key = @intCast(i + 1), .url = "http://localhost/test"}),
+            2 => fx.readFile(.{.key = @intCast(i + 1), .path = "test.txt"}),
+            else => unreachable,
+        }
+        try std.testing.expect(fx.slots[i].storage != null);
+        for (0..i) |j| try std.testing.expect(fx.slots[i].storage != fx.slots[j].storage);
+    }
+    try std.testing.expectEqual(max_effects, fx.activeCount());
+    for (0..max_effects / 2) |i| fx.cancel(@intCast(i + 1));
+    fx.deinit();
+    fx.deinit();
+    try std.testing.expectEqual(tracking.allocated_bytes, tracking.freed_bytes);
+}
+
+test "real executor IO allocation failure retains storage and leaves slot usable" {
+    const Fx = Effects(EffectExit);
+    const H = struct { fn exit(v: EffectExit) EffectExit { return v; } };
+    const fx = try std.testing.allocator.create(Fx);
+    defer std.testing.allocator.destroy(fx);
+    // Storage and collect buffer succeed; creating the IO executor fails.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{.fail_index = 2});
+    fx.initInPlace(failing.allocator());
+    defer fx.deinit();
+    fx.spawn(.{.key=1, .argv=&.{"unused"}, .output=.collect, .on_exit=H.exit});
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(EffectExitReason.rejected, fx.takeMsg().?.reason);
+    try std.testing.expectEqual(Fx.SlotState.idle, fx.slots[0].state.load(.acquire));
+    try std.testing.expect(fx.slots[0].collect_buffer == null);
+    const storage = fx.slots[0].storage.?;
+    failing.fail_index = std.math.maxInt(usize);
+    fx.executor = .fake;
+    fx.spawn(.{.key=1, .argv=&.{"recovered"}, .on_exit=H.exit});
+    try std.testing.expectEqualStrings("recovered", fx.pendingSpawnAt(0).?.argv[0]);
+    try std.testing.expectEqual(storage, fx.slots[0].storage.?);
+    try fx.feedExit(1,0);
+    try std.testing.expectEqual(EffectExitReason.exited, fx.takeMsg().?.reason);
+    fx.deinit();
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }

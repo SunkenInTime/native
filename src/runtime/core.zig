@@ -30,6 +30,7 @@ const runtime_state = @import("state.zig");
 const runtime_system_services = @import("system_services.zig");
 const runtime_builtin_bridge = @import("builtin_bridge.zig");
 const runtime_view = @import("view.zig");
+const storage_align = runtime_view.storage_align;
 const runtime_window_views = @import("window_views.zig");
 const widget_bridge = @import("widget_bridge.zig");
 const canvas = @import("canvas");
@@ -92,6 +93,13 @@ pub const canvasSurfacePixelSize = canvas_frame_helpers.canvasSurfacePixelSize;
 pub const canvasFramePixelSize = canvas_frame_helpers.canvasFramePixelSize;
 
 const RuntimeView = runtime_view.RuntimeView;
+
+/// One design token set shared by the views holding it.
+pub const WidgetTokenSet = struct {
+    tokens: canvas.DesignTokens,
+    /// Views holding this set; at zero the slot is free for another.
+    views: u32,
+};
 const nowNanoseconds = runtime_clock.nowNanoseconds;
 const timestampToU64 = runtime_clock.timestampToU64;
 const RuntimeWindow = runtime_state.RuntimeWindow;
@@ -180,17 +188,47 @@ pub const DispatchError = automation.snapshot.DispatchError;
 /// always degrades, regardless of policy.
 pub const DispatchErrorPolicy = enum { degrade, propagate };
 
+/// Scratch for regenerating a view's widget display list. It lives in the
+/// heap-allocated Runtime rather than on the stack: as locals these arrays
+/// made a ~1 MiB frame, and the Windows stack probe touches every page of a
+/// frame on entry, so they were resident in every app on every refresh.
+/// Here only the pages a refresh actually writes become resident. One
+/// scratch serves every view because a refresh must not start while
+/// another is using it; `display_list_refresh_active` enforces that (a
+/// nested refresh, e.g. from a text-measurement callback, fails with
+/// `error.DisplayListRefreshReentered` instead of overwriting the outer
+/// refresh's commands).
+pub const DisplayListRefreshScratch = struct {
+    commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand,
+    copied: runtime_view.CanvasDisplayListScratch,
+    changes: [canvas_limits.max_canvas_diff_changes_per_view]canvas.DiffChange,
+};
+
 pub const Runtime = struct {
+    display_list_refresh_scratch: DisplayListRefreshScratch align(storage_align) = undefined,
+    display_list_refresh_active: bool = false,
     options: Options,
     surface: platform.Surface,
     appearance: platform.Appearance = .{},
-    windows: [platform.max_windows]RuntimeWindow = undefined,
+    windows: [platform.max_windows]RuntimeWindow align(storage_align) = undefined,
     window_count: usize = 0,
-    views: [platform.max_views]RuntimeView = undefined,
+    /// Where views live. A view keeps its slot for life, so removing one
+    /// never moves another: shifting the views themselves wrote every byte
+    /// of each 3.7 MiB view after it and made it all resident.
+    view_slots: [platform.max_views]RuntimeView align(storage_align) = undefined,
+    view_slot_used: std.StaticBitSet(platform.max_views) = .initEmpty(),
+    /// The live views, in order: the first `view_count` point into
+    /// `view_slots`.
+    views: [platform.max_views]*RuntimeView = undefined,
     view_count: usize = 0,
-    webviews: [platform.max_webviews]RuntimeWebView = undefined,
+    /// Design token sets the views share; each live view holds at most one,
+    /// so a slot per view always suffices. Slots are touched only as sets
+    /// are first used: an app whose views share one set pays for one.
+    widget_token_sets: [platform.max_views]WidgetTokenSet align(storage_align) = undefined,
+    widget_token_set_count: usize = 0,
+    webviews: [platform.max_webviews]RuntimeWebView align(storage_align) = undefined,
     webview_count: usize = 0,
-    tray_items: [platform.max_tray_items]RuntimeTrayItem = undefined,
+    tray_items: [platform.max_tray_items]RuntimeTrayItem align(storage_align) = undefined,
     tray_item_count: usize = 0,
     tray_created: bool = false,
     tray_title: []const u8 = "",
@@ -221,7 +259,7 @@ pub const Runtime = struct {
     /// cannot analyze: honest absence, visible as such.
     audio_spectrum_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
     audio_spectrum_events: u64 = 0,
-    shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
+    shell_layouts: [platform.max_windows]RuntimeShellLayout align(storage_align) = undefined,
     shell_layout_count: usize = 0,
     next_window_id: platform.WindowId = 2,
     next_view_id: platform.ViewId = 1,
@@ -246,7 +284,7 @@ pub const Runtime = struct {
     last_invalidation_reason: InvalidationReason = .startup,
     last_diagnostics: FrameDiagnostics = .{},
     loaded_source: ?platform.WebViewSource = null,
-    loaded_source_storage: RuntimeSourceStorage = .{},
+    loaded_source_storage: RuntimeSourceStorage align(storage_align) = .{},
     /// Degraded dispatch errors, oldest first (see `max_dispatch_errors`).
     dispatch_errors: [max_dispatch_errors]DispatchError = [_]DispatchError{.{}} ** max_dispatch_errors,
     dispatch_error_len: usize = 0,
@@ -267,20 +305,20 @@ pub const Runtime = struct {
     /// runtime by `native automate profile on|off` and read by the
     /// snapshot's `frame_profile` line. Larger than the small-default
     /// copy bound, so `initAt` assigns it explicitly.
-    frame_profile: runtime_frame_profile.FrameProfile = .{},
-    async_bridge_responses: [max_async_bridge_responses]AsyncBridgeResponseSlot = [_]AsyncBridgeResponseSlot{.{}} ** max_async_bridge_responses,
+    frame_profile: runtime_frame_profile.FrameProfile align(storage_align) = .{},
+    async_bridge_responses: [max_async_bridge_responses]AsyncBridgeResponseSlot align(storage_align) = [_]AsyncBridgeResponseSlot{.{}} ** max_async_bridge_responses,
     automation_windows: [automation.snapshot.max_windows]automation.snapshot.Window = undefined,
     /// Snapshot-side storage for the frame profile's per-stage stats
     /// (the snapshot Input only references runtime-owned memory).
     automation_frame_profile_stages: [runtime_frame_profile.frame_profile_stage_count]automation.snapshot.FrameProfileStage = undefined,
-    automation_views: [automation.snapshot.max_views]platform.ViewInfo = undefined,
-    automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget = undefined,
+    automation_views: [automation.snapshot.max_views]platform.ViewInfo align(storage_align) = undefined,
+    automation_widgets: [automation.snapshot.max_widgets]automation.snapshot.Widget align(storage_align) = undefined,
     /// Snapshot-side storage for per-widget declared context-menu items
     /// (the snapshot Input only references runtime-owned memory; labels
     /// alias the views' bounded menu storage). Sized so every view can
     /// list its full per-view item budget — the snapshot never truncates
     /// menus the runtime accepted.
-    automation_widget_menu_items: [canvas_limits.max_canvas_widget_context_menu_items_per_view * platform.max_views]automation.snapshot.WidgetContextMenuItem = undefined,
+    automation_widget_menu_items: [canvas_limits.max_canvas_widget_context_menu_items_per_view * platform.max_views]automation.snapshot.WidgetContextMenuItem align(storage_align) = undefined,
     automation_tray_items: [platform.max_tray_items]automation.snapshot.TrayItem = undefined,
     /// Handshake for the `provenance` verb: cleared before the query is
     /// evented to the app, set by the app's response publish — so the
@@ -301,51 +339,59 @@ pub const Runtime = struct {
     canvas_widget_accessibility_defer_depth: usize = 0,
     // Scratch for setCanvasWidgetLayout's reconcile pass: too large for the
     // stack at the current node cap, and the event loop is single-threaded.
-    canvas_widget_reconcile_nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
-    canvas_widget_source_semantics_scratch: [canvas_limits.max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
+    canvas_widget_reconcile_nodes: [canvas_limits.max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode align(storage_align) = undefined,
+    canvas_widget_source_semantics_scratch: [canvas_limits.max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode align(storage_align) = undefined,
     // More reconcile-pass scratch that outgrew the stack when the widget
     // budgets quadrupled (256 -> 1024 nodes): previous control/scroll/text reconcile
     // entries, the previous text byte pool, and the invalidation diff.
-    canvas_widget_reconcile_control_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetControlReconcileEntry = undefined,
-    canvas_widget_reconcile_scroll_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetSourceScrollEntry = undefined,
-    canvas_widget_reconcile_text_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetTextReconcileEntry = undefined,
-    canvas_widget_reconcile_text_bytes: [canvas_limits.max_canvas_widget_text_bytes_per_view]u8 = undefined,
-    canvas_widget_invalidations_scratch: [canvas_limits.max_canvas_widget_invalidations_per_view]canvas.WidgetInvalidation = undefined,
-    canvas_widget_copy_scratch: runtime_canvas_widget_runtime.CanvasWidgetCopyScratch = undefined,
+    canvas_widget_reconcile_control_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetControlReconcileEntry align(storage_align) = undefined,
+    canvas_widget_reconcile_scroll_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetSourceScrollEntry align(storage_align) = undefined,
+    canvas_widget_reconcile_text_entries: [canvas_limits.max_canvas_widget_nodes_per_view]runtime_canvas_widget_runtime.CanvasWidgetTextReconcileEntry align(storage_align) = undefined,
+    canvas_widget_reconcile_text_bytes: [canvas_limits.max_canvas_widget_text_bytes_per_view]u8 align(storage_align) = undefined,
+    canvas_widget_invalidations_scratch: [canvas_limits.max_canvas_widget_invalidations_per_view]canvas.WidgetInvalidation align(storage_align) = undefined,
+    canvas_widget_copy_scratch: runtime_canvas_widget_runtime.CanvasWidgetCopyScratch align(storage_align) = undefined,
+    /// The loop animations a display refresh wants, collected before any is
+    /// armed (canvas_widget_display.zig): 9.5 KiB kept off the stack, which
+    /// is 1 MiB on a mobile main thread. Touched only by views showing a
+    /// spinner or skeleton.
+    canvas_widget_loop_animation_scratch: [canvas_limits.max_canvas_widget_loop_animations_per_view]runtime_canvas_widget_display.DesiredLoopAnimation align(storage_align) = undefined,
     canvas_widget_display_list_refresh_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
     canvas_widget_accessibility_publish_pending: [platform.max_views]bool = [_]bool{false} ** platform.max_views,
-    canvas_frame_render_commands: [max_canvas_commands_per_view]canvas.RenderCommand = undefined,
-    canvas_frame_render_batches: [max_canvas_commands_per_view]canvas.RenderBatch = undefined,
+    canvas_frame_render_commands: [max_canvas_commands_per_view]canvas.RenderCommand align(storage_align) = undefined,
+    canvas_frame_render_batches: [max_canvas_commands_per_view]canvas.RenderBatch align(storage_align) = undefined,
     canvas_frame_pipeline_cache_entries: [max_canvas_pipelines_per_view]canvas.RenderPipelineCacheEntry = undefined,
     canvas_frame_pipeline_cache_actions: [max_canvas_pipeline_cache_actions_per_view]canvas.RenderPipelineCacheAction = undefined,
-    canvas_frame_path_geometries: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometry = undefined,
-    canvas_frame_path_geometry_cache_entries: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometryCacheEntry = undefined,
-    canvas_frame_path_geometry_cache_actions: [max_canvas_path_geometry_cache_actions_per_view]canvas.RenderPathGeometryCacheAction = undefined,
-    canvas_frame_images: [max_canvas_images_per_view]canvas.RenderImage = undefined,
-    canvas_frame_image_cache_entries: [max_canvas_images_per_view]canvas.RenderImageCacheEntry = undefined,
-    canvas_frame_image_cache_actions: [max_canvas_image_cache_actions_per_view]canvas.RenderImageCacheAction = undefined,
-    canvas_frame_layers: [max_canvas_layers_per_view]canvas.RenderLayer = undefined,
-    canvas_frame_layer_cache_entries: [max_canvas_layers_per_view]canvas.RenderLayerCacheEntry = undefined,
-    canvas_frame_layer_cache_actions: [max_canvas_layer_cache_actions_per_view]canvas.RenderLayerCacheAction = undefined,
-    canvas_frame_resources: [max_canvas_resources_per_view]canvas.RenderResource = undefined,
-    canvas_frame_resource_cache_entries: [max_canvas_resources_per_view]canvas.RenderResourceCacheEntry = undefined,
-    canvas_frame_resource_cache_actions: [max_canvas_resource_cache_actions_per_view]canvas.RenderResourceCacheAction = undefined,
-    canvas_frame_visual_effects: [max_canvas_visual_effects_per_view]canvas.VisualEffect = undefined,
-    canvas_frame_visual_effect_cache_entries: [max_canvas_visual_effects_per_view]canvas.VisualEffectCacheEntry = undefined,
-    canvas_frame_visual_effect_cache_actions: [max_canvas_visual_effect_cache_actions_per_view]canvas.VisualEffectCacheAction = undefined,
-    canvas_frame_glyph_atlas_entries: [max_canvas_glyphs_per_view]canvas.GlyphAtlasEntry = undefined,
-    canvas_frame_glyph_atlas_cache_entries: [max_canvas_glyphs_per_view]canvas.GlyphAtlasCacheEntry = undefined,
-    canvas_frame_glyph_atlas_cache_actions: [max_canvas_glyphs_per_view * 2]canvas.GlyphAtlasCacheAction = undefined,
-    canvas_frame_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined,
-    canvas_frame_render_override_samples: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
-    canvas_frame_render_override_combined: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
+    canvas_frame_path_geometries: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometry align(storage_align) = undefined,
+    canvas_frame_path_geometry_cache_entries: [max_canvas_path_geometries_per_view]canvas.RenderPathGeometryCacheEntry align(storage_align) = undefined,
+    canvas_frame_path_geometry_cache_actions: [max_canvas_path_geometry_cache_actions_per_view]canvas.RenderPathGeometryCacheAction align(storage_align) = undefined,
+    canvas_frame_images: [max_canvas_images_per_view]canvas.RenderImage align(storage_align) = undefined,
+    canvas_frame_image_cache_entries: [max_canvas_images_per_view]canvas.RenderImageCacheEntry align(storage_align) = undefined,
+    canvas_frame_image_cache_actions: [max_canvas_image_cache_actions_per_view]canvas.RenderImageCacheAction align(storage_align) = undefined,
+    canvas_frame_layers: [max_canvas_layers_per_view]canvas.RenderLayer align(storage_align) = undefined,
+    canvas_frame_layer_cache_entries: [max_canvas_layers_per_view]canvas.RenderLayerCacheEntry align(storage_align) = undefined,
+    canvas_frame_layer_cache_actions: [max_canvas_layer_cache_actions_per_view]canvas.RenderLayerCacheAction align(storage_align) = undefined,
+    canvas_frame_resources: [max_canvas_resources_per_view]canvas.RenderResource align(storage_align) = undefined,
+    canvas_frame_resource_cache_entries: [max_canvas_resources_per_view]canvas.RenderResourceCacheEntry align(storage_align) = undefined,
+    canvas_frame_resource_cache_actions: [max_canvas_resource_cache_actions_per_view]canvas.RenderResourceCacheAction align(storage_align) = undefined,
+    canvas_frame_visual_effects: [max_canvas_visual_effects_per_view]canvas.VisualEffect align(storage_align) = undefined,
+    canvas_frame_visual_effect_cache_entries: [max_canvas_visual_effects_per_view]canvas.VisualEffectCacheEntry align(storage_align) = undefined,
+    canvas_frame_visual_effect_cache_actions: [max_canvas_visual_effect_cache_actions_per_view]canvas.VisualEffectCacheAction align(storage_align) = undefined,
+    canvas_frame_glyph_atlas_entries: [max_canvas_glyphs_per_view]canvas.GlyphAtlasEntry align(storage_align) = undefined,
+    canvas_frame_glyph_atlas_cache_entries: [max_canvas_glyphs_per_view]canvas.GlyphAtlasCacheEntry align(storage_align) = undefined,
+    canvas_frame_glyph_atlas_cache_actions: [max_canvas_glyphs_per_view * 2]canvas.GlyphAtlasCacheAction align(storage_align) = undefined,
+    canvas_frame_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange align(storage_align) = undefined,
+    canvas_frame_render_override_samples: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride align(storage_align) = undefined,
+    canvas_frame_render_override_combined: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride align(storage_align) = undefined,
     /// Runtime-registered canvas images (see canvas_images.zig): entry
     /// metadata, the per-slot pixel pool, and the `ReferenceImage` scratch
     /// the frame planner hands to renderers each plan.
-    canvas_image_entries: [canvas_limits.max_registered_canvas_images]runtime_canvas_images.CanvasImageEntry = [_]runtime_canvas_images.CanvasImageEntry{.{}} ** canvas_limits.max_registered_canvas_images,
+    canvas_image_entries: [canvas_limits.max_registered_canvas_images]runtime_canvas_images.CanvasImageEntry align(storage_align) = [_]runtime_canvas_images.CanvasImageEntry{.{}} ** canvas_limits.max_registered_canvas_images,
     canvas_image_count: usize = 0,
-    canvas_image_pixels: [canvas_limits.max_registered_canvas_images][canvas_limits.max_registered_canvas_image_pixel_bytes]u8 = undefined,
-    canvas_image_resources_scratch: [canvas_limits.max_registered_canvas_images]canvas.ReferenceImage = undefined,
+    /// Each registered image's pixels, allocated at registration and sized
+    /// to it. Only the first `canvas_image_count` are valid: a host-sized
+    /// table is past `initAt`'s small-default bound and is never defaulted.
+    canvas_image_pixels: [canvas_limits.max_registered_canvas_images][]u8 align(storage_align) = undefined,
+    canvas_image_resources_scratch: [canvas_limits.max_registered_canvas_images]canvas.ReferenceImage align(storage_align) = undefined,
     /// Runtime-registered canvas fonts (see canvas_fonts.zig): entry
     /// metadata, the per-slot TrueType byte pool with parsed face views
     /// over it, the `ReferenceFont` scratch the frame planner hands to
@@ -353,8 +399,11 @@ pub const Runtime = struct {
     /// registration for platforms without host-side text measurement.
     canvas_font_entries: [canvas_limits.max_registered_canvas_fonts]runtime_canvas_fonts.CanvasFontEntry = [_]runtime_canvas_fonts.CanvasFontEntry{.{}} ** canvas_limits.max_registered_canvas_fonts,
     canvas_font_count: usize = 0,
-    canvas_font_bytes: [canvas_limits.max_registered_canvas_fonts][canvas_limits.max_registered_canvas_font_bytes]u8 = undefined,
-    canvas_font_faces: [canvas_limits.max_registered_canvas_fonts]canvas.font_ttf.Face = undefined,
+    /// Each registered face's bytes, allocated at registration and sized
+    /// to it; faces are permanent, so they live as long as the runtime.
+    /// Only the first `canvas_font_count` are valid.
+    canvas_font_bytes: [canvas_limits.max_registered_canvas_fonts][]u8 align(storage_align) = undefined,
+    canvas_font_faces: [canvas_limits.max_registered_canvas_fonts]canvas.font_ttf.Face align(storage_align) = undefined,
     canvas_font_resources_scratch: [canvas_limits.max_registered_canvas_fonts]canvas.ReferenceFont = undefined,
     canvas_font_measure_provider: canvas.TextMeasureProvider = .{ .measure_fn = runtime_canvas_fonts.unboundCanvasFontMeasure },
     /// Platform text measurement captured at init and owned by the
@@ -373,6 +422,36 @@ pub const Runtime = struct {
     /// storage; by-value construction materializes a stack temporary in Debug
     /// builds that overflows default thread stacks, so every embedding
     /// constructs through a pointer.
+    /// The shared copy of `tokens` for a view moving off `previous`: the
+    /// built-in default, an equal set another view holds, or a free slot.
+    pub fn swapWidgetTokens(self: *Runtime, previous: *const canvas.DesignTokens, tokens: canvas.DesignTokens) *const canvas.DesignTokens {
+        self.releaseWidgetTokens(previous);
+        if (std.meta.eql(tokens, runtime_view.default_widget_tokens)) return &runtime_view.default_widget_tokens;
+        var free: ?usize = null;
+        for (self.widget_token_sets[0..self.widget_token_set_count], 0..) |*set, index| {
+            if (set.views == 0) {
+                if (free == null) free = index;
+            } else if (std.meta.eql(set.tokens, tokens)) {
+                set.views += 1;
+                return &set.tokens;
+            }
+        }
+        const index = free orelse index: {
+            self.widget_token_set_count += 1;
+            break :index self.widget_token_set_count - 1;
+        };
+        self.widget_token_sets[index] = .{ .tokens = tokens, .views = 1 };
+        return &self.widget_token_sets[index].tokens;
+    }
+
+    /// A view stops holding `tokens` (it is removed, or takes others).
+    pub fn releaseWidgetTokens(self: *Runtime, tokens: *const canvas.DesignTokens) void {
+        if (tokens == &runtime_view.default_widget_tokens) return;
+        const set: *WidgetTokenSet = @fieldParentPtr("tokens", @constCast(tokens));
+        std.debug.assert(@intFromPtr(set) >= @intFromPtr(&self.widget_token_sets) and set.views > 0);
+        set.views -= 1;
+    }
+
     pub fn initAt(self: *Runtime, options: Options) void {
         inline for (@typeInfo(Runtime).@"struct".fields) |field| {
             if (comptime fieldHasSmallDefault(field)) {
@@ -399,6 +478,19 @@ pub const Runtime = struct {
         // (tests do constantly): bump the generation so nothing measured
         // against a previous runtime's provider can be served to this one.
         canvas.bumpTextMeasureGeneration();
+    }
+
+    /// Release what the runtime allocated beyond its own memory: the
+    /// registered images' pixels, fonts' bytes, and what its views
+    /// allocated as they grew (removing a view frees its own). Call before
+    /// freeing the Runtime; it is unusable afterward.
+    pub fn deinit(self: *Runtime) void {
+        for (self.canvas_image_pixels[0..self.canvas_image_count]) |pixels| std.heap.page_allocator.free(pixels);
+        self.canvas_image_count = 0;
+        for (self.canvas_font_bytes[0..self.canvas_font_count]) |bytes| std.heap.page_allocator.free(bytes);
+        self.canvas_font_count = 0;
+        for (self.views[0..self.view_count]) |view| view.deinit();
+        self.view_count = 0;
     }
 
     fn fieldHasSmallDefault(comptime field: std.builtin.Type.StructField) bool {
@@ -816,6 +908,7 @@ pub fn TestHarness() type {
         }
 
         pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
+            self.runtime.deinit();
             gpa.destroy(self);
         }
 
