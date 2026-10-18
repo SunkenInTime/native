@@ -138,13 +138,13 @@ pub const TextLayoutCachePlanner = struct {
             plan_key_index.fitsHashSlots(text_layout_cache_index_slots, plans.len + previous.len);
         const index_scratch: ?*TextLayoutCacheIndexScratch = if (use_index) text_layout_cache_index_scratch.get() else null;
         if (index_scratch) |scratch| {
-            scratch.previous.reset();
+            scratch.previous.reset(previous.len);
             for (previous, 0..) |entry, index| {
-                var p = TextLayoutCacheIndex.probe(textLayoutKeyHash(entry.key));
+                var p = scratch.previous.probe(textLayoutKeyHash(entry.key));
                 while (scratch.previous.next(&p)) |_| {}
                 scratch.previous.insert(p, @intCast(index));
             }
-            scratch.entry.reset();
+            scratch.entry.reset(plans.len + previous.len);
         }
 
         for (plans, 0..) |plan, layout_index| {
@@ -204,7 +204,7 @@ pub const TextLayoutCachePlanner = struct {
     /// probe chain — the indexed equivalent of scanning
     /// `self.entries[0..self.entry_len]`.
     fn entryIndexProbe(self: *TextLayoutCachePlanner, entry_index: *const TextLayoutCacheIndex, key: TextLayoutKey, key_hash: u64) ?usize {
-        var p = TextLayoutCacheIndex.probe(key_hash);
+        var p = entry_index.probe(key_hash);
         while (entry_index.next(&p)) |candidate| {
             if (textLayoutKeysEqual(self.entries[candidate].key, key)) return candidate;
         }
@@ -214,7 +214,7 @@ pub const TextLayoutCachePlanner = struct {
     fn appendEntryMaybeIndexed(self: *TextLayoutCachePlanner, entry: TextLayoutCacheEntry, entry_index: ?*TextLayoutCacheIndex) Error!void {
         try self.appendEntry(entry);
         if (entry_index) |index| {
-            var p = TextLayoutCacheIndex.probe(textLayoutKeyHash(entry.key));
+            var p = index.probe(textLayoutKeyHash(entry.key));
             while (index.next(&p)) |_| {}
             index.insert(p, @intCast(self.entry_len - 1));
         }
@@ -250,17 +250,17 @@ fn findTextLayoutCacheEntry(entries: []const TextLayoutCacheEntry, key: TextLayo
 /// bound; bigger inputs fall back to the linear scans.
 const text_layout_cache_index_slots = 8192;
 const TextLayoutCacheIndex = plan_key_index.HashSlots(text_layout_cache_index_slots);
-// Lazily heap-allocated per thread (64 KiB of probe tables): reset per
-// build, so first-use init on the planning thread is the only contract —
-// threads that never plan text layouts never allocate it.
+// Lazily heap-allocated per thread (up to 64 KiB of probe tables): each
+// build resets the prefix it needs, so threads that never plan text
+// layouts never allocate it and small plans never touch most of it.
 const TextLayoutCacheIndexScratch = struct {
-    previous: TextLayoutCacheIndex = .{},
-    entry: TextLayoutCacheIndex = .{},
+    previous: TextLayoutCacheIndex,
+    entry: TextLayoutCacheIndex,
 };
 const text_layout_cache_index_scratch = @import("lazy_tls.zig").LazyTls(TextLayoutCacheIndexScratch);
 
 fn findTextLayoutCacheEntryIndexed(previous_index: *const TextLayoutCacheIndex, previous: []const TextLayoutCacheEntry, key: TextLayoutKey, key_hash: u64) ?usize {
-    var p = TextLayoutCacheIndex.probe(key_hash);
+    var p = previous_index.probe(key_hash);
     while (previous_index.next(&p)) |candidate| {
         if (textLayoutKeysEqual(previous[candidate].key, key)) return candidate;
     }

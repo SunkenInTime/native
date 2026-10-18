@@ -329,12 +329,12 @@ fn addCanvasCount(value: *usize, amount: usize, max_value: usize, comptime failu
 /// the half-full bound; small lists keep the linear scans.
 const summary_id_index_slots = 4096;
 const SummaryIdIndex = canvas.plan_key_index.HashSlots(summary_id_index_slots);
-// Lazily heap-allocated per thread (32 KiB of probe tables): reset per
-// diff, so first-use init on the diffing thread is the only contract —
-// threads that never diff summaries never allocate it.
+// Lazily heap-allocated per thread (up to 32 KiB of probe tables): each
+// diff resets the prefix it needs, so threads that never diff summaries
+// never allocate it and small diffs never touch most of it.
 const SummaryIdScratch = struct {
-    current: SummaryIdIndex = .{},
-    presented: SummaryIdIndex = .{},
+    current: SummaryIdIndex,
+    presented: SummaryIdIndex,
 };
 const summary_id_scratch = canvas.lazy_tls.LazyTls(SummaryIdScratch);
 
@@ -851,17 +851,17 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
                 canvas.plan_key_index.fitsHashSlots(summary_id_index_slots, presented.len);
             const id_scratch: ?*SummaryIdScratch = if (use_index) summary_id_scratch.get() else null;
             if (id_scratch) |scratch| {
-                scratch.current.reset();
+                scratch.current.reset(current_commands.len);
                 for (current_commands, 0..) |command, index| {
                     const id = command.objectId() orelse continue;
-                    var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
+                    var p = scratch.current.probe(canvas.plan_key_index.mixHash(id));
                     while (scratch.current.next(&p)) |_| {}
                     scratch.current.insert(p, @intCast(index));
                 }
-                scratch.presented.reset();
+                scratch.presented.reset(presented.len);
                 for (presented, 0..) |command, index| {
                     const id = command.id orelse continue;
-                    var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
+                    var p = scratch.presented.probe(canvas.plan_key_index.mixHash(id));
                     while (scratch.presented.next(&p)) |_| {}
                     scratch.presented.insert(p, @intCast(index));
                 }
@@ -912,7 +912,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         fn currentCanvasCommandByIdIndexed(current_index: *const SummaryIdIndex, commands: []const canvas.CanvasCommand, id: canvas.ObjectId) ?canvas.CommandRef {
-            var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
+            var p = current_index.probe(canvas.plan_key_index.mixHash(id));
             while (current_index.next(&p)) |candidate| {
                 if (commands[candidate].objectId() == id) return .{ .index = candidate, .command = commands[candidate] };
             }
@@ -920,7 +920,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         fn presentedCanvasCommandByIdIndexed(presented_index: *const SummaryIdIndex, presented: []const PresentedCanvasCommand, id: canvas.ObjectId) ?PresentedCanvasCommandRef {
-            var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
+            var p = presented_index.probe(canvas.plan_key_index.mixHash(id));
             while (presented_index.next(&p)) |candidate| {
                 if (presented[candidate].id == id) return .{ .index = candidate, .command = presented[candidate] };
             }

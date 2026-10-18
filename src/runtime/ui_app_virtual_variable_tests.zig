@@ -250,6 +250,8 @@ test "variable rows mount a bounded window; measured corrections converge the sc
     // driver) reports is the measured truth, not the estimate.
     const state = h.scrollState();
     try std.testing.expectApproxEqAbs(truth, state.content_extent, 2);
+    // One list claims one extent table, however many rebuilds ran.
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.virtual_extent_table_count);
 
     // And a row's identity is the message, not the slot: scroll back to
     // the top and the first row returns under its original id.
