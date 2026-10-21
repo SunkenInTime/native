@@ -153,7 +153,9 @@ extern "C" int native_sdk_dpi_geometry_tests() {
     // probes stay short and a presented software fallback retains a slow
     // recovery pump until the shared pipe reconnects.
     expect(weaverSharedRendererConnectTimeoutMs(false) == 2000);
-    expect(weaverSharedRendererConnectTimeoutMs(true) == 100);
+    expect(weaverSharedRendererConnectTimeoutMs(true) == 0);
+    expect(weaverSharedRendererPipeWaitMs(0) == 1);
+    expect(weaverSharedRendererPipeWaitMs(2000) == 100);
     expect(!weaverSharedRendererRecoveryPumpNeeded(false, false, true));
     expect(!weaverSharedRendererRecoveryPumpNeeded(true, false, false));
     expect(!weaverSharedRendererRecoveryPumpNeeded(true, true, true));

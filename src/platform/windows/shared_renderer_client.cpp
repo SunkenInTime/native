@@ -176,16 +176,17 @@ static bool connectRenderer(NativeSdkSharedRendererClient *client) {
     // weaverd launches the shared renderer immediately before the first GPU
     // widget. Creating the process and publishing its first pipe instance is
     // asynchronous, so the first surface establishment gets one bounded
-    // lifecycle wait. Connected frames never take this path, and later
-    // recovery attempts use a short bound and arrive only from the host's
-    // low-frequency recovery pump.
+    // lifecycle wait. Connected frames never take this path; every later
+    // attempt (a frame while the renderer is down) is one non-blocking look
+    // for the pipe, so a missing renderer never stalls the UI thread.
     const uint32_t timeout_ms = weaverSharedRendererConnectTimeoutMs(
         client->connect_attempted);
     client->connect_attempted = true;
     const uint64_t deadline = GetTickCount64() + timeout_ms;
     bool pipe_ready = false;
     do {
-        pipe_ready = WaitNamedPipeW(client->pipe_name.c_str(), 100) != FALSE;
+        pipe_ready = WaitNamedPipeW(client->pipe_name.c_str(),
+            weaverSharedRendererPipeWaitMs(timeout_ms)) != FALSE;
         if (pipe_ready) break;
         if (GetTickCount64() < deadline) Sleep(10);
     } while (GetTickCount64() < deadline);
