@@ -175,6 +175,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 .show = shell_layout.shellWindowShowMode(shell_window),
                 .min_width = shell_window.min_width,
                 .min_height = shell_window.min_height,
+                .content_zoom = shell_window.content_zoom,
                 .source = source,
             }, source_reloads_from_app, source_policy);
             errdefer Self.closeWindow(self, info.id) catch {};

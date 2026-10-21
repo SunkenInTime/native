@@ -291,6 +291,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// framework already knows. 0 = no floor on that axis.
             min_width: f32 = 0,
             min_height: f32 = 0,
+            /// Null: a user resize reflows the canvas. A value: a resize
+            /// keeps the aspect ratio and scales the canvas content
+            /// instead, starting at this zoom — the canvas keeps its
+            /// declared logical size, so the tree never relayouts.
+            /// Applied at creation (platform `WindowOptions.content_zoom`).
+            content_zoom: ?f32 = null,
             /// Titlebar chrome: `.hidden_inset` extends content under a
             /// transparent titlebar with the title hidden (macOS keeps
             /// the traffic lights) — the modern editor-app pattern —
@@ -1955,6 +1961,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .titlebar = descriptor.titlebar,
                 .min_width = descriptor.min_width,
                 .min_height = descriptor.min_height,
+                .content_zoom = descriptor.content_zoom,
                 .transparent = descriptor.transparent,
                 .layer = descriptor.layer,
                 .click_through = descriptor.click_through,

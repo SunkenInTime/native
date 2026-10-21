@@ -556,6 +556,15 @@ pub const PrimaryDisplayAnchor = struct {
     }
 };
 
+/// The zoom range a content-scaling window (`WindowOptions.content_zoom`)
+/// may reach, at open and under a user resize. A user-experience bound,
+/// not a resource budget: below half size text stops being legible and
+/// the resize band stops being grabbable; past 4x a desk widget has
+/// become a wall poster. Physical memory follows zoom squared, so 4x
+/// costs 16x the 1x surface (receipt: docs/adr/0023).
+pub const min_content_zoom: f32 = 0.5;
+pub const max_content_zoom: f32 = 4;
+
 pub const WindowOptions = struct {
     id: WindowId = 1,
     label: []const u8 = "main",
@@ -582,6 +591,14 @@ pub const WindowOptions = struct {
     /// does not grow an already-smaller restored frame.
     min_width: f32 = 0,
     min_height: f32 = 0,
+    /// Resize semantics. Null (the default): a user resize changes the
+    /// content's LOGICAL size and the app lays out into it. A value: the
+    /// logical content size stays `default_frame`'s, a user resize keeps
+    /// its aspect ratio, and the content scale follows the window — the
+    /// zoom multiplies into the device scale, so content re-rasterizes
+    /// crisp instead of stretching a bitmap. The value is the zoom the
+    /// window opens at. Windows only today; other hosts ignore it.
+    content_zoom: ?f32 = null,
 
     pub fn resolvedTitle(self: WindowOptions, app_name: []const u8) []const u8 {
         return if (self.title.len > 0) self.title else app_name;
@@ -594,6 +611,10 @@ pub const WindowState = struct {
     title: []const u8 = "",
     frame: geometry.RectF = geometry.RectF.init(0, 0, 720, 480),
     scale_factor: f32 = 1,
+    /// The user zoom folded into `scale_factor` for a window whose resize
+    /// scales content (`WindowOptions.content_zoom`); 1 otherwise. The
+    /// device scale alone is `scale_factor / content_zoom`.
+    content_zoom: f32 = 1,
     open: bool = true,
     focused: bool = true,
     maximized: bool = false,
@@ -606,6 +627,10 @@ pub const WindowInfo = struct {
     title: []const u8 = "",
     frame: geometry.RectF = geometry.RectF.init(0, 0, 720, 480),
     scale_factor: f32 = 1,
+    /// The user zoom folded into `scale_factor` for a window whose resize
+    /// scales content (`WindowOptions.content_zoom`); 1 otherwise. The
+    /// device scale alone is `scale_factor / content_zoom`.
+    content_zoom: f32 = 1,
     open: bool = true,
     focused: bool = false,
 
@@ -616,6 +641,7 @@ pub const WindowInfo = struct {
             .title = self.title,
             .frame = self.frame,
             .scale_factor = self.scale_factor,
+            .content_zoom = self.content_zoom,
             .open = self.open,
             .focused = self.focused,
         };
@@ -640,6 +666,8 @@ pub const WindowCreateOptions = struct {
     /// `WindowOptions.min_width`/`min_height`); 0 = no floor.
     min_width: f32 = 0,
     min_height: f32 = 0,
+    /// See `WindowOptions.content_zoom`.
+    content_zoom: ?f32 = null,
     source: ?WebViewSource = null,
 
     pub fn windowOptions(self: WindowCreateOptions, id: WindowId, label: []const u8) WindowOptions {
@@ -659,6 +687,7 @@ pub const WindowCreateOptions = struct {
             .show = self.show,
             .min_width = self.min_width,
             .min_height = self.min_height,
+            .content_zoom = self.content_zoom,
         };
     }
 };
@@ -2180,6 +2209,11 @@ pub const PlatformServices = struct {
     /// presence so Metal and other complete packet renderers retain their
     /// normal path.
     gpu_surface_hybrid_layers: bool = false,
+    /// Whether the packet presenter draws fill/stroke paths. Windows' D3D
+    /// renderer fails closed on them (no tessellation, joins or caps), so
+    /// a frame with a path must paint through the pixel renderer instead
+    /// of reaching it.
+    gpu_surface_packet_paths: bool = true,
     /// Binary side-channel for gpu-surface image pixels: create or
     /// replace the host texture for `image.id` out-of-band, so packets
     /// carry only id + fingerprint references. Host-wide (not per view);

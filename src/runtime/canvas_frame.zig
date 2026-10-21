@@ -398,6 +398,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
             recordCanvasClearColor(self, window_id, label, clear_color);
             var packet = try canvas_frame.gpuPacket(output);
+            restrictPacketToPresenter(self.options.platform.services, output, &packet);
             packet.scale = normalizedCanvasPresentationScale(packet_scale, canvas_frame.scale);
             if (!packet.requiresRender()) return packet;
             uploadCanvasPacketImages(self, packet) catch |err| {
@@ -512,6 +513,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             var gpu_pass = gpu_frame.renderPass();
             const encode_begin = self.frame_profile.begin();
             var packet = try gpu_pass.gpuPacket(output);
+            restrictPacketToPresenter(services, output, &packet);
             packet.scale = gpu_frame.scale;
             packet.images = &.{};
             packet.image_actions = &.{};
@@ -647,6 +649,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (gpu_commands.len > 0 and packet_json_buffer.len > 0) {
                 if (packet_service_available) {
                     var packet = try canvas_frame.gpuPacket(gpu_commands);
+                    restrictPacketToPresenter(services, gpu_commands, &packet);
                     packet.scale = normalizedCanvasPresentationScale(pixel_scale, canvas_frame.scale);
                     const result = CanvasPresentationResult{
                         .frame = canvas_frame,
@@ -2018,6 +2021,34 @@ fn canvasPacketEncodedByteSize(packet: canvas.CanvasGpuPacket, encoding: CanvasP
 /// represent — the plan keeps the source command at `command_index`, so
 /// the diagnostic names the author-facing kind (`draw_text`, ...), not
 /// the packet's opaque `unsupported` tag.
+/// A packet presenter that cannot draw paths is never handed one: each path
+/// command is marked unsupported, so the frame is unrepresentable, the
+/// platform refuses it before its renderer, and it paints through the
+/// exact pixel renderer. `commands` is the buffer `packet.commands` views.
+pub fn restrictPacketToPresenter(services: platform.PlatformServices, commands: []canvas.CanvasGpuCommand, packet: *canvas.CanvasGpuPacket) void {
+    if (services.gpu_surface_packet_paths) return;
+    for (commands[0..packet.commands.len]) |*command| {
+        if (command.kind != .fill_path and command.kind != .stroke_path) continue;
+        command.kind = .unsupported;
+        packet.unsupported_command_count += 1;
+    }
+}
+
+test "a presenter without paths gets path commands counted unsupported" {
+    var commands = [_]canvas.CanvasGpuCommand{
+        .{ .command_index = 0, .kind = .fill_rect_solid },
+        .{ .command_index = 1, .kind = .stroke_path },
+        .{ .command_index = 2, .kind = .fill_path },
+    };
+    var packet: canvas.CanvasGpuPacket = .{ .commands = &commands };
+    restrictPacketToPresenter(.{}, &commands, &packet);
+    try std.testing.expect(packet.fullyRepresentable());
+    restrictPacketToPresenter(.{ .gpu_surface_packet_paths = false }, &commands, &packet);
+    try std.testing.expect(!packet.fullyRepresentable());
+    try std.testing.expectEqual(@as(usize, 2), packet.unsupported_command_count);
+    try std.testing.expect(commands[0].supported());
+}
+
 fn firstUnsupportedCommandName(canvas_frame: canvas.CanvasFrame, packet: canvas.CanvasGpuPacket) []const u8 {
     for (packet.commands) |command| {
         if (command.supported()) continue;

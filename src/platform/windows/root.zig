@@ -102,6 +102,9 @@ const WindowsEvent = extern struct {
     /// documented scale (log-spaced 50 Hz..16 kHz buckets, linear-in-dB
     /// from -60 dBFS at 0 to full scale at 255). Zeros elsewhere.
     audio_bands: [platform_mod.audio_spectrum_band_count]u8,
+    /// `window_frame`/`resize`: the user zoom folded into `scale`
+    /// (1 unless the window scales content on resize).
+    content_zoom: f64,
 };
 
 const WindowsCallback = *const fn (context: ?*anyopaque, event: *const WindowsEvent) callconv(.c) void;
@@ -113,7 +116,7 @@ const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
 
-extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, hidden: c_int, min_width: f64, min_height: f64) ?*WindowsHost;
+extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, hidden: c_int, min_width: f64, min_height: f64, content_zoom: f64, min_content_zoom: f64, max_content_zoom: f64) ?*WindowsHost;
 extern fn native_sdk_windows_destroy(host: *WindowsHost) void;
 extern fn native_sdk_windows_run(host: *WindowsHost, callback: WindowsCallback, context: ?*anyopaque) void;
 extern fn native_sdk_windows_stop(host: *WindowsHost) void;
@@ -130,7 +133,7 @@ extern fn native_sdk_windows_emit_window_event(host: *WindowsHost, window_id: u6
 extern fn native_sdk_windows_set_security_policy(host: *WindowsHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
 extern fn native_sdk_windows_set_menus(host: *WindowsHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
 extern fn native_sdk_windows_set_shortcuts(host: *WindowsHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
-extern fn native_sdk_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, hidden: c_int, min_width: f64, min_height: f64) c_int;
+extern fn native_sdk_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, transparent: c_int, window_layer: c_int, click_through: c_int, no_activate: c_int, hidden: c_int, min_width: f64, min_height: f64, content_zoom: f64, min_content_zoom: f64, max_content_zoom: f64) c_int;
 extern fn native_sdk_windows_start_window_drag(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_set_window_drag_regions(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, rects: [*]const f64, exclusions: [*]const c_int, count: usize) c_int;
 extern fn native_sdk_windows_window_chrome(host: *WindowsHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
@@ -244,7 +247,7 @@ pub const WindowsPlatform = struct {
         const window_options = app_info.resolvedMainWindow();
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
-        const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), if (window_options.transparent) 1 else 0, windowLayerInt(window_options.layer), if (window_options.click_through) 1 else 0, if (window_options.no_activate) 1 else 0, if (window_options.show == .hidden) 1 else 0, minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height)) orelse return error.CreateFailed;
+        const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), if (window_options.transparent) 1 else 0, windowLayerInt(window_options.layer), if (window_options.click_through) 1 else 0, if (window_options.no_activate) 1 else 0, if (window_options.show == .hidden) 1 else 0, minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height), contentZoomArg(window_options.content_zoom), platform_mod.min_content_zoom, platform_mod.max_content_zoom) orelse return error.CreateFailed;
         return .{
             .host = host,
             .web_engine = web_engine,
@@ -297,6 +300,7 @@ pub const WindowsPlatform = struct {
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
                 .present_gpu_surface_packet_binary_fn = presentGpuSurfacePacketBinary,
                 .gpu_surface_hybrid_layers = true,
+                .gpu_surface_packet_paths = false,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,
@@ -466,6 +470,7 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
                 .title = window.resolvedTitle(windows.app_info.app_name),
                 .frame = geometry.RectF.init(@floatCast(event.x), @floatCast(event.y), @floatCast(event.width), @floatCast(event.height)),
                 .scale_factor = @floatCast(event.scale),
+                .content_zoom = @floatCast(event.content_zoom),
                 .open = event.open != 0,
                 .focused = event.focused != 0,
             } });
@@ -744,11 +749,29 @@ fn minSizeFloor(value: f32) f64 {
     return if (std.math.isFinite(value) and value > 0) value else 0;
 }
 
+/// The host's content-zoom argument: 0 keeps a resize reflowing, a
+/// positive zoom makes it scale content from there. An out-of-range
+/// zoom opens at the nearest bound rather than at a size the user could
+/// never have resized to.
+fn contentZoomArg(zoom: ?f32) f64 {
+    const value = zoom orelse return 0;
+    if (!std.math.isFinite(value)) return 1;
+    return std.math.clamp(value, platform_mod.min_content_zoom, platform_mod.max_content_zoom);
+}
+
+test "content zoom argument encodes reflow and clamps scale" {
+    try std.testing.expectEqual(@as(f64, 0), contentZoomArg(null));
+    try std.testing.expectEqual(@as(f64, 1.5), contentZoomArg(1.5));
+    try std.testing.expectEqual(@as(f64, platform_mod.max_content_zoom), contentZoomArg(100));
+    try std.testing.expectEqual(@as(f64, platform_mod.min_content_zoom), contentZoomArg(0.01));
+    try std.testing.expectEqual(@as(f64, 1), contentZoomArg(std.math.nan(f32)));
+}
+
 fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyerror!platform_mod.WindowInfo {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (native_sdk_windows_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), if (options.transparent) 1 else 0, windowLayerInt(options.layer), if (options.click_through) 1 else 0, if (options.no_activate) 1 else 0, if (options.show == .hidden) 1 else 0, minSizeFloor(options.min_width), minSizeFloor(options.min_height)) == 0) return error.CreateFailed;
+    if (native_sdk_windows_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), if (options.transparent) 1 else 0, windowLayerInt(options.layer), if (options.click_through) 1 else 0, if (options.no_activate) 1 else 0, if (options.show == .hidden) 1 else 0, minSizeFloor(options.min_width), minSizeFloor(options.min_height), contentZoomArg(options.content_zoom), platform_mod.min_content_zoom, platform_mod.max_content_zoom) == 0) return error.CreateFailed;
     return .{
         .id = options.id,
         .label = options.label,

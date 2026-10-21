@@ -161,6 +161,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             var info = self.windows[index].info;
             info.frame = state.frame;
             info.scale_factor = state.scale_factor;
+            info.content_zoom = state.content_zoom;
             info.open = state.open;
             info.focused = state.focused;
             self.windows[index].info = info;

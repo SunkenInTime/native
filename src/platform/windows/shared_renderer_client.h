@@ -53,3 +53,9 @@ bool nativeSdkSharedRendererClientPresent(
     const uint8_t *retained_rgba8,
     size_t retained_rgba8_len);
 bool nativeSdkSharedRendererClientConnected(const NativeSdkSharedRendererClient *client);
+/// Take the composition surface off the window while frames paint through
+/// the software path, keeping the connection: the child HWND's visual is
+/// composed above the layered window, so a still-attached surface would
+/// show its last GPU frame over every pixel frame. The next successful GPU
+/// present attaches it again.
+void nativeSdkSharedRendererClientDetachVisual(NativeSdkSharedRendererClient *client);

@@ -59,6 +59,11 @@ pub const RunOptions = struct {
     /// Replaces the compiled show mode of the startup window; `.hidden`
     /// keeps it off screen for the app's life.
     startup_window_show: ?native_sdk.WindowShowMode = null,
+    /// Replaces the compiled resizable flag of the startup window.
+    startup_resizable: ?bool = null,
+    /// The startup window's `WindowOptions.content_zoom`: null keeps a
+    /// resize reflowing, a value makes it scale content from that zoom.
+    startup_content_zoom: ?f32 = null,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     js_window_api: bool = false,
@@ -125,6 +130,12 @@ pub const RunOptions = struct {
         if (self.startup_window_show) |show| {
             info.main_window.show = show;
         }
+        if (self.startup_resizable) |resizable| {
+            info.main_window.resizable = resizable;
+            if (windows.len > 0) buffers.restored_windows[0].resizable = resizable;
+        }
+        info.main_window.content_zoom = self.startup_content_zoom;
+        if (windows.len > 0) buffers.restored_windows[0].content_zoom = self.startup_content_zoom;
         info.main_window.primary_display_anchor = self.primary_display_anchor;
         if (windows.len > 0) buffers.restored_windows[0].primary_display_anchor = self.primary_display_anchor;
         return info;
@@ -143,15 +154,20 @@ test "runtime startup window policy overrides the compiled manifest" {
     }).appInfo(&buffers);
     try std.testing.expectEqual(native_sdk.WindowLayer.bottom, compiled.main_window.layer);
     try std.testing.expect(compiled.main_window.click_through);
+    try std.testing.expectEqual(@as(?f32, null), compiled.main_window.content_zoom);
 
     const overridden = (RunOptions{
         .app_name = "runner-test",
         .bundle_id = "dev.native_sdk.runner-test",
         .startup_window_layer = .topmost,
         .startup_click_through = false,
+        .startup_resizable = true,
+        .startup_content_zoom = 1.5,
     }).appInfo(&buffers);
     try std.testing.expectEqual(native_sdk.WindowLayer.topmost, overridden.main_window.layer);
     try std.testing.expect(!overridden.main_window.click_through);
+    try std.testing.expect(overridden.main_window.resizable);
+    try std.testing.expectEqual(@as(?f32, 1.5), overridden.main_window.content_zoom);
 }
 
 const ShortcutStorage = struct {
