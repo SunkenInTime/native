@@ -316,6 +316,9 @@ struct WindowsEvent {
      * from -60 dBFS at 0 to full scale at 255). Zeros on every other
      * event kind — every emit site value-initializes the struct. */
     uint8_t audio_bands[32];
+    /* kWindowFrame/kResize: the user zoom folded into `scale` (1 unless
+     * the window scales content on resize). */
+    double content_zoom;
 };
 
 struct WindowsOpenDialogOpts {
@@ -396,6 +399,22 @@ struct Window {
      * the natural minimum (WM_GETMINMAXINFO applies the floor). */
     double min_width = 0;
     double min_height = 0;
+    /* Resize semantics (`WindowOptions.content_zoom`). A content-scaling
+     * window keeps `width`/`height` at the content's LOGICAL size for its
+     * whole life; a user resize changes `content_zoom` instead, which
+     * multiplies into the device scale of everything inside the window
+     * (windowContentScale), aspect locked and clamped to the zoom range. */
+    bool scales_content = false;
+    double content_zoom = 1;
+    double min_content_zoom = 1;
+    double max_content_zoom = 1;
+    /* The edge (WMSZ_*) of a resize gesture in flight, 0 when none, with
+     * the cursor and window rect it started from (screen space). A
+     * transparent popup has no WS_THICKFRAME, so the system sizing loop
+     * never starts for it; the host runs this one instead. */
+    int sizing_edge = 0;
+    POINT sizing_cursor = {};
+    RECT sizing_frame = {};
     /* Last DWMWA_CAPTION_COLOR pushed for the hidden styles (sampled
      * from the presented header pixels so the DWM caption material
      * behind the button cluster matches the app's header). */
@@ -1353,6 +1372,15 @@ static std::string extractHtmlClipboardFragment(const std::string &payload) {
 
 static UINT dpiForWindow(HWND hwnd);
 
+/* Device scale for everything INSIDE a window: its DPI over the 96-dpi
+ * baseline, times the user zoom when its resize scales content. Logical
+ * content coordinates (views, input, drag regions, gpu surfaces) divide
+ * by this; the window's screen origin stays in plain DPI units. */
+static double windowContentScale(const Window &window) {
+    const double dpi_scale = window.hwnd ? (double)dpiForWindow(window.hwnd) / 96.0 : 1.0;
+    return window.scales_content ? weaverContentScale(dpi_scale, window.content_zoom) : dpi_scale;
+}
+
 static void emit(Host *host, const Window &window, EventKind kind) {
     if (!host || !host->callback) return;
     WindowsEvent event = {};
@@ -1361,11 +1389,14 @@ static void emit(Host *host, const Window &window, EventKind kind) {
     /* Window geometry crosses the runtime boundary in LOGICAL points:
      * the client rect is physical pixels, so divide by the window's
      * device scale. In a DPI-unaware process the reported DPI is 96 and
-     * the two units coincide, so this stays the identity there. */
-    const double scale = window.hwnd ? (double)dpiForWindow(window.hwnd) / 96.0 : 1.0;
+     * the two units coincide, so this stays the identity there. A
+     * content-scaling window reports its fixed logical size and a scale
+     * that carries the zoom, plus the zoom itself so the runtime can
+     * recover the plain device scale. */
     event.width = window.width;
     event.height = window.height;
-    event.scale = scale;
+    event.scale = windowContentScale(window);
+    event.content_zoom = window.scales_content ? window.content_zoom : 1.0;
     event.x = window.x;
     event.y = window.y;
     event.open = window.hwnd != nullptr;
@@ -1775,7 +1806,7 @@ static double nativeViewFrameScale(Host *host, const NativeView &view) {
     if (!host) return 1.0;
     auto window = host->windows.find(view.window_id);
     if (window == host->windows.end() || !window->second.hwnd) return 1.0;
-    return (double)dpiForWindow(window->second.hwnd) / 96.0;
+    return windowContentScale(window->second);
 }
 
 /* Absolute LOGICAL origin of a view: its own frame origin plus every
@@ -2052,13 +2083,6 @@ static uint64_t gpuTimestampNs() {
     return seconds * 1000000000ull + remainder * 1000000000ull / (uint64_t)frequency.QuadPart;
 }
 
-/* Device scale for a gpu_surface child: the shared per-window DPI
- * resolution (dpiForWindow) over the 96-dpi baseline. In a DPI-unaware
- * process the resolved DPI is 96, so logical size == client pixels,
- * matching how the rest of this host treats coordinates. */
-static double gpuSurfaceScale(HWND hwnd) {
-    return hwnd ? (double)dpiForWindow(hwnd) / 96.0 : 1.0;
-}
 
 static NativeView *gpuSurfaceViewForHwnd(Host *host, HWND hwnd) {
     if (!host || !hwnd) return nullptr;
@@ -2250,6 +2274,131 @@ static void syncWindowOrigin(Window &window) {
     window.y = (double)frame.top / scale;
 }
 
+/* The resize band of a resizable window that has no system frame (a
+ * transparent popup): the sizing-frame thickness at the window's DPI,
+ * kept under a quarter of the short side so a small window still has a
+ * middle to drag by. Returns the HT* sizing code for a client point, or
+ * HTCLIENT outside the band. */
+static LRESULT frameBandHit(HWND hwnd, POINT point) {
+    RECT client = {};
+    GetClientRect(hwnd, &client);
+    const UINT dpi = dpiForWindow(hwnd);
+    LONG band = systemMetricForDpi(SM_CXSIZEFRAME, dpi) + systemMetricForDpi(SM_CXPADDEDBORDER, dpi);
+    band = std::min<LONG>(band, std::min(client.right, client.bottom) / 4);
+    if (band <= 0) return HTCLIENT;
+    const bool left = point.x < band;
+    const bool right = point.x >= client.right - band;
+    const bool top = point.y < band;
+    const bool bottom = point.y >= client.bottom - band;
+    if (top && left) return HTTOPLEFT;
+    if (top && right) return HTTOPRIGHT;
+    if (bottom && left) return HTBOTTOMLEFT;
+    if (bottom && right) return HTBOTTOMRIGHT;
+    if (left) return HTLEFT;
+    if (right) return HTRIGHT;
+    if (top) return HTTOP;
+    if (bottom) return HTBOTTOM;
+    return HTCLIENT;
+}
+
+/* The non-client frame a window's style adds around its client area
+ * (none for a transparent popup). */
+static SIZE windowChromeSize(HWND hwnd) {
+    RECT outer = {};
+    RECT client = {};
+    GetWindowRect(hwnd, &outer);
+    GetClientRect(hwnd, &client);
+    return { (outer.right - outer.left) - client.right, (outer.bottom - outer.top) - client.bottom };
+}
+
+/* A content-scaling window's geometry in the terms dpi_geometry.h
+ * resizes it by (ADR 0023). */
+static WeaverContentZoomFrame contentZoomFrame(const Window &window) {
+    const SIZE chrome = windowChromeSize(window.hwnd);
+    return {
+        window.width, window.height, (double)dpiForWindow(window.hwnd) / 96.0,
+        chrome.cx, chrome.cy, window.min_content_zoom, window.max_content_zoom,
+    };
+}
+
+/* The outer (window rect) size of a content-scaling window at `zoom`. */
+static SIZE contentZoomOuterSize(const Window &window, double zoom) {
+    const WeaverContentZoomFrame frame = contentZoomFrame(window);
+    return { weaverContentZoomOuterWidth(frame, zoom), weaverContentZoomOuterHeight(frame, zoom) };
+}
+
+/* A sizing rect (WM_SIZING, or the host's own gesture) shaped to one
+ * zoom: aspect locked, clamped, the edges opposite the grabbed ones kept. */
+static void constrainContentZoomSizing(const Window &window, WPARAM edge, RECT *rect) {
+    const WeaverPhysicalRectI shaped = weaverConstrainContentZoomSizing(contentZoomFrame(window),
+        { rect->left, rect->top, rect->right, rect->bottom }, (int)edge, window.content_zoom);
+    *rect = { shaped.left, shaped.top, shaped.right, shaped.bottom };
+}
+
+/* Every other path to a new size (Windows snapping, SetWindowPos from
+ * tools) gets the same rules. */
+static void constrainContentZoomPosition(const Window &window, WINDOWPOS &position) {
+    int32_t width = position.cx;
+    int32_t height = position.cy;
+    if (!weaverConstrainContentZoomSize(contentZoomFrame(window), window.content_zoom, &width, &height)) return;
+    position.cx = width;
+    position.cy = height;
+}
+
+/* Start a resize gesture on a content-scaling window that has no
+ * system frame (with WS_THICKFRAME the system loop runs, shaped by
+ * WM_SIZING). The press already carries the sizing code; capture keeps
+ * every move on this window until the button comes up. */
+static bool beginContentZoomSizing(Window &window, WPARAM hit) {
+    if (!window.scales_content || !window.resizable || !window.hwnd) return false;
+    if (GetWindowLongPtrW(window.hwnd, GWL_STYLE) & WS_THICKFRAME) return false;
+    window.sizing_edge = (int)(hit - HTLEFT) + WMSZ_LEFT;
+    GetCursorPos(&window.sizing_cursor);
+    GetWindowRect(window.hwnd, &window.sizing_frame);
+    SetCapture(window.hwnd);
+    return true;
+}
+
+/* One step of the gesture: move the grabbed edges by the cursor's travel
+ * from the press, shape the rect exactly as the system loop's WM_SIZING
+ * would, and place the window once. Moves the system coalesced arrive as
+ * one, so this runs at most once per delivered mouse move. */
+static void continueContentZoomSizing(Window &window) {
+    POINT cursor = {};
+    GetCursorPos(&cursor);
+    const LONG dx = cursor.x - window.sizing_cursor.x;
+    const LONG dy = cursor.y - window.sizing_cursor.y;
+    const RECT &start = window.sizing_frame;
+    const WeaverPhysicalRectI dragged = weaverDraggedSizingRect(
+        { start.left, start.top, start.right, start.bottom }, window.sizing_edge, dx, dy);
+    RECT rect = { dragged.left, dragged.top, dragged.right, dragged.bottom };
+    constrainContentZoomSizing(window, (WPARAM)window.sizing_edge, &rect);
+    RECT current = {};
+    GetWindowRect(window.hwnd, &current);
+    if (EqualRect(&rect, &current)) return;
+    POINT origin = { rect.left, rect.top };
+    /* A desktop-layer window is a child of the wallpaper WorkerW. */
+    if (window.desktop_parent) ScreenToClient(window.desktop_parent, &origin);
+    SetWindowPos(window.hwnd, nullptr, origin.x, origin.y, rect.right - rect.left,
+        rect.bottom - rect.top, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+static LPCTSTR sizingCursor(WORD hit) {
+    switch (hit) {
+        case HTLEFT:
+        case HTRIGHT:
+            return IDC_SIZEWE;
+        case HTTOP:
+        case HTBOTTOM:
+            return IDC_SIZENS;
+        case HTTOPLEFT:
+        case HTBOTTOMRIGHT:
+            return IDC_SIZENWSE;
+        default:
+            return IDC_SIZENESW;
+    }
+}
+
 /* System DPI for sizing a window that does not exist yet (creation
  * scales the requested logical content size to physical pixels before
  * the first monitor is known; WM_DPICHANGED re-derives the frame when
@@ -2400,13 +2549,24 @@ static bool windowDragRegionHit(Host *host, const Window &window, POINT client) 
         if (view.window_id != window.id || view.kind != kViewGpuSurface || !view.hwnd) continue;
         if (view.drag_regions.empty()) continue;
         const POINT origin = childOriginInParentClient(view.hwnd, window.hwnd);
-        const double scale = gpuSurfaceScale(view.hwnd);
+        const double scale = windowContentScale(window);
         if (scale <= 0) continue;
         const double local_x = (double)(client.x - origin.x) / scale;
         const double local_y = (double)(client.y - origin.y) / scale;
         if (pointInHiddenDragRegion(view, local_x, local_y)) return true;
     }
     return false;
+}
+
+/* The sizing code (HTLEFT..HTBOTTOMRIGHT) for a client point of a
+ * content-scaling window, or HTCLIENT: the edge band of its draggable
+ * surface. Press-claiming widgets are outside every drag hit, so a
+ * button on the edge keeps its press. */
+static LRESULT contentResizeHit(Host *host, const Window &window, POINT client) {
+    if (!window.scales_content || !window.resizable || !window.hwnd) return HTCLIENT;
+    const LRESULT band = frameBandHit(window.hwnd, client);
+    if (band == HTCLIENT || !windowDragRegionHit(host, window, client)) return HTCLIENT;
+    return band;
 }
 
 /* Cut the caption-button cluster out of the presented canvas: fill it
@@ -3183,7 +3343,7 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
     Host *host = reinterpret_cast<Host *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     NativeView *view = gpuSurfaceViewForHwnd(host, hwnd);
     if (!view) return DefWindowProcW(hwnd, message, wparam, lparam);
-    const double scale = gpuSurfaceScale(hwnd);
+    const double scale = nativeViewFrameScale(host, *view);
     switch (message) {
         case WM_TIMER:
             if (wparam == kGpuFrameTimerId) {
@@ -3237,6 +3397,15 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
         case WM_NCHITTEST: {
             auto owner = host->windows.find(view->window_id);
             if (owner != host->windows.end() && owner->second.click_through) return HTTRANSPARENT;
+            /* The canvas covers the whole client area, so a content-scaling
+             * window's resize band must be handed to the parent here: its
+             * WM_NCHITTEST answers the sizing code, which buys the resize
+             * cursor and the press that starts the resize. */
+            if (owner != host->windows.end() && owner->second.scales_content && owner->second.hwnd) {
+                POINT band_point = { (int)(short)LOWORD(lparam), (int)(short)HIWORD(lparam) };
+                ScreenToClient(owner->second.hwnd, &band_point);
+                if (contentResizeHit(host, owner->second, band_point) != HTCLIENT) return HTTRANSPARENT;
+            }
             /* This child covers the parent's whole client area, so the
              * parent's WM_NCHITTEST — where the hidden-titlebar caption
              * behavior lives — is only ever consulted where this child
@@ -5323,8 +5492,9 @@ static void applyWindowDpiTransition(Host *host, Window &window,
         const DWORD style = (DWORD)GetWindowLongPtrW(window.hwnd, GWL_STYLE);
         const DWORD ex_style = (DWORD)GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE);
         const bool has_menu = GetMenu(window.hwnd) != nullptr;
-        const double content_width = window.width * scale;
-        const double content_height = window.height * scale;
+        const double zoom = window.scales_content ? window.content_zoom : 1.0;
+        const double content_width = window.width * scale * zoom;
+        const double content_height = window.height * scale * zoom;
         RECT frame = { 0, 0, physicalContentExtent(content_width),
             physicalContentExtent(content_height) };
         adjustWindowRectForDpi(&frame, style, has_menu ? TRUE : FALSE,
@@ -5387,6 +5557,10 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             position->hwndInsertAfter = HWND_TOPMOST;
             position->flags &= ~SWP_NOZORDER;
             if (policy_window->no_activate) position->flags |= SWP_NOACTIVATE;
+        }
+        if (position && policy_window->scales_content && !policy_window->dpi_transition &&
+            !(position->flags & SWP_NOSIZE)) {
+            constrainContentZoomPosition(*policy_window, *position);
         }
     }
     if (policy_window && policy_window->click_through && message == WM_NCHITTEST) return HTTRANSPARENT;
@@ -5501,6 +5675,10 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (def_hit != HTCLIENT) return def_hit;
             POINT point = { (int)(short)LOWORD(lparam), (int)(short)HIWORD(lparam) };
             ScreenToClient(hwnd, &point);
+            /* A content-scaling popup has no system frame to grab, so the
+             * draggable surface's own edge band answers the sizing codes. */
+            const LRESULT resize = contentResizeHit(host, *chromeless_window, point);
+            if (resize != HTCLIENT) return resize;
             if (windowDragRegionHit(host, *chromeless_window, point)) return HTCAPTION;
             return HTCLIENT;
         }
@@ -5617,7 +5795,17 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                             RECT logical_client = {};
                             GetClientRect(hwnd, &logical_client);
                             const double scale = (double)dpiForWindow(hwnd) / 96.0;
-                            if (scale > 0) {
+                            if (scale > 0 && entry.second.scales_content) {
+                                /* The logical size is fixed; the resize
+                                 * is the zoom. The surface keeps its
+                                 * logical frame, so re-place it here:
+                                 * the runtime sees no frame change. */
+                                const double zoom = (double)(logical_client.right - logical_client.left) / (entry.second.width * scale);
+                                if (std::isfinite(zoom) && zoom > 0) entry.second.content_zoom = zoom;
+                                for (auto &view_entry : host->native_views) {
+                                    if (view_entry.second.window_id == entry.first) applyNativeViewFrame(host, view_entry.second);
+                                }
+                            } else if (scale > 0) {
                                 entry.second.width = (double)(logical_client.right - logical_client.left) / scale;
                                 entry.second.height = (double)(logical_client.bottom - logical_client.top) / scale;
                             }
@@ -5635,6 +5823,13 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                         }
 #endif
                         emit(host, entry.second, kResize);
+                        /* A content-scaling window's resize is a zoom
+                         * change, which only the frame report carries
+                         * (its logical size never moves). */
+                        if (entry.second.scales_content && wparam != SIZE_MINIMIZED) {
+                            syncWindowOrigin(entry.second);
+                            emit(host, entry.second, kWindowFrame);
+                        }
                     }
                 }
                 /* Restore from minimize returns full cadence without
@@ -5690,11 +5885,73 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
             if (host && handleAppTimerMessage(host, wparam)) return 0;
             if (host && handleAudioTimerMessage(host, wparam)) return 0;
             return 0;
+        case WM_NCLBUTTONDOWN:
+            if (host && wparam >= HTLEFT && wparam <= HTBOTTOMRIGHT) {
+                Window *window = mutableWindowForHwnd(host, hwnd);
+                if (window && beginContentZoomSizing(*window, wparam)) return 0;
+            }
+            break;
+        case WM_MOUSEMOVE:
+            if (host) {
+                Window *window = mutableWindowForHwnd(host, hwnd);
+                if (window && window->sizing_edge) {
+                    continueContentZoomSizing(*window);
+                    return 0;
+                }
+            }
+            break;
+        case WM_LBUTTONUP:
+            if (host) {
+                const Window *window = windowForHwnd(host, hwnd);
+                if (window && window->sizing_edge) {
+                    ReleaseCapture();
+                    return 0;
+                }
+            }
+            break;
+        case WM_CAPTURECHANGED:
+            if (host) {
+                Window *window = mutableWindowForHwnd(host, hwnd);
+                if (window && window->sizing_edge) {
+                    window->sizing_edge = 0;
+                    return 0;
+                }
+            }
+            break;
+        case WM_SETCURSOR:
+            if (host && LOWORD(lparam) >= HTLEFT && LOWORD(lparam) <= HTBOTTOMRIGHT) {
+                const Window *window = windowForHwnd(host, hwnd);
+                if (window && window->scales_content) {
+                    SetCursor(LoadCursor(nullptr, sizingCursor(LOWORD(lparam))));
+                    return TRUE;
+                }
+            }
+            break;
+        case WM_SIZING:
+            if (host) {
+                const Window *window = windowForHwnd(host, hwnd);
+                if (window && window->scales_content) {
+                    constrainContentZoomSizing(*window, wparam, reinterpret_cast<RECT *>(lparam));
+                    return TRUE;
+                }
+            }
+            break;
         case WM_GETMINMAXINFO:
             if (host) {
                 for (auto &entry : host->windows) {
                     Window &window = entry.second;
                     if (window.hwnd != hwnd) continue;
+                    if (window.scales_content) {
+                        /* The zoom range is the track range; the
+                         * system minimum track size would otherwise
+                         * stop a small widget well above its min zoom. */
+                        MINMAXINFO *info = reinterpret_cast<MINMAXINFO *>(lparam);
+                        const SIZE smallest = contentZoomOuterSize(window, window.min_content_zoom);
+                        const SIZE largest = contentZoomOuterSize(window, window.max_content_zoom);
+                        info->ptMinTrackSize = { smallest.cx, smallest.cy };
+                        info->ptMaxTrackSize = { largest.cx, largest.cy };
+                        return 0;
+                    }
                     if (window.min_width <= 0 && window.min_height <= 0) break;
                     /* The declared floor is a CONTENT size in LOGICAL
                      * points; scale to physical pixels at this window's
@@ -5811,8 +6068,9 @@ static bool createNativeWindow(Host *host, Window &window) {
     const bool has_menu = !host->menus.empty();
     const UINT dpi = dpiForInitialWindowFrame(window.x, window.y);
     const double scale = (double)dpi / 96.0;
-    const double content_width = window.width * scale;
-    const double content_height = window.height * scale;
+    const double zoom = window.scales_content ? window.content_zoom : 1.0;
+    const double content_width = window.width * scale * zoom;
+    const double content_height = window.height * scale * zoom;
     RECT frame = { 0, 0, physicalContentExtent(content_width), physicalContentExtent(content_height) };
     adjustWindowRectForDpi(&frame, style, has_menu ? TRUE : FALSE, ex_style, dpi);
     LONG outer_width = frame.right - frame.left;
@@ -5871,7 +6129,7 @@ size_t native_sdk_windows_clipboard_read_data(Host *host, const char *mime_type,
 int native_sdk_windows_clipboard_write_data(Host *host, const char *mime_type, size_t mime_type_len, const char *bytes, size_t bytes_len);
 void native_sdk_windows_cancel_timer(Host *host, uint64_t timer_id);
 
-Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int hidden, double min_width, double min_height) {
+Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int hidden, double min_width, double min_height, double content_zoom, double min_content_zoom, double max_content_zoom) {
     (void)restore_frame;
     INITCOMMONCONTROLSEX controls = {};
     controls.dwSize = sizeof(controls);
@@ -5909,6 +6167,11 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
     window.hidden = hidden != 0;
     window.min_width = min_width;
     window.min_height = min_height;
+    /* content_zoom 0: a resize reflows; positive: it scales content. */
+    window.scales_content = content_zoom > 0;
+    window.content_zoom = window.scales_content ? content_zoom : 1.0;
+    window.min_content_zoom = min_content_zoom;
+    window.max_content_zoom = max_content_zoom;
     host->windows[window.id] = window;
     return host;
 }
@@ -6214,7 +6477,7 @@ void native_sdk_windows_set_shortcuts(Host *host, const char *const *ids, const 
     }
 }
 
-int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int hidden, double min_width, double min_height) {
+int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int transparent, int window_layer, int click_through, int no_activate, int hidden, double min_width, double min_height, double content_zoom, double min_content_zoom, double max_content_zoom) {
     (void)restore_frame;
     if (!host || host->windows.find(window_id) != host->windows.end()) return 0;
     Window window;
@@ -6234,6 +6497,11 @@ int native_sdk_windows_create_window(Host *host, uint64_t window_id, const char 
     window.hidden = hidden != 0;
     window.min_width = min_width;
     window.min_height = min_height;
+    /* content_zoom 0: a resize reflows; positive: it scales content. */
+    window.scales_content = content_zoom > 0;
+    window.content_zoom = window.scales_content ? content_zoom : 1.0;
+    window.min_content_zoom = min_content_zoom;
+    window.max_content_zoom = max_content_zoom;
     /* Register BEFORE creating: createNativeWindow's post-create frame
      * pass (hidden titlebar styles) resolves the window through the map
      * by HWND, so the stored entry must be the one it mutates. */
@@ -6364,7 +6632,7 @@ int native_sdk_windows_window_chrome(Host *host, uint64_t window_id, double *top
     if (found == host->windows.end() || !found->second.hwnd) return 0;
     Window &window = found->second;
     if (!windowUsesHiddenTitlebar(window) || IsIconic(window.hwnd)) return 1;
-    const double scale = gpuSurfaceScale(window.hwnd);
+    const double scale = windowContentScale(window);
     if (scale <= 0) return 1;
     RECT cluster = {};
     if (captionButtonsClientRect(window.hwnd, &cluster)) {

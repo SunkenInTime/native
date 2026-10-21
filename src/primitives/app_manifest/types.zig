@@ -477,6 +477,10 @@ pub const ShellWindow = struct {
     /// runtime-created windows apply their own declaration at create.
     min_width: f32 = 0,
     min_height: f32 = 0,
+    /// Null: a user resize reflows the content. A value: a resize keeps
+    /// the aspect ratio and scales the content, starting at this zoom
+    /// (platform `WindowOptions.content_zoom`). Applied at create.
+    content_zoom: ?f32 = null,
     views: []const ShellView = &.{},
 };
 

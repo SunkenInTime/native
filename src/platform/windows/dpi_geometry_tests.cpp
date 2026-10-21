@@ -218,5 +218,87 @@ extern "C" int native_sdk_dpi_geometry_tests() {
     frame.source_texture_height_px = parity_height;
     expect(weaverRendererFrameValid(frame));
 
+    // Content-scaling resize (ADR 0023): a 300x290 widget, popup (no frame).
+    const WeaverContentZoomFrame widget = { 300, 290, 1.0, 0, 0, 0.5, 4.0 };
+    const WeaverPhysicalRectI start = { 500, 400, 800, 690 };
+    // Dragging the right edge grows both axes and keeps the left/top put.
+    expectRect(weaverConstrainContentZoomSizing(widget,
+        weaverDraggedSizingRect(start, kWeaverSizeRight, 150, 0), kWeaverSizeRight, 1.0),
+        500, 400, 950, 835);
+    // Dragging the left edge keeps the right edge put.
+    expectRect(weaverConstrainContentZoomSizing(widget,
+        weaverDraggedSizingRect(start, kWeaverSizeLeft, -150, 0), kWeaverSizeLeft, 1.0),
+        350, 400, 800, 835);
+    // Dragging the top edge keeps the bottom edge put.
+    expectRect(weaverConstrainContentZoomSizing(widget,
+        weaverDraggedSizingRect(start, kWeaverSizeTop, 0, 145), kWeaverSizeTop, 1.0),
+        500, 545, 650, 690);
+    // A corner takes the projection onto the aspect diagonal: (330, 580)
+    // against 300x290 is zoom 1.5348.
+    expectRect(weaverConstrainContentZoomSizing(widget,
+        weaverDraggedSizingRect(start, kWeaverSizeBottomRight, 30, 290), kWeaverSizeBottomRight, 1.0),
+        500, 400, 960, 845);
+    // A diagonal drag off the aspect never steps the zoom backwards: each
+    // step feeds the previous step's zoom back in, as the live gesture does.
+    {
+        double zoom = 1.0;
+        int32_t last_width = 300;
+        bool monotonic = true;
+        for (int32_t step = 1; step <= 60; ++step) {
+            const WeaverPhysicalRectI shaped = weaverConstrainContentZoomSizing(widget,
+                weaverDraggedSizingRect(start, kWeaverSizeBottomRight, step * 3, step),
+                kWeaverSizeBottomRight, zoom);
+            const int32_t width = shaped.right - shaped.left;
+            if (width < last_width) monotonic = false;
+            last_width = width;
+            zoom = (double)width / 300.0;
+        }
+        expect(monotonic);
+    }
+    // The zoom range clamps a gesture at both ends.
+    expectRect(weaverConstrainContentZoomSizing(widget,
+        weaverDraggedSizingRect(start, kWeaverSizeRight, 5000, 0), kWeaverSizeRight, 1.0),
+        500, 400, 1700, 1560);
+    expectRect(weaverConstrainContentZoomSizing(widget,
+        weaverDraggedSizingRect(start, kWeaverSizeRight, -400, 0), kWeaverSizeRight, 1.0),
+        500, 400, 650, 545);
+    // At 150% DPI the logical size scales first, then the zoom.
+    const WeaverContentZoomFrame scaled = { 300, 290, 1.5, 0, 0, 0.5, 4.0 };
+    expectRect(weaverConstrainContentZoomSizing(scaled,
+        { 0, 0, 900, 0 }, kWeaverSizeRight, 1.0), 0, 0, 900, 870);
+    // A non-client frame is carried around the zoomed client.
+    const WeaverContentZoomFrame framed = { 300, 290, 1.0, 16, 39, 0.5, 4.0 };
+    expect(weaverContentZoomOuterWidth(framed, 2.0) == 616);
+    expect(weaverContentZoomOuterHeight(framed, 2.0) == 619);
+
+    // Other resize paths: a size the gesture already shaped passes
+    // untouched; a wrong aspect or an out-of-range size is corrected.
+    int32_t width = 488;
+    int32_t height = 472;
+    expect(!weaverConstrainContentZoomSize(widget, 1.6, &width, &height));
+    expect(width == 488 && height == 472);
+    width = 600;
+    height = 300;
+    expect(weaverConstrainContentZoomSize(widget, 1.0, &width, &height));
+    expect(width == 460 && height == 445);
+    width = 2400;
+    height = 2320;
+    expect(weaverConstrainContentZoomSize(widget, 1.0, &width, &height));
+    expect(width == 1200 && height == 1160);
+    width = 75;
+    height = 72;
+    expect(weaverConstrainContentZoomSize(widget, 1.0, &width, &height));
+    expect(width == 150 && height == 145);
+
+    // The content scale survives the runtime's f32 round trip unchanged,
+    // so frames drawn at it are never dropped as drawn at another scale.
+    for (const double zoom : { 1.0, 1.087, 1.42, 1.5, 1.6266667, 1.7, 3.99 }) {
+        for (const double dpi_scale : { 1.0, 1.25, 1.5, 1.75, 2.0 }) {
+            const double scale = weaverContentScale(dpi_scale, zoom);
+            expect(static_cast<double>(static_cast<float>(scale)) == scale);
+            expect(std::abs(scale - dpi_scale * zoom) < 1e-6);
+        }
+    }
+
     return failures;
 }
