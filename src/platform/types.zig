@@ -2209,6 +2209,11 @@ pub const PlatformServices = struct {
     /// presence so Metal and other complete packet renderers retain their
     /// normal path.
     gpu_surface_hybrid_layers: bool = false,
+    /// Whether the packet presenter draws fill/stroke paths. Windows' D3D
+    /// renderer fails closed on them (no tessellation, joins or caps), so
+    /// a frame with a path must paint through the pixel renderer instead
+    /// of reaching it.
+    gpu_surface_packet_paths: bool = true,
     /// Binary side-channel for gpu-surface image pixels: create or
     /// replace the host texture for `image.id` out-of-band, so packets
     /// carry only id + fingerprint references. Host-wide (not per view);

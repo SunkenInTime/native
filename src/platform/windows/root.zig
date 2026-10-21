@@ -300,6 +300,7 @@ pub const WindowsPlatform = struct {
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
                 .present_gpu_surface_packet_binary_fn = presentGpuSurfacePacketBinary,
                 .gpu_surface_hybrid_layers = true,
+                .gpu_surface_packet_paths = false,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
                 .navigate_webview_fn = navigateWebView,

@@ -2935,6 +2935,10 @@ static void setGpuSurfaceBackend(Host *host, NativeView &view, int backend) {
     if (owner == host->windows.end()) return;
 
     if (backend == 3) {
+        /* Pixel frames paint the window itself; the canvas child's GPU
+         * visual is composed above it and would keep showing the last GPU
+         * frame over them. */
+        if (view.gpu_presenter) nativeSdkSharedRendererClientDetachVisual(view.gpu_presenter);
         if (!owner->second.transparent) return;
         /* Recreate the window's DWM presentation binding, not merely its
          * style bits. Detaching a dead DComp visual is asynchronous; an

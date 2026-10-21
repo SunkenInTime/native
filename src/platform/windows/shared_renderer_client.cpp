@@ -33,6 +33,9 @@ struct NativeSdkSharedRendererClient {
     uint32_t visual_width_px = 0;
     uint32_t visual_height_px = 0;
     bool connect_attempted = false;
+    /* The visual is off the window (frames paint as pixels) until the next
+     * successful GPU present. */
+    bool visual_detached = false;
     std::string last_failure;
 };
 
@@ -147,6 +150,7 @@ static void disconnectRenderer(NativeSdkSharedRendererClient *client) {
     client->visual_geometry_generation = 0;
     client->visual_width_px = 0;
     client->visual_height_px = 0;
+    client->visual_detached = false;
 }
 
 static bool writeExact(HANDLE file, const void *bytes, size_t length) {
@@ -396,10 +400,16 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
     WeaverRendererReply reply = {};
     if (!writeExact(client->pipe, &frame, sizeof(frame)) ||
         !writeExact(client->pipe, packet, packet_len) ||
-        !readExact(client->pipe, &reply, sizeof(reply)) ||
-        reply.magic != kWeaverRendererMagic ||
-        reply.version != kWeaverRendererVersion ||
+        !readExact(client->pipe, &reply, sizeof(reply))) {
+        logSharedFailure(client, "frame-exchange", logical_width, logical_height, scale, geometry);
+        disconnectRenderer(client);
+        return false;
+    }
+    if (reply.magic != kWeaverRendererMagic || reply.version != kWeaverRendererVersion ||
         reply.status != kWeaverRendererStatusOk) {
+        // The renderer names the bound it refused in its own log
+        // (present-failed); this side records that it was refused.
+        logSharedFailure(client, "renderer-refused", logical_width, logical_height, scale, geometry);
         disconnectRenderer(client);
         return false;
     }
@@ -473,6 +483,16 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
         logDpiGeometry(client, *geometry, logical_width, logical_height, scale,
             extent_changed ? "resized-reused" : "moved-reused");
     }
+    if (client->visual_detached) {
+        if (!client->target || !client->visual ||
+            FAILED(client->target->SetRoot(client->visual.Get())) ||
+            FAILED(client->composition->Commit())) {
+            logSharedFailure(client, "reattach-visual", logical_width, logical_height, scale, geometry);
+            disconnectRenderer(client);
+            return false;
+        }
+        client->visual_detached = false;
+    }
     client->connected = true;
     client->last_failure.clear();
     return true;
@@ -480,4 +500,11 @@ bool nativeSdkSharedRendererClientPresent(NativeSdkSharedRendererClient *client,
 
 bool nativeSdkSharedRendererClientConnected(const NativeSdkSharedRendererClient *client) {
     return client && client->connected;
+}
+
+void nativeSdkSharedRendererClientDetachVisual(NativeSdkSharedRendererClient *client) {
+    if (!client || client->visual_detached || !client->target || !client->composition) return;
+    client->target->SetRoot(nullptr);
+    client->composition->Commit();
+    client->visual_detached = true;
 }
