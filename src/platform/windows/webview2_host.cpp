@@ -2235,6 +2235,21 @@ static int systemMetricForDpi(int index, UINT dpi) {
     return GetSystemMetrics(index);
 }
 
+/* The window's screen origin in LOGICAL points: the inverse of the
+ * create-time placement (physical = logical * the monitor's scale), so a
+ * reported origin opens the window where it was. GetWindowRect is screen
+ * space even for a desktop-layer window parented to the WorkerW; a
+ * minimized window keeps its last real origin. */
+static void syncWindowOrigin(Window &window) {
+    if (!window.hwnd || IsIconic(window.hwnd)) return;
+    RECT frame = {};
+    if (!GetWindowRect(window.hwnd, &frame)) return;
+    const double scale = (double)dpiForWindow(window.hwnd) / 96.0;
+    if (scale <= 0) return;
+    window.x = (double)frame.left / scale;
+    window.y = (double)frame.top / scale;
+}
+
 /* System DPI for sizing a window that does not exist yet (creation
  * scales the requested logical content size to physical pixels before
  * the first monitor is known; WM_DPICHANGED re-derives the frame when
@@ -5645,7 +5660,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
         case WM_MOVE:
             if (host) {
                 for (auto &entry : host->windows) {
-                    if (entry.second.hwnd == hwnd) emit(host, entry.second, kWindowFrame);
+                    if (entry.second.hwnd != hwnd) continue;
+                    syncWindowOrigin(entry.second);
+                    emit(host, entry.second, kWindowFrame);
                 }
             }
             return 0;
